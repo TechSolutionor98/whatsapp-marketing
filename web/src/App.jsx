@@ -74,7 +74,7 @@ function Sidebar({ page, go }) {
           </svg>
         </div>
         <div>
-          <div className="brand-name">Pulse</div>
+          <div className="brand-name">Grab WA Marketing</div>
           <div className="brand-sub">Campaign Studio</div>
         </div>
       </div>
