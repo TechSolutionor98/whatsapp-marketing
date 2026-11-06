@@ -1,0 +1,30 @@
+{
+  "name": "whatsapp-marketing",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted WhatsApp campaign tool (QR-connected, no official API)",
+  "scripts": {
+    "dev": "concurrently -n server,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "node --watch server/index.js",
+    "dev:web": "npm --prefix web run dev",
+    "build": "npm --prefix web install && npm --prefix web run build",
+    "start": "node server/index.js",
+    "seed:admin": "node server/seed-admin.js",
+    "setup": "npm install && npm --prefix web install"
+  },
+  "dependencies": {
+    "baileys": "^6.7.9",
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "mongodb": "^6.12.0",
+    "pino": "^9.6.0",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
