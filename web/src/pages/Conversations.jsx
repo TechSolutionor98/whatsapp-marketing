@@ -68,6 +68,17 @@ export default function Conversations({ go }) {
     } catch {}
   };
 
+  async function renameTab(a) {
+    const name = prompt('Name this number (so you remember which WhatsApp it is)', a.label || '');
+    if (name == null) return;
+    try {
+      await api.put(`/conversations/accounts/${a.id}/label`, { label: name.trim() });
+      loadAccounts();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+
   useEffect(() => {
     (async () => {
       try {
@@ -210,11 +221,12 @@ export default function Conversations({ go }) {
             key={a.id}
             className={`wa-tab ${account === a.id ? 'active' : ''} ${a.connected ? '' : 'off'}`}
             onClick={() => setAccount(a.id)}
-            title={a.phone ? `+${a.phone}` : 'Not linked'}
+            onDoubleClick={() => renameTab(a)}
+            title={`${a.phone ? '+' + a.phone : 'Not linked'} · double-click to rename`}
           >
             <span className={`wa-tab-dot ${a.connected ? 'on' : ''}`} />
             <span className="wa-tab-label">
-              {a.id === 'main' ? 'Main' : a.label || 'Number'}
+              {a.label || (a.id === 'main' ? 'Main number' : 'Number')}
               {a.phone ? ` · +${a.phone}` : ''}
             </span>
           </button>

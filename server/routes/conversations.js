@@ -1,8 +1,8 @@
 import { Router } from 'express';
-import { db, audit, oid, pub, pubList, nowIso, dayKey } from '../db/mongo.js';
+import { db, audit, oid, pub, pubList, nowIso, dayKey, getSetting, setSetting } from '../db/mongo.js';
 import { emit } from '../events.js';
 import { sendText, sendToJid, isConnected, getWaState } from '../whatsapp/client.js';
-import { poolState, sendFromTo, isAccountConnected, startPoolAccount, removePoolAccount } from '../whatsapp/pool.js';
+import { poolState, sendFromTo, isAccountConnected, startPoolAccount, removePoolAccount, setPoolLabel } from '../whatsapp/pool.js';
 
 export const conversations = Router();
 
@@ -19,7 +19,12 @@ function accountMatch(account) {
 conversations.get('/accounts', (_req, res) => {
   const wa = getWaState();
   const accounts = [
-    { id: 'main', label: 'Main number', phone: wa.me?.phone || null, connected: wa.status === 'connected' },
+    {
+      id: 'main',
+      label: getSetting('mainConvLabel', '') || 'Main number',
+      phone: wa.me?.phone || null,
+      connected: wa.status === 'connected',
+    },
   ];
   for (const a of poolState()) {
     if (a.status === 'connected' && a.me?.phone) {
@@ -50,6 +55,20 @@ conversations.get('/accounts/:id/qr', (req, res) => {
   const a = poolState().find((x) => x.id === req.params.id);
   if (!a) return res.status(404).json({ error: 'Not found' });
   res.json({ status: a.status, qr: a.qr || null, me: a.me || null });
+});
+
+// Rename an account tab (works for the main number too).
+conversations.put('/accounts/:id/label', async (req, res) => {
+  const label = String(req.body?.label || '').trim();
+  if (req.params.id === 'main') {
+    await setSetting('mainConvLabel', label);
+  } else {
+    const _id = oid(req.params.id);
+    if (!_id) return res.status(400).json({ error: 'Bad id' });
+    await db.warmupAccounts().updateOne({ _id }, { $set: { label } });
+    setPoolLabel(req.params.id, label);
+  }
+  res.json({ ok: true });
 });
 
 conversations.delete('/accounts/:id', async (req, res) => {

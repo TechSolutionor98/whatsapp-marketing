@@ -160,6 +160,12 @@ export function isAccountConnected(id) {
   return !!(a && a.status === 'connected' && a.sock);
 }
 
+// Update a running account's display label (so poolState reflects it immediately).
+export function setPoolLabel(id, label) {
+  const a = accounts.get(id);
+  if (a) a.label = label;
+}
+
 export async function checkOnWhatsAppVia(fromId, phone) {
   const a = accounts.get(fromId);
   if (!a?.sock || a.status !== 'connected') return { exists: false, reason: 'not_connected' };
