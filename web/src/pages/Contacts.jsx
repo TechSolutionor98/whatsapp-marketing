@@ -15,6 +15,7 @@ export default function Contacts() {
   const [dq, setDq] = useState(''); // debounced search term
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false); // has the first fetch returned yet?
   const [reloadKey, setReloadKey] = useState(0);
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -44,6 +45,7 @@ export default function Contacts() {
       toast(e.message, 'error');
     } finally {
       setLoading(false);
+      setLoaded(true);
     }
   };
   useEffect(() => {
@@ -92,7 +94,12 @@ export default function Contacts() {
       </div>
 
       <div className="card">
-        {list.length === 0 ? (
+        {!loaded ? (
+          <div className="list-loading">
+            <div className="spinner" />
+            <span>Loading contacts…</span>
+          </div>
+        ) : list.length === 0 ? (
           filtered ? (
             <Empty icon="search" title="No matches">
               No contacts match {dq ? `“${dq}”` : 'this filter'}. Try a different search or status.
