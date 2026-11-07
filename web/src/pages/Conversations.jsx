@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
-import { Empty, Loading, StatusBadge, clockTime, timeAgo, initials } from '../ui.jsx';
+import { Modal, Empty, Loading, StatusBadge, clockTime, timeAgo, initials } from '../ui.jsx';
 
 function Ticks({ status }) {
   if (status === 'read') return <span style={{ color: '#53bdeb' }}>✓✓</span>;
@@ -45,6 +45,7 @@ export default function Conversations() {
   const [sending, setSending] = useState(false);
   const [aiAvail, setAiAvail] = useState(false);
   const [autoReply, setAutoReply] = useState(false);
+  const [showAiSettings, setShowAiSettings] = useState(false);
   const msgsRef = useRef(null);
 
   useEffect(() => {
@@ -145,15 +146,26 @@ export default function Conversations() {
         </div>
         <div className="spacer" />
         {aiAvail && (
-          <button
-            className={`btn sm ${autoReply ? 'primary' : ''}`}
-            onClick={toggleAutoReply}
-            title="When on, AI answers incoming replies automatically"
-          >
-            <Icon.sparkles /> AI auto-reply: {autoReply ? 'On' : 'Off'}
-          </button>
+          <>
+            <button
+              className={`btn sm ${autoReply ? 'primary' : ''}`}
+              onClick={toggleAutoReply}
+              title="When on, AI answers incoming replies automatically"
+            >
+              <Icon.sparkles /> AI auto-reply: {autoReply ? 'On' : 'Off'}
+            </button>
+            <button className="btn sm" onClick={() => setShowAiSettings(true)} title="AI auto-reply settings">
+              <Icon.settings />
+            </button>
+          </>
         )}
       </div>
+      {showAiSettings && (
+        <AiReplySettings
+          onClose={() => setShowAiSettings(false)}
+          onSaved={(enabled) => { setShowAiSettings(false); if (enabled !== undefined) setAutoReply(enabled); }}
+        />
+      )}
 
       <div className="chat-layout">
         <div className="thread-list">
@@ -242,9 +254,9 @@ export default function Conversations() {
                         <div className="chat-day"><span>{dayDivider(m.created_at)}</span></div>
                       )}
                       <div className={`bubble ${m.direction}`}>
-                        {thread.contact.is_group && m.direction === 'in' && m.sender && (
+                        {thread.contact.is_group === 1 && m.direction === 'in' && m.sender ? (
                           <div className="bubble-sender">{m.sender}</div>
-                        )}
+                        ) : null}
                         {m.media_url && (
                           <img src={m.media_url} alt="" style={{ width: '100%', borderRadius: 8, marginBottom: m.body ? 6 : 0, display: 'block' }} />
                         )}
@@ -284,5 +296,98 @@ export default function Conversations() {
         </div>
       </div>
     </>
+  );
+}
+
+// AI auto-reply settings — toggle, human-like delay window, and business context.
+function AiReplySettings({ onClose, onSaved }) {
+  const { toast } = useApp();
+  const [s, setS] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await api.get('/settings');
+        setS({
+          autoReplyEnabled: !!r.autoReplyEnabled,
+          autoReplyMinSec: r.autoReplyMinSec ?? 5,
+          autoReplyMaxSec: r.autoReplyMaxSec ?? 30,
+          autoReplyInstructions: r.autoReplyInstructions || '',
+        });
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    })();
+  }, []);
+
+  async function save() {
+    const min = Math.max(0, +s.autoReplyMinSec || 0);
+    const max = Math.max(min, +s.autoReplyMaxSec || min);
+    setBusy(true);
+    try {
+      await api.put('/settings', { ...s, autoReplyMinSec: min, autoReplyMaxSec: max });
+      toast('AI reply settings saved', 'success');
+      onSaved(s.autoReplyEnabled);
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+    setBusy(false);
+  }
+
+  return (
+    <Modal
+      title="AI auto-reply settings"
+      onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save} disabled={busy || !s}><Icon.check /> {busy ? 'Saving…' : 'Save'}</button></>}
+    >
+      {!s ? (
+        <Loading label="Loading…" minHeight={160} />
+      ) : (
+        <>
+          <div className="card" style={{ background: 'var(--surface-2)', padding: 14, border: 'none', marginBottom: 14 }}>
+            <div className="flex between">
+              <div className="flex" style={{ gap: 8 }}>
+                <Icon.sparkles style={{ width: 16, color: 'var(--brand-700)' }} />
+                <div>
+                  <strong style={{ fontSize: 13 }}>Auto-reply to incoming messages</strong>
+                  <div className="muted" style={{ fontSize: 11.5 }}>AI answers replies for you automatically.</div>
+                </div>
+              </div>
+              <label className="switch">
+                <input type="checkbox" checked={s.autoReplyEnabled} onChange={(e) => setS({ ...s, autoReplyEnabled: e.target.checked })} />
+                <span className="slider" />
+              </label>
+            </div>
+          </div>
+
+          <div className="row">
+            <div className="field" style={{ margin: 0 }}>
+              <label>Reply after (min seconds)</label>
+              <input type="number" min="0" className="input" value={s.autoReplyMinSec} onChange={(e) => setS({ ...s, autoReplyMinSec: e.target.value })} />
+            </div>
+            <div className="field" style={{ margin: 0 }}>
+              <label>Reply after (max seconds)</label>
+              <input type="number" min="0" className="input" value={s.autoReplyMaxSec} onChange={(e) => setS({ ...s, autoReplyMaxSec: e.target.value })} />
+            </div>
+          </div>
+          <div className="hint" style={{ marginTop: 6 }}>
+            AI waits a random time in this range before replying, so it looks human (not instant).
+          </div>
+
+          <div className="field" style={{ marginTop: 14 }}>
+            <label>Business context for the AI (optional)</label>
+            <textarea
+              className="textarea"
+              style={{ minHeight: 90 }}
+              value={s.autoReplyInstructions}
+              onChange={(e) => setS({ ...s, autoReplyInstructions: e.target.value })}
+              placeholder="e.g. We sell restaurant POS systems. Offer a demo, be friendly, never quote prices — ask them to book a call."
+            />
+            <div className="hint">Tells the AI who you are and how to answer.</div>
+          </div>
+        </>
+      )}
+    </Modal>
   );
 }

@@ -100,12 +100,74 @@ campaigns.get('/', async (_req, res) => {
   res.json(out);
 });
 
+// Resolve the human-readable template / sender / list names for a campaign.
+async function namesFor(c) {
+  let template_name = null;
+  if (c.template_id) {
+    const _tid = oid(c.template_id);
+    if (_tid) template_name = (await db.templates().findOne({ _id: _tid }, { projection: { name: 1 } }))?.name || null;
+  }
+  let sender = null;
+  if (c.sender_id) {
+    const sd = await db.warmupAccounts().findOne({ _id: oid(c.sender_id) });
+    sender = sd ? { phone: sd.phone, label: sd.label } : { phone: null, label: '(removed number)' };
+  }
+  let list_name = null;
+  if (c.audience_list_id) {
+    const _lid = oid(c.audience_list_id);
+    if (_lid) list_name = (await db.lists().findOne({ _id: _lid }, { projection: { name: 1 } }))?.name || '(deleted list)';
+  }
+  return { template_name, sender, list_name };
+}
+
 campaigns.get('/:id', async (req, res) => {
   const _id = oid(req.params.id);
   if (!_id) return res.status(400).json({ error: 'Bad id' });
   const c = await db.campaigns().findOne({ _id });
   if (!c) return res.status(404).json({ error: 'Not found' });
   res.json({ ...pub(c), progress: await progressFor(String(c._id)) });
+});
+
+// Full detail: campaign + names + progress + the per-recipient list.
+campaigns.get('/:id/detail', async (req, res) => {
+  const _id = oid(req.params.id);
+  if (!_id) return res.status(400).json({ error: 'Bad id' });
+  const c = await db.campaigns().findOne({ _id });
+  if (!c) return res.status(404).json({ error: 'Not found' });
+
+  const targets = await db.targets().find({ campaign_id: String(_id) }).sort({ _id: 1 }).limit(2000).toArray();
+  const cids = targets.map((t) => oid(t.contact_id)).filter(Boolean);
+  const contacts = await db.contacts().find({ _id: { $in: cids } }).toArray();
+  const cmap = new Map(contacts.map((x) => [String(x._id), x]));
+
+  // Latest outbound delivery status per contact for this campaign.
+  const msgs = await db
+    .messages()
+    .find({ campaign_id: String(_id), direction: 'out' }, { projection: { contact_id: 1, status: 1 } })
+    .sort({ _id: 1 })
+    .toArray();
+  const dmap = new Map();
+  for (const m of msgs) dmap.set(m.contact_id, m.status);
+
+  const recipients = targets.map((t) => {
+    const ct = cmap.get(t.contact_id);
+    return {
+      contact_id: t.contact_id,
+      name: ct?.name || '',
+      phone: ct?.phone || '',
+      status: t.status, // queued | sent | failed | replied | skipped
+      delivery: dmap.get(t.contact_id) || null, // sent | delivered | read
+      error: t.error || null,
+      sent_at: t.sent_at || null,
+    };
+  });
+
+  res.json({
+    ...pub(c),
+    ...(await namesFor(c)),
+    progress: await progressFor(String(c._id)),
+    recipients,
+  });
 });
 
 campaigns.post('/', async (req, res) => {
@@ -169,9 +231,23 @@ campaigns.put('/:id', async (req, res) => {
             ? String(req.body[f])
             : null
           : req.body[f];
+
+  // Changing the audience list re-scans members into the queue.
+  const existing = await db.campaigns().findOne({ _id });
+  if (!existing) return res.status(404).json({ error: 'Not found' });
+  let rebuild = false;
+  if (req.body.audience_list_id !== undefined) {
+    const newListId = req.body.audience_list_id ? String(req.body.audience_list_id) : null;
+    if (newListId !== (existing.audience_list_id || null)) {
+      set.audience_list_id = newListId;
+      rebuild = true;
+    }
+  }
+
   const r = await db.campaigns().findOneAndUpdate({ _id }, { $set: set }, { returnDocument: 'after' });
   const doc = r.value || r;
   if (!doc) return res.status(404).json({ error: 'Not found' });
+  if (rebuild) await buildTargets(String(_id), { audienceFilter: doc.audience_filter, audienceListId: doc.audience_list_id });
   res.json(pub(doc));
 });
 

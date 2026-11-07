@@ -83,4 +83,6 @@ export const DEFAULTS = {
   // --- AI auto-reply: let AI answer incoming replies automatically ---
   autoReplyEnabled: false,
   autoReplyInstructions: '', // business context: who you are, what to say/not say
+  autoReplyMinSec: 5, // wait at least this long before AI replies (feels human)
+  autoReplyMaxSec: 30, // and at most this long
 };

@@ -218,6 +218,12 @@ async function autoReply(contact, phone, pushName) {
     const reply = (await conversationReply(history.map((m) => ({ direction: m.direction, body: m.body })))).trim();
     if (!reply) throw new Error('empty reply');
 
+    // Wait a human-like amount of time before answering (configurable).
+    const minS = getSetting('autoReplyMinSec', 5);
+    const maxS = getSetting('autoReplyMaxSec', 30);
+    const waitMs = randInt(Math.max(0, minS), Math.max(minS, maxS)) * 1000;
+    if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
+
     await sendTyping(phone, randInt(1200, 2600));
     const waId = await sendText(phone, reply);
     await db.messages().insertOne({
@@ -349,8 +355,9 @@ async function importHistory(messages, waContacts, waChats) {
 
   const byJid = new Map();
   for (const msg of messages) {
-    const jid = msg.key?.remoteJid || '';
-    if (!jid || jid.endsWith('@newsletter') || jid === 'status@broadcast') continue; // keep groups; skip channels/status
+    const rawJid = msg.key?.remoteJid || '';
+    if (!rawJid || rawJid.endsWith('@newsletter') || rawJid === 'status@broadcast') continue; // keep groups; skip channels/status
+    const jid = rawJid.endsWith('@g.us') ? rawJid : pnJid(msg); // resolve @lid → phone jid
     if (!byJid.has(jid)) byJid.set(jid, []);
     byJid.get(jid).push(msg);
   }
@@ -414,6 +421,17 @@ async function importHistory(messages, waContacts, waChats) {
   }
 }
 
+// WhatsApp now addresses some chats by an opaque @lid id instead of the phone number.
+// Prefer the real phone-number jid when the message provides it as an alternative, so a
+// reply links to the same contact we messaged (instead of creating a duplicate thread).
+function pnJid(msg) {
+  const k = msg.key || {};
+  for (const j of [k.remoteJid, k.remoteJidAlt, k.senderPn, k.participantAlt]) {
+    if (typeof j === 'string' && j.endsWith('@s.whatsapp.net')) return j;
+  }
+  return k.remoteJid || '';
+}
+
 // ---- Inbound handling: store, flag for human handoff, honour opt-outs ----
 function extractText(msg) {
   const m = msg.message;
@@ -441,7 +459,7 @@ async function handleIncoming({ messages, type }) {
 
       // Sent from the phone itself (not via this app) — record it and move on.
       if (msg.key.fromMe) {
-        await storeOutgoingEcho(jid, msg);
+        await storeOutgoingEcho(isGroup ? jid : pnJid(msg), msg);
         continue;
       }
 
@@ -451,7 +469,7 @@ async function handleIncoming({ messages, type }) {
         continue;
       }
 
-      const phone = jidToPhone(jid);
+      const phone = jidToPhone(pnJid(msg)); // resolve @lid → real phone when possible
       if (!phone) continue;
       const body = extractText(msg).trim();
       const pushName = msg.pushName || '';

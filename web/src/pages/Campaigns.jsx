@@ -2,13 +2,14 @@ import { Fragment, useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
-import { Modal, Empty, Loading, StatusBadge } from '../ui.jsx';
+import { Modal, Empty, Loading, StatusBadge, timeAgo } from '../ui.jsx';
 
 export default function Campaigns() {
   const { toast, refreshStats } = useApp();
   const [list, setList] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [showNew, setShowNew] = useState(false);
+  const [detailId, setDetailId] = useState(null);
 
   const load = async () => {
     try {
@@ -45,6 +46,9 @@ export default function Campaigns() {
     load();
   }
 
+  if (detailId)
+    return <CampaignDetail id={detailId} onBack={() => { setDetailId(null); load(); }} />;
+
   return (
     <>
       <div className="toolbar">
@@ -71,10 +75,10 @@ export default function Campaigns() {
       ) : (
         <div className="grid-cards">
           {list.map((c) => (
-            <div className="camp-card" key={c.id}>
+            <div className="camp-card clickable" key={c.id} onClick={() => setDetailId(c.id)} title="Open campaign">
               <div className="flex between">
                 <StatusBadge status={c.status} />
-                <div className="flex" style={{ gap: 4 }}>
+                <div className="flex" style={{ gap: 4 }} onClick={(e) => e.stopPropagation()}>
                   {c.status === 'running' ? (
                     <button className="btn warn sm" onClick={() => action(c, 'pause')}><Icon.pause /> Pause</button>
                   ) : c.status === 'scheduled' ? (
@@ -417,6 +421,290 @@ function NewCampaign({ onClose, onSaved }) {
                 <input className="input" value={f.timezone} onChange={(e) => setF({ ...f, timezone: e.target.value })} />
               </div>
             </div>
+          </div>
+        </>
+      )}
+    </Modal>
+  );
+}
+
+/* ---------------- Campaign detail page ---------------- */
+function recTicks(delivery) {
+  if (delivery === 'read') return <span style={{ color: '#53bdeb' }}>✓✓</span>;
+  if (delivery === 'delivered') return <span>✓✓</span>;
+  if (delivery === 'sent') return <span>✓</span>;
+  return null;
+}
+
+function CampaignDetail({ id, onBack }) {
+  const { toast, refreshStats } = useApp();
+  const [d, setD] = useState(null);
+  const [edit, setEdit] = useState(false);
+  const [rf, setRf] = useState(''); // recipient status filter
+
+  const load = async () => {
+    try {
+      setD(await api.get(`/campaigns/${id}/detail`));
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  };
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 6000);
+    return () => clearInterval(t);
+  }, [id]);
+
+  async function action(verb) {
+    try {
+      await api.post(`/campaigns/${id}/${verb}`);
+      toast(`Campaign ${verb === 'start' ? 'started' : 'paused'}`, 'success');
+      load();
+      refreshStats();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+  async function rebuild() {
+    try {
+      const r = await api.post(`/campaigns/${id}/rebuild`);
+      toast(`Audience rescanned · ${r.progress.total} recipients`, 'success');
+      load();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+  async function remove() {
+    if (!confirm(`Delete campaign "${d.name}"? This removes its queue.`)) return;
+    await api.del('/campaigns/' + id);
+    toast('Campaign deleted');
+    onBack();
+  }
+
+  if (!d) return <Loading label="Loading campaign…" minHeight={360} />;
+  const p = d.progress;
+  const recipients = rf ? d.recipients.filter((r) => r.status === rf) : d.recipients;
+
+  return (
+    <>
+      <div className="toolbar">
+        <button className="btn" onClick={onBack}><Icon.chevronDown style={{ width: 15, transform: 'rotate(90deg)' }} /> Back</button>
+        <div className="spacer" />
+        {d.status === 'running' ? (
+          <button className="btn warn" onClick={() => action('pause')}><Icon.pause /> Pause</button>
+        ) : (
+          <button className="btn primary" onClick={() => action('start')}><Icon.play /> {d.status === 'paused' ? 'Resume' : 'Start'}</button>
+        )}
+        <button className="btn" onClick={rebuild} title="Re-scan the audience list into the queue"><Icon.refresh /> Rebuild</button>
+        <button className="btn" onClick={() => setEdit(true)}><Icon.edit /> Edit</button>
+        <button className="btn ghost" onClick={remove}><Icon.trash /></button>
+      </div>
+
+      <div className="card" style={{ marginBottom: 18 }}>
+        <div className="flex" style={{ gap: 10, alignItems: 'center' }}>
+          <h2 style={{ fontSize: 20 }}>{d.name}</h2>
+          <StatusBadge status={d.status} />
+        </div>
+        <div className="muted" style={{ fontSize: 13, marginTop: 8, display: 'grid', gap: 5 }}>
+          <div><Icon.template style={{ width: 13, verticalAlign: '-2px' }} /> {d.template_name || 'No template'}{d.ai_rewrite && <> · <span className="badge green" style={{ padding: '1px 7px' }}>AI {d.ai_tone}</span></>}</div>
+          <div><Icon.users style={{ width: 13, verticalAlign: '-2px' }} /> {d.list_name || 'All active contacts'}</div>
+          <div><Icon.gateway style={{ width: 13, verticalAlign: '-2px' }} /> from {d.sender?.phone ? `+${d.sender.phone}` : 'Main number (Gateway)'}</div>
+          <div><Icon.clock style={{ width: 13, verticalAlign: '-2px' }} /> {d.window_start}–{d.window_end} {d.timezone} · {d.daily_limit}/day · ~{d.min_delay_sec}-{d.max_delay_sec}s gap</div>
+          {d.status === 'scheduled' && d.scheduled_at && (
+            <div style={{ color: '#1d4ed8', fontWeight: 600 }}><Icon.clock style={{ width: 13, verticalAlign: '-2px' }} /> Starts {new Date(d.scheduled_at).toLocaleString()}</div>
+          )}
+        </div>
+
+        <div className="flex between" style={{ fontSize: 12.5, margin: '18px 0 6px' }}>
+          <span className="muted">Delivery</span>
+          <span className="muted">{p.done}/{p.total} · {p.percent}%</span>
+        </div>
+        <div className="progress"><span style={{ width: `${p.percent}%` }} /></div>
+
+        <div className="mini-stats" style={{ marginTop: 16 }}>
+          <div className="mini-stat"><div className="v">{p.queued}</div><div className="l">Queued</div></div>
+          <div className="mini-stat"><div className="v" style={{ color: 'var(--brand-700)' }}>{p.sent}</div><div className="l">Sent</div></div>
+          <div className="mini-stat"><div className="v" style={{ color: '#53bdeb' }}>{p.delivered}</div><div className="l">Delivered</div></div>
+          <div className="mini-stat"><div className="v" style={{ color: '#53bdeb' }}>{p.read}</div><div className="l">Read</div></div>
+          <div className="mini-stat"><div className="v" style={{ color: 'var(--info)' }}>{p.replied}</div><div className="l">Replies</div></div>
+          <div className="mini-stat"><div className="v" style={{ color: 'var(--danger)' }}>{p.failed}</div><div className="l">Failed</div></div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-head">
+          <Icon.users style={{ width: 18, color: 'var(--brand-700)' }} />
+          <div><h3>Recipients</h3><div className="sub">{d.recipients.length} in this campaign</div></div>
+          <select className="select" style={{ marginLeft: 'auto', maxWidth: 160 }} value={rf} onChange={(e) => setRf(e.target.value)}>
+            <option value="">All statuses</option>
+            <option value="queued">Queued</option>
+            <option value="sent">Sent</option>
+            <option value="replied">Replied</option>
+            <option value="failed">Failed</option>
+            <option value="skipped">Skipped</option>
+          </select>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Name</th><th>Number</th><th>Status</th><th>Delivery</th><th>When</th></tr></thead>
+            <tbody>
+              {recipients.map((r) => (
+                <tr key={r.contact_id}>
+                  <td className="cell-strong">{r.name || <span className="cell-muted">+{r.phone}</span>}</td>
+                  <td style={{ fontVariantNumeric: 'tabular-nums' }}>+{r.phone}</td>
+                  <td>
+                    <StatusBadge status={r.status} />
+                    {r.error && <div className="cell-muted" style={{ fontSize: 11 }}>{r.error}</div>}
+                  </td>
+                  <td>{recTicks(r.delivery)} <span className="cell-muted" style={{ fontSize: 11.5 }}>{r.delivery || ''}</span></td>
+                  <td className="cell-muted">{r.sent_at ? timeAgo(r.sent_at) : '—'}</td>
+                </tr>
+              ))}
+              {recipients.length === 0 && (
+                <tr><td colSpan={5} className="cell-muted" style={{ padding: 20, textAlign: 'center' }}>No recipients{rf ? ` with status “${rf}”` : ''}.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {edit && <EditCampaignModal id={id} onClose={() => setEdit(false)} onSaved={() => { setEdit(false); load(); }} />}
+    </>
+  );
+}
+
+function EditCampaignModal({ id, onClose, onSaved }) {
+  const { toast } = useApp();
+  const [templates, setTemplates] = useState([]);
+  const [lists, setLists] = useState([]);
+  const [senders, setSenders] = useState([]);
+  const [aiStatus, setAiStatus] = useState(null);
+  const [f, setF] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      const [c, t, ls] = await Promise.all([
+        api.get(`/campaigns/${id}`),
+        api.get('/templates'),
+        api.get('/lists'),
+      ]);
+      setTemplates(t);
+      setLists(ls);
+      setF({
+        name: c.name || '',
+        template_id: c.template_id || '',
+        audience_list_id: c.audience_list_id || '',
+        sender_id: c.sender_id || '',
+        daily_limit: c.daily_limit,
+        min_delay_sec: c.min_delay_sec,
+        max_delay_sec: c.max_delay_sec,
+        window_start: c.window_start,
+        window_end: c.window_end,
+        timezone: c.timezone,
+        ai_rewrite: !!c.ai_rewrite,
+        ai_tone: c.ai_tone || 'friendly',
+      });
+      try { setAiStatus(await api.get('/ai/status')); } catch {}
+      try {
+        const w = await api.get('/warmup/status');
+        setSenders((w.accounts || []).filter((a) => a.status === 'connected' && a.me?.phone));
+      } catch {}
+    })();
+  }, [id]);
+
+  async function save() {
+    if (!f.name.trim()) return toast('Name your campaign', 'error');
+    try {
+      await api.put(`/campaigns/${id}`, f);
+      toast('Campaign updated — changing the list re-scans recipients', 'success');
+      onSaved();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+
+  return (
+    <Modal
+      title="Edit campaign"
+      onClose={onClose}
+      wide
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save} disabled={!f}><Icon.check /> Save changes</button></>}
+    >
+      {!f ? (
+        <Loading label="Loading…" minHeight={200} />
+      ) : (
+        <>
+          <div className="field">
+            <label>Campaign name</label>
+            <input className="input" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} />
+          </div>
+          <div className="row">
+            <div className="field">
+              <label>Template</label>
+              <select className="select" value={f.template_id} onChange={(e) => setF({ ...f, template_id: e.target.value })}>
+                <option value="">Select a template…</option>
+                {templates.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label>Send to list</label>
+              <select className="select" value={f.audience_list_id} onChange={(e) => setF({ ...f, audience_list_id: e.target.value })}>
+                <option value="">All active contacts</option>
+                {lists.map((l) => <option key={l.id} value={l.id}>{l.name} ({l.count})</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="field">
+            <label>Send from</label>
+            <select className="select" value={f.sender_id} onChange={(e) => setF({ ...f, sender_id: e.target.value })}>
+              <option value="">Main number (WhatsApp Gateway)</option>
+              {senders.map((a) => <option key={a.id} value={a.id}>+{a.me.phone}{a.label ? ` — ${a.label}` : ''} (warmed number)</option>)}
+            </select>
+          </div>
+
+          <div className="card" style={{ background: 'var(--surface-2)', padding: 16, margin: '6px 0 16px', border: 'none' }}>
+            <div className="flex" style={{ gap: 8, marginBottom: 12 }}>
+              <Icon.shield style={{ width: 16, color: 'var(--brand-700)' }} />
+              <strong style={{ fontSize: 13 }}>Safe pacing (anti-ban)</strong>
+            </div>
+            <div className="row">
+              <div className="field" style={{ margin: 0 }}><label>Daily limit</label><input type="number" className="input" value={f.daily_limit} onChange={(e) => setF({ ...f, daily_limit: +e.target.value })} /></div>
+              <div className="field" style={{ margin: 0 }}><label>Min gap (sec)</label><input type="number" className="input" value={f.min_delay_sec} onChange={(e) => setF({ ...f, min_delay_sec: +e.target.value })} /></div>
+              <div className="field" style={{ margin: 0 }}><label>Max gap (sec)</label><input type="number" className="input" value={f.max_delay_sec} onChange={(e) => setF({ ...f, max_delay_sec: +e.target.value })} /></div>
+            </div>
+            <div className="row" style={{ marginTop: 12 }}>
+              <div className="field" style={{ margin: 0 }}><label>Window start</label><input type="time" className="input" value={f.window_start} onChange={(e) => setF({ ...f, window_start: e.target.value })} /></div>
+              <div className="field" style={{ margin: 0 }}><label>Window end</label><input type="time" className="input" value={f.window_end} onChange={(e) => setF({ ...f, window_end: e.target.value })} /></div>
+              <div className="field" style={{ margin: 0 }}><label>Timezone</label><input className="input" value={f.timezone} onChange={(e) => setF({ ...f, timezone: e.target.value })} /></div>
+            </div>
+          </div>
+
+          <div className="card" style={{ background: 'var(--surface-2)', padding: 16, marginBottom: 6, border: 'none' }}>
+            <div className="flex between" style={{ marginBottom: f.ai_rewrite ? 12 : 0 }}>
+              <div className="flex" style={{ gap: 8 }}>
+                <Icon.sparkles style={{ width: 16, color: 'var(--brand-700)' }} />
+                <div>
+                  <strong style={{ fontSize: 13 }}>AI rewrite each message</strong>
+                  <div className="muted" style={{ fontSize: 11.5 }}>Every recipient gets a unique variation.</div>
+                </div>
+              </div>
+              {aiStatus?.available ? (
+                <label className="switch"><input type="checkbox" checked={!!f.ai_rewrite} onChange={(e) => setF({ ...f, ai_rewrite: e.target.checked })} /><span className="slider" /></label>
+              ) : (
+                <span className="badge amber">off</span>
+              )}
+            </div>
+            {f.ai_rewrite && aiStatus?.available && (
+              <div className="field" style={{ margin: 0 }}>
+                <label>Tone</label>
+                <select className="select" value={f.ai_tone} onChange={(e) => setF({ ...f, ai_tone: e.target.value })}>
+                  <option value="friendly">Friendly</option>
+                  <option value="professional">Professional</option>
+                  <option value="casual">Casual</option>
+                  <option value="enthusiastic">Enthusiastic</option>
+                </select>
+              </div>
+            )}
           </div>
         </>
       )}

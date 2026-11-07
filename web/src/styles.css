@@ -1859,3 +1859,7 @@ tbody tr:hover {
   gap: 6px;
 }
 .list-chip-new .input { height: 34px; width: 160px; font-size: 12.5px; }
+
+/* ---- Clickable campaign cards ---- */
+.camp-card.clickable { cursor: pointer; transition: box-shadow 0.12s, transform 0.12s; }
+.camp-card.clickable:hover { box-shadow: var(--shadow); transform: translateY(-1px); }
