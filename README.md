@@ -1,4 +1,4 @@
-# Grab WA Marketing
+# Tech WA Marketing
 
 A self-hosted WhatsApp outreach tool. You link **your own number by scanning a QR code**
 (the official WhatsApp multi-device link, same as WhatsApp Web) — **no paid Business API**,

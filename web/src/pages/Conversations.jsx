@@ -11,7 +11,7 @@ function Ticks({ status }) {
   return <span>✓</span>; // sent / unknown
 }
 
-// Grab the header's action slot so page-specific controls render up in the top bar.
+// Get the header's action slot so page-specific controls render up in the top bar.
 function useHeaderSlot() {
   const [node, setNode] = useState(null);
   useEffect(() => {
@@ -43,7 +43,7 @@ function dayDivider(iso) {
   });
 }
 
-export default function Conversations() {
+export default function Conversations({ go }) {
   const { toast, onBus, wa } = useApp();
   const [threads, setThreads] = useState([]);
   const [threadsLoaded, setThreadsLoaded] = useState(false);
@@ -56,7 +56,17 @@ export default function Conversations() {
   const [aiAvail, setAiAvail] = useState(false);
   const [autoReply, setAutoReply] = useState(false);
   const [showAiSettings, setShowAiSettings] = useState(false);
+  const [showAddAccount, setShowAddAccount] = useState(false);
+  const [accounts, setAccounts] = useState([{ id: 'main', label: 'Main number', phone: null, connected: false }]);
+  const [account, setAccount] = useState('main'); // active account tab
   const msgsRef = useRef(null);
+
+  const loadAccounts = async () => {
+    try {
+      const a = await api.get('/conversations/accounts');
+      if (a.length) setAccounts(a);
+    } catch {}
+  };
 
   useEffect(() => {
     (async () => {
@@ -65,6 +75,9 @@ export default function Conversations() {
         setAutoReply(!!(await api.get('/settings')).autoReplyEnabled);
       } catch {}
     })();
+    loadAccounts();
+    const t = setInterval(loadAccounts, 15000);
+    return () => clearInterval(t);
   }, []);
 
   async function toggleAutoReply() {
@@ -80,16 +93,17 @@ export default function Conversations() {
   }
 
   const loadThreads = async () => {
-    const params = filter ? '?filter=' + filter : '';
+    const params = new URLSearchParams({ account });
+    if (filter) params.set('filter', filter);
     try {
-      setThreads(await api.get('/conversations' + params));
+      setThreads(await api.get('/conversations?' + params));
     } finally {
       setThreadsLoaded(true);
     }
   };
   const loadThread = async (id) => {
     if (!id) return;
-    const t = await api.get('/conversations/' + id);
+    const t = await api.get(`/conversations/${id}?account=${account}`);
     setThread(t);
     setTimeout(() => {
       if (msgsRef.current) msgsRef.current.scrollTop = msgsRef.current.scrollHeight;
@@ -98,7 +112,12 @@ export default function Conversations() {
 
   useEffect(() => {
     loadThreads();
-  }, [filter]);
+  }, [filter, account]);
+  // Switching account closes the open thread (it belongs to a different number).
+  useEffect(() => {
+    setActive(null);
+    setThread(null);
+  }, [account]);
   useEffect(() => {
     loadThread(active);
   }, [active]);
@@ -112,13 +131,13 @@ export default function Conversations() {
       }
       if (ev === 'message:status' && active) loadThread(active);
     });
-  }, [active, filter]);
+  }, [active, filter, account]);
 
   async function send() {
     if (!draft.trim() || !thread) return;
     setSending(true);
     try {
-      await api.post(`/conversations/${thread.contact.id}/reply`, { body: draft });
+      await api.post(`/conversations/${thread.contact.id}/reply`, { body: draft, account });
       setDraft('');
       loadThread(thread.contact.id);
       loadThreads();
@@ -134,6 +153,9 @@ export default function Conversations() {
     loadThread(thread.contact.id);
     loadThreads();
   }
+
+  const activeAcct = accounts.find((a) => a.id === account);
+  const acctConnected = account === 'main' ? wa.status === 'connected' : !!activeAcct?.connected;
 
   const q = search.trim().toLowerCase();
   const shown = !q
@@ -179,6 +201,32 @@ export default function Conversations() {
         <AiReplySettings
           onClose={() => setShowAiSettings(false)}
           onSaved={(enabled) => { setShowAiSettings(false); if (enabled !== undefined) setAutoReply(enabled); }}
+        />
+      )}
+
+      <div className="wa-tabs">
+        {accounts.map((a) => (
+          <button
+            key={a.id}
+            className={`wa-tab ${account === a.id ? 'active' : ''} ${a.connected ? '' : 'off'}`}
+            onClick={() => setAccount(a.id)}
+            title={a.phone ? `+${a.phone}` : 'Not linked'}
+          >
+            <span className={`wa-tab-dot ${a.connected ? 'on' : ''}`} />
+            <span className="wa-tab-label">
+              {a.id === 'main' ? 'Main' : a.label || 'Number'}
+              {a.phone ? ` · +${a.phone}` : ''}
+            </span>
+          </button>
+        ))}
+        <button className="wa-tab add" onClick={() => setShowAddAccount(true)} title="Link another WhatsApp number for chats">
+          <Icon.plus />
+        </button>
+      </div>
+      {showAddAccount && (
+        <AddAccountModal
+          onClose={() => setShowAddAccount(false)}
+          onLinked={(id) => { setShowAddAccount(false); loadAccounts(); if (id) setAccount(id); }}
         />
       )}
 
@@ -308,8 +356,8 @@ export default function Conversations() {
                       send();
                     }
                   }}
-                  placeholder={wa.status === 'connected' ? 'Type a message' : 'Connect WhatsApp to reply'}
-                  disabled={wa.status !== 'connected'}
+                  placeholder={acctConnected ? 'Type a message' : 'This number is not connected'}
+                  disabled={!acctConnected}
                 />
                 <button className="compose-send" onClick={send} disabled={sending || !draft.trim()} title="Send">
                   <Icon.send />
@@ -411,6 +459,93 @@ function AiReplySettings({ onClose, onSaved }) {
             <div className="hint">Tells the AI who you are and how to answer.</div>
           </div>
         </>
+      )}
+    </Modal>
+  );
+}
+
+// Link a conversation-only WhatsApp number (not used for campaigns or warm-up).
+function AddAccountModal({ onClose, onLinked }) {
+  const { toast } = useApp();
+  const [label, setLabel] = useState('');
+  const [id, setId] = useState(null);
+  const [qr, setQr] = useState(null);
+  const [status, setStatus] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function start() {
+    setBusy(true);
+    try {
+      const r = await api.post('/conversations/accounts', { label: label.trim() });
+      setId(r.id);
+      setStatus('connecting');
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+    setBusy(false);
+  }
+
+  // Poll for the QR + connection once a slot is created.
+  useEffect(() => {
+    if (!id) return;
+    let stop = false;
+    const tick = async () => {
+      try {
+        const s = await api.get(`/conversations/accounts/${id}/qr`);
+        if (stop) return;
+        setQr(s.qr);
+        setStatus(s.status);
+        if (s.status === 'connected') {
+          toast('Number linked ✓', 'success');
+          onLinked(id);
+        }
+      } catch {}
+    };
+    tick();
+    const t = setInterval(tick, 2000);
+    return () => { stop = true; clearInterval(t); };
+  }, [id]);
+
+  async function cancel() {
+    // Remove the pending slot if it never connected.
+    if (id && status !== 'connected') {
+      try { await api.del(`/conversations/accounts/${id}`); } catch {}
+    }
+    onClose();
+  }
+
+  return (
+    <Modal
+      title="Add a WhatsApp number"
+      onClose={cancel}
+      footer={<button className="btn" onClick={cancel}>Close</button>}
+    >
+      {!id ? (
+        <>
+          <div className="field">
+            <label>Label (optional)</label>
+            <input className="input" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. Support line" />
+            <div className="hint">This number is only for Conversations + AI replies — it won't be used for campaigns or warm-up.</div>
+          </div>
+          <button className="btn primary" onClick={start} disabled={busy}>
+            <Icon.gateway /> {busy ? 'Starting…' : 'Generate QR'}
+          </button>
+        </>
+      ) : (
+        <div style={{ textAlign: 'center' }}>
+          {status === 'connected' ? (
+            <div className="auth-note">Linked! You can close this.</div>
+          ) : qr ? (
+            <>
+              <img src={qr} alt="WhatsApp QR" style={{ width: 260, height: 260, borderRadius: 12 }} />
+              <div className="hint" style={{ marginTop: 10 }}>
+                On the phone for this number: <strong>WhatsApp → Linked Devices → Link a device</strong>, then scan this code.
+              </div>
+            </>
+          ) : (
+            <Loading label="Preparing QR…" minHeight={200} />
+          )}
+        </div>
       )}
     </Modal>
   );

@@ -184,6 +184,7 @@ async function sendOne(campaign, target, contact) {
     await db.messages().insertOne({
       contact_id: String(contact._id),
       campaign_id: String(campaign._id),
+      account_id: campaign.sender_id || 'main', // which number this went out from
       direction: 'out',
       body: text,
       media_url: template.media_url || null,

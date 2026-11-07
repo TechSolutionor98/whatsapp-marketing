@@ -281,7 +281,7 @@ function AiCard({ s, set, status }) {
                 <textarea
                   className="textarea"
                   style={{ minHeight: 90 }}
-                  placeholder="e.g. We're Grabatoz, an electronics store in Karachi. Answer product & delivery questions politely. For prices or orders you're unsure about, say a team member will follow up."
+                  placeholder="e.g. We're Tech Solutionor, an electronics store in Karachi. Answer product & delivery questions politely. For prices or orders you're unsure about, say a team member will follow up."
                   value={s.autoReplyInstructions || ''}
                   onChange={(e) => set('autoReplyInstructions', e.target.value)}
                 />

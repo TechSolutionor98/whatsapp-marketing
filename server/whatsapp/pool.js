@@ -10,10 +10,12 @@ import makeWASocket, {
 } from 'baileys';
 
 import { DATA_DIR } from '../config.js';
-import { db, audit, oid } from '../db/mongo.js';
+import { db, audit, oid, getSetting, nowIso, dayKey } from '../db/mongo.js';
 import { emit } from '../events.js';
 import { attachReceipts } from '../receipts.js';
-import { jidToPhone, normalizePhone } from '../utils.js';
+import { aiAvailable, conversationReply } from '../ai.js';
+import { getWaState } from './client.js';
+import { jidToPhone, normalizePhone, randInt } from '../utils.js';
 
 const POOL_DIR = path.join(DATA_DIR, 'wa_pool');
 const logger = pino({ level: 'silent' });
@@ -29,6 +31,7 @@ export function poolState() {
   return [...accounts.values()].map((a) => ({
     id: a.id,
     label: a.label || '',
+    role: a.role || 'warmup',
     status: a.status,
     qr: a.qr || null,
     me: a.me || null,
@@ -36,22 +39,26 @@ export function poolState() {
   }));
 }
 
+// Warm-up / campaign-sender numbers only (conversation-only numbers are excluded).
 export function connectedAccounts() {
-  return [...accounts.values()].filter((a) => a.status === 'connected' && a.sock && a.me?.phone);
+  return [...accounts.values()].filter(
+    (a) => a.status === 'connected' && a.sock && a.me?.phone && (a.role || 'warmup') !== 'conversation'
+  );
 }
 
 function emitPool() {
   emit('pool:update', poolState());
 }
 
-export async function startPoolAccount(id, label = '') {
+export async function startPoolAccount(id, label = '', role = 'warmup') {
   let a = accounts.get(id);
   if (a?.sock) return; // already live
   if (!a) {
-    a = { id, label, status: 'connecting', qr: null, me: null };
+    a = { id, label, role, status: 'connecting', qr: null, me: null };
     accounts.set(id, a);
   }
   if (label) a.label = label;
+  if (role) a.role = role;
   a.starting = true;
   a.manualLogout = false;
   a.status = 'connecting';
@@ -75,6 +82,7 @@ export async function startPoolAccount(id, label = '') {
     a.sock = sock;
     sock.ev.on('creds.update', saveCreds);
     attachReceipts(sock); // delivery/read receipts for campaigns sent from this number
+    sock.ev.on('messages.upsert', (ev) => ingestPool(id, ev)); // capture this number's own chats
 
     sock.ev.on('connection.update', async (u) => {
       const { connection, lastDisconnect, qr } = u;
@@ -181,11 +189,155 @@ export async function sendMediaFromTo(fromId, toPhone, buffer, caption) {
   return sent?.key?.id || null;
 }
 
+// ---- Per-account inbound: capture chats for this pool number (not warm-up traffic) ----
+function textOf(msg) {
+  const m = msg.message;
+  if (!m) return '';
+  return (
+    m.conversation ||
+    m.extendedTextMessage?.text ||
+    m.imageMessage?.caption ||
+    m.videoMessage?.caption ||
+    m.buttonsResponseMessage?.selectedDisplayText ||
+    m.listResponseMessage?.title ||
+    ''
+  );
+}
+function pnOf(msg) {
+  const k = msg.key || {};
+  for (const j of [k.remoteJid, k.remoteJidAlt, k.senderPn, k.participantAlt]) {
+    if (typeof j === 'string' && j.endsWith('@s.whatsapp.net')) return j;
+  }
+  return k.remoteJid || '';
+}
+// Our own numbers (pool + main) — chats between them are warm-up, not conversations.
+function ourPhones() {
+  const set = new Set();
+  for (const a of accounts.values()) if (a.me?.phone) set.add(a.me.phone);
+  try {
+    const w = getWaState();
+    if (w?.me?.phone) set.add(w.me.phone);
+  } catch {}
+  return set;
+}
+
+async function poolAutoReply(accountId, contact, phone) {
+  try {
+    const history = await db
+      .messages()
+      .find({ contact_id: String(contact._id) })
+      .sort({ _id: 1 })
+      .limit(14)
+      .toArray();
+    const reply = (await conversationReply(history.map((m) => ({ direction: m.direction, body: m.body })))).trim();
+    if (!reply) throw new Error('empty reply');
+    const minS = getSetting('autoReplyMinSec', 5);
+    const maxS = getSetting('autoReplyMaxSec', 30);
+    const waitMs = randInt(Math.max(0, minS), Math.max(minS, maxS)) * 1000;
+    if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
+    const waId = await sendFromTo(accountId, phone, reply);
+    await db.messages().insertOne({
+      contact_id: String(contact._id),
+      campaign_id: null,
+      account_id: accountId,
+      direction: 'out',
+      body: reply,
+      status: 'sent',
+      wa_message_id: waId,
+      ai_auto: true,
+      created_at: nowIso(),
+      day_key: dayKey(),
+    });
+    await db.contacts().updateOne({ _id: contact._id }, { $set: { last_outbound_at: nowIso() } });
+    emit('message:out', { contactId: String(contact._id) });
+  } catch (err) {
+    await db.contacts().updateOne({ _id: contact._id }, { $set: { handoff: 1, handoff_reason: 'reply' } });
+    audit('handoff', `AI auto-reply failed for ${phone} — handed to a human (${err.message})`, { level: 'warn' });
+  }
+}
+
+async function ingestPool(accountId, { messages, type }) {
+  if (type !== 'notify') return;
+  for (const msg of messages) {
+    try {
+      if (!msg.message) continue;
+      const raw = msg.key.remoteJid || '';
+      if (raw.endsWith('@g.us') || raw.endsWith('@newsletter') || raw === 'status@broadcast') continue; // 1:1 only
+      const phone = jidToPhone(pnOf(msg));
+      if (!phone || ourPhones().has(phone)) continue; // skip warm-up traffic between our own numbers
+      const body = textOf(msg).trim();
+      const id = msg.key.id;
+      if (!id) continue;
+
+      let contact = await db.contacts().findOne({ phone });
+      if (!contact) {
+        if (!body) continue;
+        const doc = {
+          name: msg.pushName || '',
+          phone,
+          tags: 'inbound',
+          status: 'active',
+          synced: 0,
+          handoff: 0,
+          handoff_reason: '',
+          last_inbound_at: null,
+          last_outbound_at: null,
+          created_at: nowIso(),
+        };
+        const r = await db.contacts().insertOne(doc).catch(() => null);
+        contact = r ? { _id: r.insertedId, ...doc } : await db.contacts().findOne({ phone });
+      }
+      if (!contact || contact.warmup === 1) continue;
+
+      if (msg.key.fromMe) {
+        if (!body) continue;
+        const r = await db.messages().updateOne(
+          { wa_message_id: id },
+          { $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'out', body, status: 'sent', wa_message_id: id, created_at: nowIso(), day_key: dayKey() } },
+          { upsert: true }
+        );
+        if (r.upsertedCount) {
+          await db.contacts().updateOne({ _id: contact._id }, { $set: { last_outbound_at: nowIso() } });
+          emit('message:out', { contactId: String(contact._id) });
+        }
+        continue;
+      }
+
+      if (!body) continue;
+      const r = await db.messages().updateOne(
+        { wa_message_id: id },
+        { $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'in', body, status: 'read', wa_message_id: id, created_at: nowIso(), day_key: dayKey() } },
+        { upsert: true }
+      );
+      if (!r.upsertedCount) continue; // already stored
+      await db.contacts().updateOne({ _id: contact._id }, { $set: { last_inbound_at: nowIso() }, $inc: { unread: 1 } });
+
+      const stop = getSetting('stopKeywords', []);
+      const lc = body.toLowerCase();
+      if (stop.some((w) => lc === w || lc.startsWith(w))) {
+        await db.contacts().updateOne({ _id: contact._id }, { $set: { status: 'opted_out', handoff: 0 } });
+        audit('reply', `${phone} opted out ("${body}")`, { level: 'warn', meta: { contactId: String(contact._id) } });
+      } else if (getSetting('autoReplyEnabled', false) && aiAvailable()) {
+        await db.targets().updateMany({ contact_id: String(contact._id), status: 'queued' }, { $set: { status: 'replied' } });
+        await poolAutoReply(accountId, contact, phone);
+      } else if (getSetting('handoffOnReply', true)) {
+        await db.contacts().updateOne({ _id: contact._id }, { $set: { handoff: 1, handoff_reason: 'reply' } });
+        await db.targets().updateMany({ contact_id: String(contact._id), status: 'queued' }, { $set: { status: 'replied' } });
+        audit('handoff', `${msg.pushName || phone} replied — handed to a human`, { level: 'info', meta: { contactId: String(contact._id) } });
+      }
+      emit('message:in', { contactId: String(contact._id) });
+      emit('stats:dirty', {});
+    } catch (err) {
+      audit('system', `Pool inbound error: ${err.message}`, { level: 'error' });
+    }
+  }
+}
+
 // Reconnect every saved account on boot (after Mongo is up).
 export async function reconnectPoolAccounts() {
   try {
     const docs = await db.warmupAccounts().find().toArray();
-    for (const d of docs) startPoolAccount(String(d._id), d.label || '');
+    for (const d of docs) startPoolAccount(String(d._id), d.label || '', d.role || 'warmup');
   } catch {
     /* mongo not ready yet; caller retries */
   }

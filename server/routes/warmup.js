@@ -7,7 +7,8 @@ export const warmup = Router();
 
 warmup.get('/status', async (_req, res) => {
   const status = await warmupStatus();
-  res.json({ ...status, accounts: poolState() });
+  // Conversation-only numbers live in the Conversations tab, not here.
+  res.json({ ...status, accounts: poolState().filter((a) => a.role !== 'conversation') });
 });
 
 // Add a new number slot — starts a WhatsApp session; the UI then shows its QR to scan.
@@ -40,7 +41,7 @@ warmup.delete('/accounts/:id', async (req, res) => {
 });
 
 warmup.post('/start', async (_req, res) => {
-  const n = await db.warmupAccounts().countDocuments();
+  const n = await db.warmupAccounts().countDocuments({ role: { $ne: 'conversation' } });
   if (n < 2) return res.status(400).json({ error: 'Link at least 2 numbers for mutual warm-up' });
   await setSetting('warmupActive', true);
   audit('warmup', 'Mutual warm-up started', { level: 'success' });

@@ -28,7 +28,7 @@ function Shell({ title, subtitle, children, footer }) {
 
 function DbDown({ status, onRetry }) {
   return (
-    <Shell title="Database unavailable" subtitle="Grab WA Marketing needs MongoDB for accounts & login">
+    <Shell title="Database unavailable" subtitle="Tech WA Marketing needs MongoDB for accounts & login">
       <div className="auth-error">Can't reach MongoDB{status?.error ? `: ${status.error}` : ''}</div>
       <div className="auth-note">
         Start a MongoDB server, then retry. Two easy options:
@@ -73,7 +73,7 @@ function LoginForm() {
 
   return (
     <Shell
-      title="Sign in to Grab WA Marketing"
+      title="Sign in to Tech WA Marketing"
       subtitle="WhatsApp Campaign Studio"
       footer="Need access? Ask your administrator to create your account."
     >

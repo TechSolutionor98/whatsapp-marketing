@@ -1959,3 +1959,41 @@ tbody tr:hover {
 .conv-header-ctrls .wa-filters { gap: 6px; }
 /* The Conversations page has no toolbar strip now, so give the chat more height. */
 .chat-layout { height: calc(100vh - 128px); }
+
+/* ---- Conversations: multi-account (Chrome-like) tabs ---- */
+.wa-tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  padding: 0 2px;
+  margin-bottom: -1px;
+  overflow-x: auto;
+}
+.wa-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 16px;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  background: var(--surface-2);
+  color: var(--text-soft);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 10px 10px 0 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.wa-tab:hover { background: var(--surface); }
+.wa-tab.active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: inset 0 -3px 0 var(--brand);
+}
+.wa-tab-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); flex: none; }
+.wa-tab-dot.on { background: var(--brand); }
+.wa-tab.add { padding: 9px 12px; color: var(--text-faint); }
+.wa-tab.add svg { width: 16px; height: 16px; }
+/* Make room for the tab strip above the chat. */
+.chat-layout { height: calc(100vh - 172px); border-top-left-radius: 0; }

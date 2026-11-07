@@ -229,6 +229,7 @@ async function autoReply(contact, phone, pushName) {
     await db.messages().insertOne({
       contact_id: String(contact._id),
       campaign_id: null,
+      account_id: 'main',
       direction: 'out',
       body: reply,
       status: 'sent',
@@ -304,6 +305,7 @@ async function storeSyncedMessage(contact, msg, direction) {
       $setOnInsert: {
         contact_id: String(contact._id),
         campaign_id: null,
+        account_id: 'main',
         direction,
         body,
         sender: contact.is_group && direction === 'in' ? msg.pushName || '' : '',
@@ -390,6 +392,7 @@ async function importHistory(messages, waContacts, waChats) {
             $setOnInsert: {
               contact_id: String(contact._id),
               campaign_id: null,
+              account_id: 'main',
               direction: dir,
               body,
               sender,
@@ -497,6 +500,7 @@ async function handleIncoming({ messages, type }) {
       await db.messages().insertOne({
         contact_id: String(contact._id),
         campaign_id: null,
+        account_id: 'main',
         direction: 'in',
         body,
         status: 'read',
