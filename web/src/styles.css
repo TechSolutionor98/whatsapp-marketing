@@ -2046,3 +2046,6 @@ tbody tr:hover {
   background: var(--brand-soft);
   border-bottom: 1px solid var(--border);
 }
+
+/* Tab dot: connecting state */
+.wa-tab-dot.connecting { background: var(--warn); }

@@ -31,9 +31,17 @@ function accountMatch(account) {
   return { $or: or };
 }
 
-// The connected WhatsApp numbers that can own conversation tabs — one tab per unique phone.
-conversations.get('/accounts', (_req, res) => {
+// The WhatsApp numbers that own conversation tabs — one tab per unique phone.
+// Built from saved accounts so a tab shows immediately (as "connecting") after a
+// restart, instead of popping in only once its session finishes reconnecting.
+conversations.get('/accounts', async (req, res) => {
   const wa = getWaState();
+  const live = new Map(poolState().map((a) => [a.id, a]));
+  let docs = [];
+  try {
+    docs = await db.warmupAccounts().find().toArray();
+  } catch {}
+
   const raw = [
     {
       id: 'main',
@@ -42,23 +50,41 @@ conversations.get('/accounts', (_req, res) => {
       connected: wa.status === 'connected',
       role: 'main',
       auto_reply: !!getSetting('autoReplyEnabled', false),
+      syncing: false,
     },
   ];
-  for (const a of poolState()) {
-    if (a.status === 'connected' && a.me?.phone) {
-      raw.push({ id: a.id, label: a.label || '', phone: a.me.phone, connected: true, role: a.role, auto_reply: !!a.auto_reply, syncing: !!a.syncing });
-    }
+  for (const d of docs) {
+    const id = String(d._id);
+    const a = live.get(id);
+    const phone = a?.me?.phone || d.phone || null;
+    if (!phone) continue; // not linked yet (awaiting first QR scan)
+    raw.push({
+      id,
+      label: a?.label ?? d.label ?? '',
+      phone,
+      connected: a?.status === 'connected',
+      role: a?.role || d.role || 'warmup',
+      auto_reply: a ? !!a.auto_reply : !!d.auto_reply,
+      syncing: !!a?.syncing,
+    });
   }
-  // Collapse duplicate links of the same number into a single tab (prefer main, then a named one).
+
+  // Collapse duplicate links of the same number into one tab (prefer main, then a connected/named one).
   const byPhone = new Map();
   for (const acc of raw) {
     const key = acc.phone || acc.id;
     const cur = byPhone.get(key);
     if (!cur) { byPhone.set(key, acc); continue; }
-    const merged = { auto_reply: cur.auto_reply || acc.auto_reply, syncing: cur.syncing || acc.syncing };
-    if (acc.id === 'main') byPhone.set(key, { ...acc, ...merged });
-    else if (!cur.label && acc.label) byPhone.set(key, { ...cur, label: acc.label, ...merged });
-    else byPhone.set(key, { ...cur, ...merged });
+    const merged = {
+      auto_reply: cur.auto_reply || acc.auto_reply,
+      syncing: cur.syncing || acc.syncing,
+      connected: cur.connected || acc.connected,
+    };
+    let rep = cur;
+    if (acc.id === 'main') rep = acc;
+    else if (!cur.connected && acc.connected) rep = acc;
+    else if (!cur.label && acc.label) rep = { ...cur, label: acc.label };
+    byPhone.set(key, { ...rep, ...merged });
   }
   res.json([...byPhone.values()]);
 });

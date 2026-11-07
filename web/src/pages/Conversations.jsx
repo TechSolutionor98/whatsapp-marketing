@@ -235,7 +235,7 @@ export default function Conversations({ go }) {
             onDoubleClick={() => renameTab(a)}
             title={`${a.phone ? '+' + a.phone : 'Not linked'} · double-click to rename`}
           >
-            <span className={`wa-tab-dot ${a.connected ? 'on' : ''}`} />
+            <span className={`wa-tab-dot ${a.connected ? 'on' : 'connecting'}`} title={a.connected ? 'Connected' : 'Connecting…'} />
             <span className="wa-tab-label">
               {a.label || (a.id === 'main' ? 'Main number' : 'Number')}
               {a.phone ? ` · +${a.phone}` : ''}
