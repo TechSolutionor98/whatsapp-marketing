@@ -145,10 +145,20 @@ conversations.put('/accounts/:id/label', async (req, res) => {
 });
 
 conversations.delete('/accounts/:id', async (req, res) => {
-  await removePoolAccount(req.params.id);
-  await db.warmupAccounts().deleteOne({ _id: oid(req.params.id) });
-  audit('connection', 'Conversation number removed');
-  res.json({ ok: true });
+  if (req.params.id === 'main') return res.status(400).json({ error: "The main number can't be removed here" });
+  const _id = oid(req.params.id);
+  if (!_id) return res.status(400).json({ error: 'Bad id' });
+  // Remove every saved link of this phone (duplicate links + warm-up copies), so the tab goes away.
+  const doc = await db.warmupAccounts().findOne({ _id });
+  const phone = doc?.phone || null;
+  const docs = phone ? await db.warmupAccounts().find({ phone }).toArray() : doc ? [doc] : [];
+  for (const d of docs) {
+    const idStr = String(d._id);
+    await removePoolAccount(idStr);
+    await db.warmupAccounts().deleteOne({ _id: d._id });
+  }
+  audit('connection', `Number removed from Conversations${phone ? ` (+${phone})` : ''}`);
+  res.json({ ok: true, removed: docs.length });
 });
 
 // Thread list: one row per contact that has messages, newest activity first.

@@ -84,6 +84,18 @@ export default function Conversations({ go }) {
     }
   }
 
+  async function removeTab(a) {
+    if (!confirm(`Remove ${a.label || '+' + a.phone} from Conversations? This unlinks the number from the app.`)) return;
+    try {
+      await api.del(`/conversations/accounts/${a.id}`);
+      toast('Number removed');
+      if (account === a.id) setAccount('main');
+      loadAccounts();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+
   async function pinChat(t) {
     try {
       await api.post(`/conversations/${t.id}/pin`, { pinned: !t.pinned });
@@ -241,6 +253,15 @@ export default function Conversations({ go }) {
               {a.phone ? ` · +${a.phone}` : ''}
             </span>
             {a.syncing && <span className="wa-spin" title="Syncing chats…" />}
+            {a.id !== 'main' && (
+              <span
+                className="wa-tab-x"
+                title="Remove this number"
+                onClick={(e) => { e.stopPropagation(); removeTab(a); }}
+              >
+                ✕
+              </span>
+            )}
           </button>
         ))}
         <button className="wa-tab add" onClick={() => setShowAddAccount(true)} title="Link another WhatsApp number for chats">

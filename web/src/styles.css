@@ -2049,3 +2049,20 @@ tbody tr:hover {
 
 /* Tab dot: connecting state */
 .wa-tab-dot.connecting { background: var(--warn); }
+
+/* Tab remove (×) button */
+.wa-tab-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  font-size: 11px;
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+.wa-tab:hover .wa-tab-x { opacity: 0.8; }
+.wa-tab-x:hover { background: var(--danger-soft); color: var(--danger); opacity: 1; }
