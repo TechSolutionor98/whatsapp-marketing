@@ -8,10 +8,11 @@ export const conversations = Router();
 // Thread list: one row per contact that has messages, newest activity first.
 conversations.get('/', async (req, res) => {
   const { filter = '' } = req.query;
+  // One row per contact, ordered by most recent message.
   const summaries = await db
     .messages()
     .aggregate([
-      { $sort: { _id: 1 } },
+      { $sort: { created_at: 1 } },
       {
         $group: {
           _id: '$contact_id',
@@ -20,17 +21,21 @@ conversations.get('/', async (req, res) => {
           last_at: { $last: '$created_at' },
         },
       },
+      { $sort: { last_at: -1 } },
+      { $limit: 500 },
     ])
     .toArray();
-  const map = new Map(summaries.map((s) => [s._id, s]));
 
-  const contactFilter = filter === 'handoff' ? { handoff: 1 } : {};
-  const contactsList = await db.contacts().find(contactFilter).toArray();
+  const ids = summaries.map((s) => oid(s._id)).filter(Boolean);
+  const cfilter = { _id: { $in: ids } };
+  if (filter === 'handoff') cfilter.handoff = 1;
+  const contactsList = await db.contacts().find(cfilter).toArray();
+  const byId = new Map(contactsList.map((c) => [String(c._id), c]));
 
   const rows = [];
-  for (const c of contactsList) {
-    const s = map.get(String(c._id));
-    if (!s) continue;
+  for (const s of summaries) {
+    const c = byId.get(s._id);
+    if (!c) continue;
     rows.push({
       id: String(c._id),
       name: c.name,
@@ -38,15 +43,16 @@ conversations.get('/', async (req, res) => {
       status: c.status,
       handoff: c.handoff,
       handoff_reason: c.handoff_reason,
+      synced: c.synced ? 1 : 0,
       last_inbound_at: c.last_inbound_at,
       last_outbound_at: c.last_outbound_at,
       last_message: s.last_message,
       last_direction: s.last_direction,
       last_at: s.last_at,
     });
+    if (rows.length >= 300) break;
   }
-  rows.sort((a, b) => String(b.last_at || '').localeCompare(String(a.last_at || '')));
-  res.json(rows.slice(0, 300));
+  res.json(rows);
 });
 
 conversations.get('/:contactId', async (req, res) => {
@@ -57,8 +63,8 @@ conversations.get('/:contactId', async (req, res) => {
   const messages = await db
     .messages()
     .find({ contact_id: String(_id) })
-    .sort({ _id: 1 })
-    .limit(500)
+    .sort({ created_at: 1, _id: 1 })
+    .limit(1000)
     .toArray();
   res.json({ contact: pub(contact), messages: pubList(messages) });
 });

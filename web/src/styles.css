@@ -1773,3 +1773,42 @@ tbody tr:hover {
   width: 30px;
   height: 30px;
 }
+
+/* ---- Conversations: thread search + day dividers ---- */
+.thread-search {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--bg-soft);
+  border-bottom: 1px solid var(--border);
+}
+.thread-search svg {
+  width: 16px;
+  height: 16px;
+  color: var(--text-faint);
+  flex: none;
+}
+.thread-search .input {
+  height: 38px;
+  padding: 0 10px;
+  font-size: 13px;
+  border-radius: 10px;
+}
+.chat-day {
+  display: flex;
+  justify-content: center;
+  margin: 6px 0;
+}
+.chat-day span {
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--text-soft);
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 999px;
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.06);
+}

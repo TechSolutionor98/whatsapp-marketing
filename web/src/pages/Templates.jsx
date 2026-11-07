@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
-import { Empty } from '../ui.jsx';
+import { Empty, Loading } from '../ui.jsx';
 
 /* ---------------- Block model ---------------- */
 const BLOCKS = {
@@ -62,9 +62,16 @@ function splitDraft(text) {
 export default function Templates() {
   const { toast } = useApp();
   const [list, setList] = useState([]);
+  const [loaded, setLoaded] = useState(false);
   const [builder, setBuilder] = useState(null); // {} for new, template for edit
 
-  const load = async () => setList(await api.get('/templates'));
+  const load = async () => {
+    try {
+      setList(await api.get('/templates'));
+    } finally {
+      setLoaded(true);
+    }
+  };
   useEffect(() => {
     load();
   }, []);
@@ -96,7 +103,11 @@ export default function Templates() {
         </button>
       </div>
 
-      {list.length === 0 ? (
+      {!loaded ? (
+        <div className="card">
+          <Loading label="Loading templates…" />
+        </div>
+      ) : list.length === 0 ? (
         <div className="card">
           <Empty
             icon="template"

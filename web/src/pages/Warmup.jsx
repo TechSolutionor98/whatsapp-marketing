@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
-import { timeAgo } from '../ui.jsx';
+import { Loading, timeAgo } from '../ui.jsx';
 
 export default function Warmup() {
   const { toast, onBus } = useApp();
@@ -113,7 +113,7 @@ export default function Warmup() {
     setSavingCfg(false);
   }
 
-  if (!status || !s) return null;
+  if (!status || !s) return <Loading label="Loading warm-up…" minHeight={360} />;
   const accounts = status.accounts || [];
   const pct = status.dailyTarget ? Math.min(100, Math.round((status.sentToday / status.dailyTarget) * 100)) : 0;
   const setCfg = (k, v) => setS({ ...s, [k]: v });

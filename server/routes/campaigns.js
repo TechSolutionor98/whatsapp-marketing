@@ -43,7 +43,8 @@ async function progressFor(campaignId) {
 }
 
 async function buildTargets(campaignIdStr, audienceFilter) {
-  const filter = { status: 'active', warmup: { $ne: 1 } }; // never cold-message warm-up contacts
+  // never cold-message warm-up numbers or synced personal WhatsApp chats
+  const filter = { status: 'active', warmup: { $ne: 1 }, synced: { $ne: 1 } };
   if (audienceFilter) filter.tags = new RegExp(esc(audienceFilter), 'i');
   const contactsList = await db
     .contacts()

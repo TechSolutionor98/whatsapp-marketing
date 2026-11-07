@@ -53,7 +53,7 @@ system.get('/stats', async (_req, res) => {
       queued,
       sentToday,
     ] = await Promise.all([
-      C.countDocuments({ status: 'active' }),
+      C.countDocuments({ status: 'active', synced: { $ne: 1 }, warmup: { $ne: 1 } }),
       M.countDocuments({ direction: 'out' }),
       C.countDocuments({ handoff: 1 }),
       T.countDocuments({ status: 'failed' }),

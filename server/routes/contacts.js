@@ -11,7 +11,8 @@ function esc(s) {
 contacts.get('/', async (req, res) => {
   try {
     const { q = '', status = '', tag = '' } = req.query;
-    const filter = { warmup: { $ne: 1 } }; // warm-up contacts live in the Warmup page
+    // warm-up contacts live in the Warmup page; synced WhatsApp chats live only in Conversations
+    const filter = { warmup: { $ne: 1 }, synced: { $ne: 1 } };
     if (q) {
       const rx = new RegExp(esc(q), 'i');
       filter.$or = [{ name: rx }, { phone: rx }];
@@ -51,6 +52,7 @@ contacts.post('/', async (req, res) => {
       tags,
       notes,
       status: 'active',
+      synced: 0,
       handoff: 0,
       handoff_reason: '',
       last_inbound_at: null,
@@ -125,9 +127,8 @@ contacts.post('/import', async (req, res) => {
             last_outbound_at: null,
             created_at: nowIso(),
           },
-          ...(name || t
-            ? { $set: { ...(name ? { name } : {}), ...(t ? { tags: t } : {}) } }
-            : {}),
+          // Always a real lead (promote it out of "synced" if it was a WhatsApp chat).
+          $set: { synced: 0, ...(name ? { name } : {}), ...(t ? { tags: t } : {}) },
         },
         upsert: true,
       },
@@ -163,7 +164,10 @@ function parseText(text, tags) {
 }
 
 contacts.get('/tags/all', async (_req, res) => {
-  const list = await db.contacts().find({ tags: { $nin: ['', null] } }, { projection: { tags: 1 } }).toArray();
+  const list = await db
+    .contacts()
+    .find({ tags: { $nin: ['', null] }, synced: { $ne: 1 }, warmup: { $ne: 1 } }, { projection: { tags: 1 } })
+    .toArray();
   const set = new Set();
   for (const r of list)
     (r.tags || '').split(',').forEach((t) => {

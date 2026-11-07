@@ -60,6 +60,8 @@ async function ensureIndexes() {
   await col('campaign_targets').createIndex({ campaign_id: 1, status: 1 });
   await col('messages').createIndex({ contact_id: 1, created_at: 1 });
   await col('messages').createIndex({ direction: 1, day_key: 1 });
+  // Dedup key for history sync + outgoing echoes (many nulls on legacy rows → sparse).
+  await col('messages').createIndex({ wa_message_id: 1 }, { sparse: true });
   await col('audit_logs').createIndex({ created_at: -1 });
   await col('warmup_log').createIndex({ day_key: 1 });
   await col('warmup_log').createIndex({ created_at: -1 });

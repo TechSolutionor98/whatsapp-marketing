@@ -2,12 +2,13 @@ import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
-import { Modal, Empty, timeAgo, initials } from '../ui.jsx';
+import { Modal, Empty, Loading, timeAgo, initials } from '../ui.jsx';
 
 export default function Authentication() {
   const { user, logout, toast } = useApp();
   const isAdmin = user?.role === 'owner' || user?.role === 'admin';
   const [users, setUsers] = useState([]);
+  const [usersLoaded, setUsersLoaded] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [pw, setPw] = useState({ currentPassword: '', newPassword: '', confirm: '' });
   const [savingPw, setSavingPw] = useState(false);
@@ -17,6 +18,9 @@ export default function Authentication() {
     try {
       setUsers(await api.get('/auth/users'));
     } catch {}
+    finally {
+      setUsersLoaded(true);
+    }
   };
   useEffect(() => {
     loadUsers();
@@ -115,7 +119,9 @@ export default function Authentication() {
               <Icon.plus /> Add member
             </button>
           </div>
-          {users.length === 0 ? (
+          {!usersLoaded ? (
+            <div className="card-pad"><Loading label="Loading team…" minHeight={140} /></div>
+          ) : users.length === 0 ? (
             <div className="card-pad"><Empty icon="users" title="Just you so far">Invite teammates to share the workspace.</Empty></div>
           ) : (
             <div className="table-wrap">

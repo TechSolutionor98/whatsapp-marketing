@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
-import { StatusBadge, Empty, timeAgo } from '../ui.jsx';
+import { StatusBadge, Empty, Loading, timeAgo } from '../ui.jsx';
 
 function Stat({ label, value, hint, icon, color, accent }) {
   const I = Icon[icon];
@@ -22,12 +22,16 @@ export default function Overview({ go }) {
   const { stats } = useApp();
   const [camps, setCamps] = useState([]);
   const [logs, setLogs] = useState([]);
+  const [loaded, setLoaded] = useState(false);
 
   const load = async () => {
     try {
       setCamps(await api.get('/campaigns'));
       setLogs(await api.get('/audit?limit=8'));
     } catch {}
+    finally {
+      setLoaded(true);
+    }
   };
   useEffect(() => {
     load();
@@ -60,7 +64,9 @@ export default function Overview({ go }) {
             </button>
           </div>
           <div className="card-pad">
-            {showcase.length === 0 ? (
+            {!loaded ? (
+              <Loading label="Loading…" minHeight={160} />
+            ) : showcase.length === 0 ? (
               <Empty
                 icon="megaphone"
                 title="No campaigns yet"
@@ -114,7 +120,9 @@ export default function Overview({ go }) {
             </button>
           </div>
           <div>
-            {logs.length === 0 ? (
+            {!loaded ? (
+              <Loading label="Loading…" minHeight={160} />
+            ) : logs.length === 0 ? (
               <Empty icon="logs" title="No activity yet">
                 Events will appear here as the engine runs.
               </Empty>

@@ -2,14 +2,21 @@ import { Fragment, useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
-import { Modal, Empty, StatusBadge } from '../ui.jsx';
+import { Modal, Empty, Loading, StatusBadge } from '../ui.jsx';
 
 export default function Campaigns() {
   const { toast, refreshStats } = useApp();
   const [list, setList] = useState([]);
+  const [loaded, setLoaded] = useState(false);
   const [showNew, setShowNew] = useState(false);
 
-  const load = async () => setList(await api.get('/campaigns'));
+  const load = async () => {
+    try {
+      setList(await api.get('/campaigns'));
+    } finally {
+      setLoaded(true);
+    }
+  };
   useEffect(() => {
     load();
     const t = setInterval(load, 6000);
@@ -47,7 +54,11 @@ export default function Campaigns() {
         </button>
       </div>
 
-      {list.length === 0 ? (
+      {!loaded ? (
+        <div className="card">
+          <Loading label="Loading campaigns…" />
+        </div>
+      ) : list.length === 0 ? (
         <div className="card">
           <Empty
             icon="megaphone"

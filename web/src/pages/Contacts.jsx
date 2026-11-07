@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
-import { Modal, Empty, StatusBadge, timeAgo } from '../ui.jsx';
+import { Modal, Empty, Loading, StatusBadge, timeAgo } from '../ui.jsx';
 
 export default function Contacts() {
   const { toast, refreshStats } = useApp();
@@ -95,10 +95,7 @@ export default function Contacts() {
 
       <div className="card">
         {!loaded ? (
-          <div className="list-loading">
-            <div className="spinner" />
-            <span>Loading contacts…</span>
-          </div>
+          <Loading label="Loading contacts…" />
         ) : list.length === 0 ? (
           filtered ? (
             <Empty icon="search" title="No matches">

@@ -1,17 +1,22 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { Icon } from '../icons.jsx';
-import { Empty, timeAgo } from '../ui.jsx';
+import { Empty, Loading, timeAgo } from '../ui.jsx';
 
 const TYPES = ['', 'connection', 'send', 'reply', 'handoff', 'campaign', 'system'];
 
 export default function Audit() {
   const [logs, setLogs] = useState([]);
+  const [loaded, setLoaded] = useState(false);
   const [type, setType] = useState('');
 
   const load = async () => {
     const params = type ? '?type=' + type : '';
-    setLogs(await api.get('/audit' + params));
+    try {
+      setLogs(await api.get('/audit' + params));
+    } finally {
+      setLoaded(true);
+    }
   };
   useEffect(() => {
     load();
@@ -34,7 +39,9 @@ export default function Audit() {
       </div>
 
       <div className="card">
-        {logs.length === 0 ? (
+        {!loaded ? (
+          <Loading label="Loading activity…" />
+        ) : logs.length === 0 ? (
           <Empty icon="logs" title="No log entries">Engine activity will show up here.</Empty>
         ) : (
           logs.map((l) => (

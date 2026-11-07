@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
+import { Loading } from '../ui.jsx';
 
 const MODEL_HINTS = {
   groq: 'e.g. openai/gpt-oss-20b (fast) or openai/gpt-oss-120b (best). See console.groq.com for your models.',
@@ -43,7 +44,7 @@ export default function Settings() {
     })();
   }, []);
 
-  if (!s) return null;
+  if (!s) return <Loading label="Loading settings…" minHeight={360} />;
   const set = (k, v) => setS({ ...s, [k]: v });
 
   async function save() {

@@ -21,6 +21,17 @@ export function Modal({ title, onClose, children, footer, wide }) {
   );
 }
 
+// Shown while a page's first data fetch is in flight — avoids flashing an
+// empty state ("No contacts yet") before the data has actually loaded.
+export function Loading({ label = 'Loading…', minHeight }) {
+  return (
+    <div className="list-loading" style={minHeight ? { minHeight } : undefined}>
+      <div className="spinner" />
+      <span>{label}</span>
+    </div>
+  );
+}
+
 export function Empty({ icon = 'inbox', title, children, action }) {
   const I = Icon[icon] || Icon.inbox;
   return (
