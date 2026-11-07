@@ -100,7 +100,7 @@ export default function Conversations({ go }) {
       } catch {}
     })();
     loadAccounts();
-    const t = setInterval(loadAccounts, 15000);
+    const t = setInterval(loadAccounts, 8000);
     return () => clearInterval(t);
   }, []);
 
@@ -150,6 +150,7 @@ export default function Conversations({ go }) {
     return onBus((ev, data) => {
       if (ev === 'message:in' || ev === 'message:out') {
         loadThreads();
+        loadAccounts(); // refresh the syncing indicator as history batches land
         if (active && (!data.contactId || data.contactId === active)) loadThread(active);
       }
       if (ev === 'message:status' && active) loadThread(active);
@@ -239,6 +240,7 @@ export default function Conversations({ go }) {
               {a.label || (a.id === 'main' ? 'Main number' : 'Number')}
               {a.phone ? ` · +${a.phone}` : ''}
             </span>
+            {a.syncing && <span className="wa-spin" title="Syncing chats…" />}
           </button>
         ))}
         <button className="wa-tab add" onClick={() => setShowAddAccount(true)} title="Link another WhatsApp number for chats">
@@ -263,14 +265,21 @@ export default function Conversations({ go }) {
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
+          {activeAcct?.syncing && threads.length > 0 && (
+            <div className="sync-banner"><span className="wa-spin" /> Syncing more chats…</div>
+          )}
           {!threadsLoaded ? (
             <Loading label="Loading chats…" minHeight={200} />
           ) : threads.length === 0 ? (
-            <div style={{ padding: 30 }}>
-              <Empty icon="chat" title="No conversations">
-                Replies and your WhatsApp chats appear here.
-              </Empty>
-            </div>
+            activeAcct?.syncing ? (
+              <Loading label="Syncing your chats…" minHeight={200} />
+            ) : (
+              <div style={{ padding: 30 }}>
+                <Empty icon="chat" title="No conversations">
+                  Replies and your WhatsApp chats appear here.
+                </Empty>
+              </div>
+            )
           ) : shown.length === 0 ? (
             <div style={{ padding: 30 }}>
               <Empty icon="search" title="No matches">No chat matches “{search}”.</Empty>

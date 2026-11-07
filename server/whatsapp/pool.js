@@ -33,6 +33,7 @@ export function poolState() {
     label: a.label || '',
     role: a.role || 'warmup',
     auto_reply: !!a.autoReply,
+    syncing: !!a.syncing,
     status: a.status,
     qr: a.qr || null,
     me: a.me || null,
@@ -88,6 +89,15 @@ export async function startPoolAccount(id, label = '', role = 'warmup', autoRepl
     sock.ev.on('messages.upsert', (ev) => ingestPool(id, ev)); // capture this number's own chats
     if (isConv) {
       sock.ev.on('messaging-history.set', (ev) => {
+        const acc = accounts.get(id);
+        if (acc) {
+          // Still syncing until WhatsApp marks this the last batch.
+          acc.syncing = !(ev.isLatest || (ev.progress != null && ev.progress >= 100));
+          clearTimeout(acc.syncTimer);
+          // Fallback: if the final batch never arrives, stop the loader after a quiet gap.
+          acc.syncTimer = setTimeout(() => { const a2 = accounts.get(id); if (a2) { a2.syncing = false; emitPool(); } }, 25000);
+          emitPool();
+        }
         audit('connection', `History received for conversation number: ${ev.messages?.length || 0} messages, ${ev.chats?.length || 0} chats`, { level: 'info' });
         ingestPoolHistory(id, ev);
       });

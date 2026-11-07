@@ -46,7 +46,7 @@ conversations.get('/accounts', (_req, res) => {
   ];
   for (const a of poolState()) {
     if (a.status === 'connected' && a.me?.phone) {
-      raw.push({ id: a.id, label: a.label || '', phone: a.me.phone, connected: true, role: a.role, auto_reply: !!a.auto_reply });
+      raw.push({ id: a.id, label: a.label || '', phone: a.me.phone, connected: true, role: a.role, auto_reply: !!a.auto_reply, syncing: !!a.syncing });
     }
   }
   // Collapse duplicate links of the same number into a single tab (prefer main, then a named one).
@@ -55,10 +55,10 @@ conversations.get('/accounts', (_req, res) => {
     const key = acc.phone || acc.id;
     const cur = byPhone.get(key);
     if (!cur) { byPhone.set(key, acc); continue; }
-    const auto_reply = cur.auto_reply || acc.auto_reply;
-    if (acc.id === 'main') byPhone.set(key, { ...acc, auto_reply });
-    else if (!cur.label && acc.label) byPhone.set(key, { ...cur, label: acc.label, auto_reply });
-    else byPhone.set(key, { ...cur, auto_reply });
+    const merged = { auto_reply: cur.auto_reply || acc.auto_reply, syncing: cur.syncing || acc.syncing };
+    if (acc.id === 'main') byPhone.set(key, { ...acc, ...merged });
+    else if (!cur.label && acc.label) byPhone.set(key, { ...cur, label: acc.label, ...merged });
+    else byPhone.set(key, { ...cur, ...merged });
   }
   res.json([...byPhone.values()]);
 });
