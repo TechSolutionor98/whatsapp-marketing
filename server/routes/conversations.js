@@ -6,45 +6,77 @@ import { poolState, sendFromTo, isAccountConnected, startPoolAccount, removePool
 
 export const conversations = Router();
 
-// Match messages belonging to one account tab. 'main' includes legacy (untagged) rows.
-function accountMatch(account) {
-  if (!account || account === 'main') {
-    return { $or: [{ account_id: 'main' }, { account_id: null }, { account_id: { $exists: false } }] };
+// All stored account_ids that belong to the same physical phone as this tab
+// (the same WhatsApp number can be linked more than once — main + warm-up, etc.).
+function accountGroup(account) {
+  const wa = getWaState();
+  const pool = poolState().filter((a) => a.me?.phone);
+  const phoneById = new Map(pool.map((a) => [a.id, a.me.phone]));
+  const phone = account === 'main' ? wa.me?.phone || null : phoneById.get(account) || null;
+
+  const ids = new Set([account]);
+  let includeLegacy = account === 'main';
+  if (phone) {
+    if (wa.me?.phone === phone) { ids.add('main'); includeLegacy = true; }
+    for (const a of pool) if (a.me.phone === phone) ids.add(a.id);
   }
-  return { account_id: account };
+  return { ids: [...ids], includeLegacy, phone };
 }
 
-// The connected WhatsApp numbers that can own conversation tabs
-// (main + campaign/warm-up numbers + conversation-only numbers).
+// Match messages belonging to one account tab ('main' also matches legacy untagged rows).
+function accountMatch(account) {
+  const { ids, includeLegacy } = accountGroup(account);
+  const or = [{ account_id: { $in: ids } }];
+  if (includeLegacy) or.push({ account_id: null }, { account_id: { $exists: false } });
+  return { $or: or };
+}
+
+// The connected WhatsApp numbers that can own conversation tabs — one tab per unique phone.
 conversations.get('/accounts', (_req, res) => {
   const wa = getWaState();
-  const accounts = [
+  const raw = [
     {
       id: 'main',
       label: getSetting('mainConvLabel', '') || 'Main number',
       phone: wa.me?.phone || null,
       connected: wa.status === 'connected',
+      role: 'main',
       auto_reply: !!getSetting('autoReplyEnabled', false),
     },
   ];
   for (const a of poolState()) {
     if (a.status === 'connected' && a.me?.phone) {
-      accounts.push({ id: a.id, label: a.label || '', phone: a.me.phone, connected: true, role: a.role, auto_reply: !!a.auto_reply });
+      raw.push({ id: a.id, label: a.label || '', phone: a.me.phone, connected: true, role: a.role, auto_reply: !!a.auto_reply });
     }
   }
-  res.json(accounts);
+  // Collapse duplicate links of the same number into a single tab (prefer main, then a named one).
+  const byPhone = new Map();
+  for (const acc of raw) {
+    const key = acc.phone || acc.id;
+    const cur = byPhone.get(key);
+    if (!cur) { byPhone.set(key, acc); continue; }
+    const auto_reply = cur.auto_reply || acc.auto_reply;
+    if (acc.id === 'main') byPhone.set(key, { ...acc, auto_reply });
+    else if (!cur.label && acc.label) byPhone.set(key, { ...cur, label: acc.label, auto_reply });
+    else byPhone.set(key, { ...cur, auto_reply });
+  }
+  res.json([...byPhone.values()]);
 });
 
-// Turn AI auto-reply on/off for one number.
+// Turn AI auto-reply on/off for a number (applies to every link of that phone).
 conversations.post('/accounts/:id/autoreply', async (req, res) => {
   const enabled = !!req.body?.enabled;
-  if (req.params.id === 'main') {
-    await setSetting('autoReplyEnabled', enabled);
-  } else {
-    const _id = oid(req.params.id);
-    if (!_id) return res.status(400).json({ error: 'Bad id' });
-    await db.warmupAccounts().updateOne({ _id }, { $set: { auto_reply: enabled } });
-    setPoolAutoReply(req.params.id, enabled);
+  const { ids } = accountGroup(req.params.id);
+  for (const id of ids) {
+    if (id === 'main') {
+      await setSetting('autoReplyEnabled', enabled);
+    } else {
+      const _id = oid(id);
+      if (_id) {
+        await db.warmupAccounts().updateOne({ _id }, { $set: { auto_reply: enabled } });
+        setPoolAutoReply(id, enabled);
+      }
+    }
   }
   res.json({ ok: true, enabled });
 });
@@ -189,18 +221,20 @@ conversations.post('/:contactId/reply', async (req, res) => {
   if (!contact) return res.status(404).json({ error: 'Not found' });
   if (!body?.trim()) return res.status(400).json({ error: 'Message is empty' });
 
-  const viaMain = account === 'main';
-  if (viaMain && !isConnected()) return res.status(400).json({ error: 'Main WhatsApp is not connected' });
-  if (!viaMain && !isAccountConnected(account)) return res.status(400).json({ error: 'That number is not connected' });
+  // Send from whichever linked session of this number is actually connected.
+  const { ids } = accountGroup(account);
+  const useMain = ids.includes('main') && isConnected();
+  const poolId = ids.find((id) => id !== 'main' && isAccountConnected(id));
+  if (!useMain && !poolId) return res.status(400).json({ error: 'That number is not connected' });
 
   try {
     let waId;
-    if (viaMain) {
+    if (useMain) {
       waId = contact.is_group
         ? await sendToJid(contact.jid || `${contact.phone}@g.us`, body.trim())
         : await sendText(contact.phone, body.trim());
     } else {
-      waId = await sendFromTo(account, contact.phone, body.trim());
+      waId = await sendFromTo(poolId, contact.phone, body.trim());
     }
     await db.messages().insertOne({
       contact_id: String(_id),

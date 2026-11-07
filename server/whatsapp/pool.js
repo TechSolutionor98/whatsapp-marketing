@@ -239,6 +239,42 @@ function ourPhones() {
   return set;
 }
 
+// Find/create a contact for a pool chat (1:1 by phone, group by jid).
+async function upsertPoolChat({ phone, jid, isGroup = false, name = '' }) {
+  const key = isGroup ? { jid } : { phone };
+  const existing = await db.contacts().findOne(key);
+  if (existing) {
+    const set = {};
+    if (!existing.name && name) set.name = name;
+    if (isGroup && !existing.jid) set.jid = jid;
+    if (Object.keys(set).length) {
+      await db.contacts().updateOne({ _id: existing._id }, { $set: set });
+      Object.assign(existing, set);
+    }
+    return existing;
+  }
+  const doc = {
+    name: name || '',
+    phone: isGroup ? jid.split('@')[0] : phone,
+    jid: jid || null,
+    is_group: isGroup ? 1 : 0,
+    tags: isGroup ? 'group' : 'whatsapp',
+    status: 'active',
+    synced: isGroup ? 1 : 0,
+    handoff: 0,
+    handoff_reason: '',
+    last_inbound_at: null,
+    last_outbound_at: null,
+    created_at: nowIso(),
+  };
+  try {
+    const r = await db.contacts().insertOne(doc);
+    return { _id: r.insertedId, ...doc };
+  } catch {
+    return await db.contacts().findOne(key);
+  }
+}
+
 async function poolAutoReply(accountId, contact, phone) {
   try {
     const history = await db
@@ -280,12 +316,32 @@ async function ingestPool(accountId, { messages, type }) {
     try {
       if (!msg.message) continue;
       const raw = msg.key.remoteJid || '';
-      if (raw.endsWith('@g.us') || raw.endsWith('@newsletter') || raw === 'status@broadcast') continue; // 1:1 only
-      const phone = jidToPhone(pnOf(msg));
-      if (!phone || ourPhones().has(phone)) continue; // skip warm-up traffic between our own numbers
-      const body = textOf(msg).trim();
+      if (raw.endsWith('@newsletter') || raw === 'status@broadcast') continue;
+      const isGroup = raw.endsWith('@g.us');
       const id = msg.key.id;
       if (!id) continue;
+      const body = textOf(msg).trim();
+
+      // Group message: store for the thread (conversation numbers only), no lead automation.
+      if (isGroup) {
+        if ((accounts.get(accountId)?.role || 'warmup') !== 'conversation') continue;
+        if (!body && !msg.key.fromMe) continue;
+        const gc = await upsertPoolChat({ jid: raw, isGroup: true });
+        if (!gc || !body) continue;
+        const r = await db.messages().updateOne(
+          { wa_message_id: id },
+          { $setOnInsert: { contact_id: String(gc._id), campaign_id: null, account_id: accountId, direction: msg.key.fromMe ? 'out' : 'in', body, sender: msg.key.fromMe ? '' : msg.pushName || '', status: msg.key.fromMe ? 'sent' : 'read', wa_message_id: id, synced: 1, created_at: nowIso(), day_key: dayKey() } },
+          { upsert: true }
+        );
+        if (r.upsertedCount) {
+          await db.contacts().updateOne({ _id: gc._id }, { $set: msg.key.fromMe ? { last_outbound_at: nowIso() } : { last_inbound_at: nowIso() }, ...(msg.key.fromMe ? {} : { $inc: { unread: 1 } }) });
+          emit(msg.key.fromMe ? 'message:out' : 'message:in', { contactId: String(gc._id) });
+        }
+        continue;
+      }
+
+      const phone = jidToPhone(pnOf(msg));
+      if (!phone || ourPhones().has(phone)) continue; // skip warm-up traffic between our own numbers
 
       let contact = await db.contacts().findOne({ phone });
       if (!contact) {
@@ -352,32 +408,38 @@ async function ingestPool(accountId, { messages, type }) {
   }
 }
 
-// Import a conversation number's existing chat history (1:1 only, excluding our own numbers).
-async function ingestPoolHistory(accountId, { messages, contacts: waContacts }) {
+// Import a conversation number's existing chat history (1:1 + groups, excluding our own numbers).
+async function ingestPoolHistory(accountId, { messages, contacts: waContacts, chats }) {
   if (!messages?.length) return;
   const nameByJid = new Map();
   for (const c of waContacts || []) if (c?.id) nameByJid.set(c.id, c.name || c.notify || c.verifiedName || '');
+  for (const ch of chats || []) {
+    const nm = ch?.name || ch?.subject || '';
+    if (ch?.id && nm) nameByJid.set(ch.id, nm);
+  }
   const mine = ourPhones();
 
-  const byPhone = new Map();
+  // Group messages by their chat jid (1:1 jid or group jid).
+  const byChat = new Map();
   for (const msg of messages) {
     const raw = msg.key?.remoteJid || '';
-    if (!raw || raw.endsWith('@g.us') || raw.endsWith('@newsletter') || raw === 'status@broadcast') continue;
-    const phone = jidToPhone(pnOf(msg));
-    if (!phone || mine.has(phone)) continue;
-    if (!byPhone.has(phone)) byPhone.set(phone, []);
-    byPhone.get(phone).push(msg);
+    if (!raw || raw.endsWith('@newsletter') || raw === 'status@broadcast') continue;
+    const isGroup = raw.endsWith('@g.us');
+    let chatJid = raw;
+    if (!isGroup) {
+      const phone = jidToPhone(pnOf(msg));
+      if (!phone || mine.has(phone)) continue; // skip our own numbers
+      chatJid = `${phone}@s.whatsapp.net`;
+    }
+    if (!byChat.has(chatJid)) byChat.set(chatJid, []);
+    byChat.get(chatJid).push(msg);
   }
 
   let imported = 0;
-  for (const [phone, msgs] of byPhone) {
-    let contact = await db.contacts().findOne({ phone });
-    if (!contact) {
-      const nm = nameByJid.get(`${phone}@s.whatsapp.net`) || '';
-      const doc = { name: nm, phone, tags: 'whatsapp', status: 'active', synced: 1, handoff: 0, handoff_reason: '', last_inbound_at: null, last_outbound_at: null, created_at: nowIso() };
-      const r = await db.contacts().insertOne(doc).catch(() => null);
-      contact = r ? { _id: r.insertedId, ...doc } : await db.contacts().findOne({ phone });
-    }
+  for (const [chatJid, msgs] of byChat) {
+    const isGroup = chatJid.endsWith('@g.us');
+    const phone = isGroup ? null : jidToPhone(chatJid);
+    const contact = await upsertPoolChat({ phone, jid: chatJid, isGroup, name: nameByJid.get(chatJid) || '' });
     if (!contact || contact.warmup === 1) continue;
 
     const ops = [];
@@ -389,10 +451,11 @@ async function ingestPoolHistory(accountId, { messages, contacts: waContacts }) 
       const tsNum = Number(msg.messageTimestamp) || 0;
       const ts = tsNum ? new Date(tsNum * 1000).toISOString() : nowIso();
       const dir = msg.key.fromMe ? 'out' : 'in';
+      const sender = isGroup && !msg.key.fromMe ? msg.pushName || '' : '';
       ops.push({
         updateOne: {
           filter: { wa_message_id: id },
-          update: { $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: dir, body, status: dir === 'out' ? 'sent' : 'read', wa_message_id: id, synced: 1, created_at: ts, day_key: ts.slice(0, 10) } },
+          update: { $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: dir, body, sender, status: dir === 'out' ? 'sent' : 'read', wa_message_id: id, synced: 1, created_at: ts, day_key: ts.slice(0, 10) } },
           upsert: true,
         },
       });
