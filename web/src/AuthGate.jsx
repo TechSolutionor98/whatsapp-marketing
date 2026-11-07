@@ -4,9 +4,7 @@ import { Icon } from './icons.jsx';
 
 const Logo = () => (
   <div className="auth-logo">
-    <svg viewBox="0 0 24 24" fill="white">
-      <path d="M12 2a10 10 0 00-8.7 14.9L2 22l5.3-1.4A10 10 0 1012 2z" />
-    </svg>
+    <img src="/logo.png" alt="Tech Solutionor" />
   </div>
 );
 

@@ -69,9 +69,7 @@ function Sidebar({ page, go }) {
     <aside className="sidebar">
       <div className="brand">
         <div className="brand-logo">
-          <svg viewBox="0 0 24 24" fill="white">
-            <path d="M12 2a10 10 0 00-8.7 14.9L2 22l5.3-1.4A10 10 0 1012 2z" opacity="0.95" />
-          </svg>
+          <img src="/logo.png" alt="Tech Solutionor" />
         </div>
         <div>
           <div className="brand-name">Tech WA Marketing</div>
