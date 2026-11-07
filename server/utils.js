@@ -31,11 +31,21 @@ export function spin(text) {
   return out;
 }
 
+// A contact's display name, falling back to their phone number (e.g. "+923001234567")
+// when no name is saved — so messages read "Hi +923001234567" instead of "Hi there".
+export function contactName(contact = {}) {
+  const name = (contact.name || '').trim();
+  if (name) return name;
+  return contact.phone ? `+${String(contact.phone).replace(/^\++/, '')}` : 'there';
+}
+
 // Replace {{name}} style variables from a contact, then resolve spintax.
 export function renderTemplate(body, contact = {}) {
-  const firstName = (contact.name || '').trim().split(/\s+/)[0] || 'there';
+  const name = (contact.name || '').trim();
+  const display = contactName(contact);
+  const firstName = name ? name.split(/\s+/)[0] : display;
   const vars = {
-    name: contact.name || 'there',
+    name: display,
     first_name: firstName,
     phone: contact.phone || '',
   };

@@ -69,7 +69,13 @@ export async function rewriteMessage(baseText, contact = {}, opts = {}) {
   if (!aiAvailable() || !baseText?.trim()) return baseText;
   const tone = opts.tone || getSetting('aiTone', 'friendly');
   const instructions = opts.instructions ?? getSetting('aiInstructions', '');
-  const firstName = (contact.name || '').trim().split(/\s+/)[0] || '';
+  const savedName = (contact.name || '').trim();
+  // No saved name → use their phone number as the name (e.g. "+923001234567").
+  const firstName = savedName
+    ? savedName.split(/\s+/)[0]
+    : contact.phone
+      ? `+${String(contact.phone).replace(/^\++/, '')}`
+      : '';
 
   const system = `You rewrite a short WhatsApp outreach message so it reads as if a real person typed it, personally, for this one recipient.
 Rules:

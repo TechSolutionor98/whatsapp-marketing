@@ -93,7 +93,7 @@ export default function Contacts() {
                 {list.map((c) => (
                   <tr key={c.id}>
                     <td className="cell-strong">
-                      {c.name || <span className="cell-muted">Unknown</span>}
+                      {c.name || <span className="cell-muted">+{c.phone}</span>}
                       {c.handoff === 1 && (
                         <span className="badge amber" style={{ marginLeft: 8 }}>handoff</span>
                       )}
@@ -515,7 +515,7 @@ function ImportModal({ onClose, onDone }) {
                       <tbody>
                         {preview.rows.slice(0, 8).map((r, i) => (
                           <tr key={i}>
-                            <td className="cell-strong">{r.name || <span className="cell-muted">Unknown</span>}</td>
+                            <td className="cell-strong">{r.name || <span className="cell-muted">+{r.phone}</span>}</td>
                             <td style={{ fontVariantNumeric: 'tabular-nums' }}>+{r.phone}</td>
                             {map.tagsCol >= 0 && <td className="cell-muted">{r.tags}</td>}
                           </tr>
