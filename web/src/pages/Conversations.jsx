@@ -11,6 +11,12 @@ function Ticks({ status }) {
   return <span>✓</span>; // sent / unknown
 }
 
+const PinIcon = () => (
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+    <path d="M16 3a1 1 0 0 1 .7 1.71L15 6.41V11l2.3 2.29A1 1 0 0 1 16.59 15H13v5a1 1 0 1 1-2 0v-5H7.41a1 1 0 0 1-.71-1.71L9 11V6.41L7.3 4.71A1 1 0 0 1 8 3h8z" />
+  </svg>
+);
+
 // Get the header's action slot so page-specific controls render up in the top bar.
 function useHeaderSlot() {
   const [node, setNode] = useState(null);
@@ -54,7 +60,6 @@ export default function Conversations({ go }) {
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [aiAvail, setAiAvail] = useState(false);
-  const [autoReply, setAutoReply] = useState(false);
   const [showAiSettings, setShowAiSettings] = useState(false);
   const [showAddAccount, setShowAddAccount] = useState(false);
   const [accounts, setAccounts] = useState([{ id: 'main', label: 'Main number', phone: null, connected: false }]);
@@ -79,11 +84,19 @@ export default function Conversations({ go }) {
     }
   }
 
+  async function pinChat(t) {
+    try {
+      await api.post(`/conversations/${t.id}/pin`, { pinned: !t.pinned });
+      loadThreads();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+
   useEffect(() => {
     (async () => {
       try {
         setAiAvail((await api.get('/ai/status')).available);
-        setAutoReply(!!(await api.get('/settings')).autoReplyEnabled);
       } catch {}
     })();
     loadAccounts();
@@ -93,13 +106,12 @@ export default function Conversations({ go }) {
 
   async function toggleAutoReply() {
     const v = !autoReply;
-    setAutoReply(v);
     try {
-      await api.put('/settings', { autoReplyEnabled: v });
-      toast(v ? 'AI auto-reply is ON' : 'AI auto-reply is OFF', v ? 'success' : 'info');
+      await api.post(`/conversations/accounts/${account}/autoreply`, { enabled: v });
+      await loadAccounts();
+      toast(v ? 'AI auto-reply ON for this number' : 'AI auto-reply OFF for this number', v ? 'success' : 'info');
     } catch (e) {
       toast(e.message, 'error');
-      setAutoReply(!v);
     }
   }
 
@@ -167,6 +179,7 @@ export default function Conversations({ go }) {
 
   const activeAcct = accounts.find((a) => a.id === account);
   const acctConnected = account === 'main' ? wa.status === 'connected' : !!activeAcct?.connected;
+  const autoReply = !!activeAcct?.auto_reply; // this number's own AI auto-reply state
 
   const q = search.trim().toLowerCase();
   const shown = !q
@@ -209,10 +222,7 @@ export default function Conversations({ go }) {
     <>
       {headerSlot ? createPortal(controls, headerSlot) : null}
       {showAiSettings && (
-        <AiReplySettings
-          onClose={() => setShowAiSettings(false)}
-          onSaved={(enabled) => { setShowAiSettings(false); if (enabled !== undefined) setAutoReply(enabled); }}
-        />
+        <AiReplySettings onClose={() => setShowAiSettings(false)} onSaved={() => setShowAiSettings(false)} />
       )}
 
       <div className="wa-tabs">
@@ -290,6 +300,13 @@ export default function Conversations({ go }) {
                       {t.last_message}
                     </span>
                     <span className="thread-end">
+                      <button
+                        className={`thread-pin ${t.pinned ? 'on' : ''}`}
+                        title={t.pinned ? 'Unpin' : 'Pin'}
+                        onClick={(e) => { e.stopPropagation(); pinChat(t); }}
+                      >
+                        <PinIcon />
+                      </button>
                       {t.handoff === 1 && <span className="badge amber" style={{ padding: '0 6px' }}>handoff</span>}
                       {t.unread > 0 && <span className="unread-badge">{t.unread}</span>}
                     </span>
@@ -410,9 +427,9 @@ function AiReplySettings({ onClose, onSaved }) {
     const max = Math.max(min, +s.autoReplyMaxSec || min);
     setBusy(true);
     try {
-      await api.put('/settings', { ...s, autoReplyMinSec: min, autoReplyMaxSec: max });
+      await api.put('/settings', { autoReplyMinSec: min, autoReplyMaxSec: max, autoReplyInstructions: s.autoReplyInstructions });
       toast('AI reply settings saved', 'success');
-      onSaved(s.autoReplyEnabled);
+      onSaved();
     } catch (e) {
       toast(e.message, 'error');
     }
@@ -429,22 +446,9 @@ function AiReplySettings({ onClose, onSaved }) {
         <Loading label="Loading…" minHeight={160} />
       ) : (
         <>
-          <div className="card" style={{ background: 'var(--surface-2)', padding: 14, border: 'none', marginBottom: 14 }}>
-            <div className="flex between">
-              <div className="flex" style={{ gap: 8 }}>
-                <Icon.sparkles style={{ width: 16, color: 'var(--brand-700)' }} />
-                <div>
-                  <strong style={{ fontSize: 13 }}>Auto-reply to incoming messages</strong>
-                  <div className="muted" style={{ fontSize: 11.5 }}>AI answers replies for you automatically.</div>
-                </div>
-              </div>
-              <label className="switch">
-                <input type="checkbox" checked={s.autoReplyEnabled} onChange={(e) => setS({ ...s, autoReplyEnabled: e.target.checked })} />
-                <span className="slider" />
-              </label>
-            </div>
+          <div className="hint" style={{ marginBottom: 12 }}>
+            Turn AI auto-reply <strong>on or off per number</strong> using the toggle on each tab. These timing &amp; context settings apply to all numbers.
           </div>
-
           <div className="row">
             <div className="field" style={{ margin: 0 }}>
               <label>Reply after (min seconds)</label>

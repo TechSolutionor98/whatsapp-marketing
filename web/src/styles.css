@@ -1997,3 +1997,19 @@ tbody tr:hover {
 .wa-tab.add svg { width: 16px; height: 16px; }
 /* Make room for the tab strip above the chat. */
 .chat-layout { height: calc(100vh - 172px); border-top-left-radius: 0; }
+
+/* ---- Pin chat button ---- */
+.thread-pin {
+  border: none;
+  background: transparent;
+  padding: 2px;
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0;
+  display: inline-flex;
+  align-items: center;
+  transition: opacity 0.12s, color 0.12s;
+}
+.thread-item:hover .thread-pin { opacity: 0.65; }
+.thread-pin:hover { opacity: 1; color: var(--brand-700); }
+.thread-pin.on { opacity: 1; color: var(--brand-600); }

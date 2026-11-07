@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { db, audit, oid, pub, pubList, nowIso, dayKey, getSetting, setSetting } from '../db/mongo.js';
 import { emit } from '../events.js';
 import { sendText, sendToJid, isConnected, getWaState } from '../whatsapp/client.js';
-import { poolState, sendFromTo, isAccountConnected, startPoolAccount, removePoolAccount, setPoolLabel } from '../whatsapp/pool.js';
+import { poolState, sendFromTo, isAccountConnected, startPoolAccount, removePoolAccount, setPoolLabel, setPoolAutoReply } from '../whatsapp/pool.js';
 
 export const conversations = Router();
 
@@ -24,14 +24,29 @@ conversations.get('/accounts', (_req, res) => {
       label: getSetting('mainConvLabel', '') || 'Main number',
       phone: wa.me?.phone || null,
       connected: wa.status === 'connected',
+      auto_reply: !!getSetting('autoReplyEnabled', false),
     },
   ];
   for (const a of poolState()) {
     if (a.status === 'connected' && a.me?.phone) {
-      accounts.push({ id: a.id, label: a.label || '', phone: a.me.phone, connected: true, role: a.role });
+      accounts.push({ id: a.id, label: a.label || '', phone: a.me.phone, connected: true, role: a.role, auto_reply: !!a.auto_reply });
     }
   }
   res.json(accounts);
+});
+
+// Turn AI auto-reply on/off for one number.
+conversations.post('/accounts/:id/autoreply', async (req, res) => {
+  const enabled = !!req.body?.enabled;
+  if (req.params.id === 'main') {
+    await setSetting('autoReplyEnabled', enabled);
+  } else {
+    const _id = oid(req.params.id);
+    if (!_id) return res.status(400).json({ error: 'Bad id' });
+    await db.warmupAccounts().updateOne({ _id }, { $set: { auto_reply: enabled } });
+    setPoolAutoReply(req.params.id, enabled);
+  }
+  res.json({ ok: true, enabled });
 });
 
 // Add a conversation-only number (not used for warm-up or campaigns). Scan its QR.
@@ -123,6 +138,7 @@ conversations.get('/', async (req, res) => {
       handoff_reason: c.handoff_reason,
       synced: c.synced ? 1 : 0,
       is_group: c.is_group ? 1 : 0,
+      pinned: c.pinned ? 1 : 0,
       unread: c.unread || 0,
       last_inbound_at: c.last_inbound_at,
       last_outbound_at: c.last_outbound_at,
@@ -134,7 +150,17 @@ conversations.get('/', async (req, res) => {
     });
     if (rows.length >= 300) break;
   }
+  // Pinned chats float to the top (keeping recent-activity order within each group).
+  rows.sort((a, b) => b.pinned - a.pinned);
   res.json(rows);
+});
+
+// Pin / unpin a chat (no limit on how many).
+conversations.post('/:contactId/pin', async (req, res) => {
+  const _id = oid(req.params.contactId);
+  if (!_id) return res.status(400).json({ error: 'Bad id' });
+  await db.contacts().updateOne({ _id }, { $set: { pinned: req.body?.pinned ? 1 : 0 } });
+  res.json({ ok: true });
 });
 
 conversations.get('/:contactId', async (req, res) => {
