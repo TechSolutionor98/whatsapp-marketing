@@ -188,7 +188,10 @@ export default function Conversations() {
                 <div className="avatar">{initials(t.name, t.phone)}</div>
                 <div className="thread-main">
                   <div className="thread-name">
-                    {t.name || '+' + t.phone}
+                    {t.is_group === 1 && <Icon.users style={{ width: 13, flex: 'none', opacity: 0.65 }} />}
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {t.name || (t.is_group ? 'Group chat' : '+' + t.phone)}
+                    </span>
                     {t.handoff === 1 && <span className="badge amber">handoff</span>}
                   </div>
                   <div className="thread-preview">
@@ -213,8 +216,16 @@ export default function Conversations() {
               <div className="chat-head">
                 <div className="avatar">{initials(thread.contact.name, thread.contact.phone)}</div>
                 <div style={{ flex: 1 }}>
-                  <strong>{thread.contact.name || '+' + thread.contact.phone}</strong>
-                  <div className="muted" style={{ fontSize: 12 }}>+{thread.contact.phone} · <StatusBadge status={thread.contact.status} /></div>
+                  <strong>
+                    {thread.contact.name || (thread.contact.is_group ? 'Group chat' : '+' + thread.contact.phone)}
+                  </strong>
+                  <div className="muted" style={{ fontSize: 12 }}>
+                    {thread.contact.is_group ? (
+                      <><Icon.users style={{ width: 12, verticalAlign: '-2px' }} /> Group</>
+                    ) : (
+                      <>+{thread.contact.phone} · <StatusBadge status={thread.contact.status} /></>
+                    )}
+                  </div>
                 </div>
                 {thread.contact.handoff === 1 && (
                   <button className="btn primary sm" onClick={resolve}><Icon.check /> Resolve handoff</button>
@@ -231,6 +242,9 @@ export default function Conversations() {
                         <div className="chat-day"><span>{dayDivider(m.created_at)}</span></div>
                       )}
                       <div className={`bubble ${m.direction}`}>
+                        {thread.contact.is_group && m.direction === 'in' && m.sender && (
+                          <div className="bubble-sender">{m.sender}</div>
+                        )}
                         {m.media_url && (
                           <img src={m.media_url} alt="" style={{ width: '100%', borderRadius: 8, marginBottom: m.body ? 6 : 0, display: 'block' }} />
                         )}

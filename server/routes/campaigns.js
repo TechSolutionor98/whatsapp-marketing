@@ -42,10 +42,11 @@ async function progressFor(campaignId) {
   return p;
 }
 
-async function buildTargets(campaignIdStr, audienceFilter) {
+async function buildTargets(campaignIdStr, { audienceFilter = '', audienceListId = '' } = {}) {
   // never cold-message warm-up numbers or synced personal WhatsApp chats
   const filter = { status: 'active', warmup: { $ne: 1 }, synced: { $ne: 1 } };
-  if (audienceFilter) filter.tags = new RegExp(esc(audienceFilter), 'i');
+  if (audienceListId) filter.list_ids = audienceListId;
+  else if (audienceFilter) filter.tags = new RegExp(esc(audienceFilter), 'i');
   const contactsList = await db
     .contacts()
     .find(filter, { projection: { _id: 1 } })
@@ -86,7 +87,15 @@ campaigns.get('/', async (_req, res) => {
       const sd = await db.warmupAccounts().findOne({ _id: oid(c.sender_id) });
       sender = sd ? { phone: sd.phone, label: sd.label } : { phone: null, label: '(removed number)' };
     }
-    out.push({ ...pub(c), template_name, sender, progress: await progressFor(String(c._id)) });
+    let list_name = null;
+    if (c.audience_list_id) {
+      const _lid = oid(c.audience_list_id);
+      if (_lid) {
+        const l = await db.lists().findOne({ _id: _lid }, { projection: { name: 1 } });
+        list_name = l?.name || '(deleted list)';
+      }
+    }
+    out.push({ ...pub(c), template_name, sender, list_name, progress: await progressFor(String(c._id)) });
   }
   res.json(out);
 });
@@ -111,6 +120,7 @@ campaigns.post('/', async (req, res) => {
     min_delay_sec: req.body.min_delay_sec ?? getSetting('minDelaySec', 35),
     max_delay_sec: req.body.max_delay_sec ?? getSetting('maxDelaySec', 90),
     audience_filter: req.body.audience_filter ?? '',
+    audience_list_id: req.body.audience_list_id ? String(req.body.audience_list_id) : null,
     sender_id: req.body.sender_id ? String(req.body.sender_id) : null, // null = main Gateway number
     ai_rewrite: req.body.ai_rewrite ?? getSetting('aiEnabled', false),
     ai_tone: req.body.ai_tone ?? getSetting('aiTone', 'friendly'),
@@ -129,7 +139,7 @@ campaigns.post('/', async (req, res) => {
   }
 
   const r = await db.campaigns().insertOne(d);
-  await buildTargets(String(r.insertedId), d.audience_filter);
+  await buildTargets(String(r.insertedId), { audienceFilter: d.audience_filter, audienceListId: d.audience_list_id });
   audit('campaign', `Campaign created: ${d.name}`, { level: 'success' });
   res.json(pub({ _id: r.insertedId, ...d }));
 });
@@ -210,7 +220,7 @@ campaigns.post('/:id/rebuild', async (req, res) => {
   if (!_id) return res.status(400).json({ error: 'Bad id' });
   const c = await db.campaigns().findOne({ _id });
   if (!c) return res.status(404).json({ error: 'Not found' });
-  const n = await buildTargets(String(_id), c.audience_filter);
+  const n = await buildTargets(String(_id), { audienceFilter: c.audience_filter, audienceListId: c.audience_list_id });
   res.json({ ok: true, scanned: n, progress: await progressFor(String(_id)) });
 });
 

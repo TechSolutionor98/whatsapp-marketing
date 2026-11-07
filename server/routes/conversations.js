@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { db, audit, oid, pub, pubList, nowIso, dayKey } from '../db/mongo.js';
 import { emit } from '../events.js';
-import { sendText, isConnected } from '../whatsapp/client.js';
+import { sendText, sendToJid, isConnected } from '../whatsapp/client.js';
 
 export const conversations = Router();
 
@@ -44,6 +44,7 @@ conversations.get('/', async (req, res) => {
       handoff: c.handoff,
       handoff_reason: c.handoff_reason,
       synced: c.synced ? 1 : 0,
+      is_group: c.is_group ? 1 : 0,
       last_inbound_at: c.last_inbound_at,
       last_outbound_at: c.last_outbound_at,
       last_message: s.last_message,
@@ -79,7 +80,9 @@ conversations.post('/:contactId/reply', async (req, res) => {
   if (!isConnected()) return res.status(400).json({ error: 'WhatsApp is not connected' });
 
   try {
-    const waId = await sendText(contact.phone, body.trim());
+    const waId = contact.is_group
+      ? await sendToJid(contact.jid || `${contact.phone}@g.us`, body.trim())
+      : await sendText(contact.phone, body.trim());
     await db.messages().insertOne({
       contact_id: String(_id),
       campaign_id: null,

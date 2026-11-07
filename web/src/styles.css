@@ -1812,3 +1812,50 @@ tbody tr:hover {
   border-radius: 999px;
   box-shadow: 0 1px 1px rgba(0, 0, 0, 0.06);
 }
+
+/* ---- Group message sender label ---- */
+.bubble-sender {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--brand-700);
+  margin-bottom: 2px;
+}
+
+/* ---- Contact list chips (Add/Edit contact) ---- */
+.list-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.list-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-soft);
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+.list-chip svg { width: 13px; height: 13px; }
+.list-chip:hover { border-color: var(--brand); }
+.list-chip.on {
+  background: var(--brand-soft);
+  border-color: var(--brand);
+  color: var(--brand-700);
+}
+.list-chip.add {
+  border-style: dashed;
+  color: var(--text-faint);
+}
+.list-chip-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.list-chip-new .input { height: 34px; width: 160px; font-size: 12.5px; }

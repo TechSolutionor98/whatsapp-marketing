@@ -94,7 +94,7 @@ export default function Campaigns() {
               <h3 style={{ margin: '12px 0 4px', fontSize: 17 }}>{c.name}</h3>
               <div className="muted" style={{ fontSize: 12.5 }}>
                 <Icon.template style={{ width: 13, verticalAlign: '-2px' }} /> {c.template_name || 'No template'}
-                {c.audience_filter && <> · tag: <span className="chip">{c.audience_filter}</span></>}
+                {c.list_name ? <> · <span className="chip">{c.list_name}</span></> : c.audience_filter ? <> · tag: <span className="chip">{c.audience_filter}</span></> : null}
               </div>
               <div className="muted" style={{ fontSize: 12.5, marginTop: 2 }}>
                 <Icon.gateway style={{ width: 13, verticalAlign: '-2px' }} /> from{' '}
@@ -141,7 +141,7 @@ export default function Campaigns() {
 function NewCampaign({ onClose, onSaved }) {
   const { toast } = useApp();
   const [templates, setTemplates] = useState([]);
-  const [tags, setTags] = useState([]);
+  const [lists, setLists] = useState([]);
   const [settings, setSettings] = useState({});
   const [aiStatus, setAiStatus] = useState(null);
   const [senders, setSenders] = useState([]); // connected warm-up numbers usable as senders
@@ -150,6 +150,7 @@ function NewCampaign({ onClose, onSaved }) {
     name: '',
     template_id: '',
     audience_filter: '',
+    audience_list_id: '',
     sender_id: '',
     schedule_when: '',
     daily_limit: 150,
@@ -164,13 +165,13 @@ function NewCampaign({ onClose, onSaved }) {
 
   useEffect(() => {
     (async () => {
-      const [t, tg, s] = await Promise.all([
+      const [t, ls, s] = await Promise.all([
         api.get('/templates'),
-        api.get('/contacts/tags/all'),
+        api.get('/lists'),
         api.get('/settings'),
       ]);
       setTemplates(t);
-      setTags(tg);
+      setLists(ls);
       setSettings(s);
       setF((x) => ({
         ...x,
@@ -196,11 +197,11 @@ function NewCampaign({ onClose, onSaved }) {
   useEffect(() => {
     (async () => {
       const params = new URLSearchParams({ status: 'active', limit: '1' });
-      if (f.audience_filter) params.set('tag', f.audience_filter);
+      if (f.audience_list_id) params.set('list', f.audience_list_id);
       const r = await api.get('/contacts?' + params);
       setEstimate(r.total ?? (Array.isArray(r) ? r.length : 0));
     })();
-  }, [f.audience_filter]);
+  }, [f.audience_list_id]);
 
   const [step, setStep] = useState(1);
   const STEPS = ['Basics', 'Sending', 'Pacing'];
@@ -241,6 +242,7 @@ function NewCampaign({ onClose, onSaved }) {
   const templateName = templates.find((t) => t.id === f.template_id)?.name || '—';
   const senderObj = f.sender_id ? senders.find((a) => a.id === f.sender_id) : null;
   const senderLabel = senderObj ? `+${senderObj.me.phone}` : 'Main number (Gateway)';
+  const listName = f.audience_list_id ? lists.find((l) => l.id === f.audience_list_id)?.name || '—' : 'All active contacts';
 
   return (
     <Modal
@@ -292,12 +294,13 @@ function NewCampaign({ onClose, onSaved }) {
             {templates.length === 0 && <div className="hint">Create a template first.</div>}
           </div>
           <div className="field">
-            <label>Audience (by tag)</label>
-            <select className="select" value={f.audience_filter} onChange={(e) => setF({ ...f, audience_filter: e.target.value })}>
+            <label>Send to list</label>
+            <select className="select" value={f.audience_list_id} onChange={(e) => setF({ ...f, audience_list_id: e.target.value })}>
               <option value="">All active contacts</option>
-              {tags.map((t) => <option key={t} value={t}>{t}</option>)}
+              {lists.map((l) => <option key={l.id} value={l.id}>{l.name} ({l.count})</option>)}
             </select>
             {estimate != null && <div className="hint">≈ {estimate} recipients will be queued.</div>}
+            {lists.length === 0 && <div className="hint">No lists yet — make one in Contacts → Lists, or leave as “All active contacts”.</div>}
           </div>
         </>
       )}
@@ -375,7 +378,7 @@ function NewCampaign({ onClose, onSaved }) {
         <>
           <div className="review">
             <div><span>Template</span><strong>{templateName}</strong></div>
-            <div><span>Audience</span><strong>{(f.audience_filter || 'All active') + (estimate != null ? ` · ≈${estimate}` : '')}</strong></div>
+            <div><span>Audience</span><strong>{listName + (estimate != null ? ` · ≈${estimate}` : '')}</strong></div>
             <div><span>Send from</span><strong>{senderLabel}</strong></div>
             <div><span>Start</span><strong>{f.schedule_when ? new Date(f.schedule_when).toLocaleString() : 'Manual'}</strong></div>
             <div><span>AI rewrite</span><strong>{f.ai_rewrite && aiStatus?.available ? `On · ${f.ai_tone}` : 'Off'}</strong></div>

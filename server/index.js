@@ -10,6 +10,7 @@ import { sseHandler } from './events.js';
 import { requireAuth } from './auth.js';
 import { auth } from './routes/auth.js';
 import { contacts } from './routes/contacts.js';
+import { lists } from './routes/lists.js';
 import { templates } from './routes/templates.js';
 import { campaigns } from './routes/campaigns.js';
 import { conversations } from './routes/conversations.js';
@@ -35,6 +36,7 @@ app.use('/api', requireAuth);
 
 app.get('/api/events', sseHandler);
 app.use('/api/contacts', contacts);
+app.use('/api/lists', lists);
 app.use('/api/templates', templates);
 app.use('/api/campaigns', campaigns);
 app.use('/api/conversations', conversations);

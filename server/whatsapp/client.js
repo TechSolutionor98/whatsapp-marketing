@@ -115,10 +115,11 @@ export async function connectWhatsApp() {
     });
 
     sock.ev.on('messages.upsert', handleIncoming);
-    // WhatsApp history sync: recent chats from the phone, delivered after linking.
-    sock.ev.on('messaging-history.set', async ({ messages, contacts }) => {
+    // WhatsApp history sync: recent chats (incl. groups) from the phone, after linking.
+    sock.ev.on('messaging-history.set', async ({ messages, contacts, chats }) => {
       try {
-        await importHistory(messages || [], contacts || []);
+        audit('connection', `History sync received: ${messages?.length || 0} messages, ${chats?.length || 0} chats`, { level: 'info' });
+        await importHistory(messages || [], contacts || [], chats || []);
       } catch (err) {
         audit('system', `History sync error: ${err.message}`, { level: 'error' });
       }
@@ -191,6 +192,13 @@ export async function sendText(phone, text) {
   return sent?.key?.id || null;
 }
 
+// Send to a full jid (used for group chats, which aren't addressable by phone).
+export async function sendToJid(jid, text) {
+  if (!isConnected()) throw new Error('WhatsApp is not connected');
+  const sent = await sock.sendMessage(jid, { text });
+  return sent?.key?.id || null;
+}
+
 export async function sendImage(phone, buffer, caption) {
   if (!isConnected()) throw new Error('WhatsApp is not connected');
   const jid = `${normalizePhone(phone)}@s.whatsapp.net`;
@@ -241,22 +249,28 @@ async function autoReply(contact, phone, pushName) {
   }
 }
 
-// Find or create a contact by phone. Contacts created from WhatsApp history or
-// outgoing echoes are flagged `synced: 1` so they appear in Conversations but are
-// kept out of the Contacts/Leads list and never swept into a campaign audience.
-async function upsertContactByPhone(phone, { name = '', synced = false } = {}) {
-  const existing = await db.contacts().findOne({ phone });
+// Find or create a conversation. 1:1 chats are keyed by phone; group chats by their
+// jid. Synced chats appear in Conversations but are kept out of Contacts/Leads and
+// never swept into a campaign audience.
+async function upsertChat({ jid, name = '', isGroup = false, synced = true }) {
+  const key = isGroup ? { jid } : { phone: jidToPhone(jid) };
+  const existing = await db.contacts().findOne(key);
   if (existing) {
-    if (!existing.name && name) {
-      await db.contacts().updateOne({ _id: existing._id }, { $set: { name } });
-      existing.name = name;
+    const set = {};
+    if (!existing.name && name) set.name = name;
+    if (!existing.jid) set.jid = jid;
+    if (Object.keys(set).length) {
+      await db.contacts().updateOne({ _id: existing._id }, { $set: set });
+      Object.assign(existing, set);
     }
     return existing;
   }
   const doc = {
     name: name || '',
-    phone,
-    tags: synced ? 'whatsapp' : 'inbound',
+    phone: isGroup ? jid.split('@')[0] : jidToPhone(jid), // group id keeps the unique phone index happy
+    jid,
+    is_group: isGroup ? 1 : 0,
+    tags: isGroup ? 'group' : synced ? 'whatsapp' : 'inbound',
     status: 'active',
     synced: synced ? 1 : 0,
     handoff: 0,
@@ -269,62 +283,83 @@ async function upsertContactByPhone(phone, { name = '', synced = false } = {}) {
     const r = await db.contacts().insertOne(doc);
     return { _id: r.insertedId, ...doc };
   } catch {
-    return await db.contacts().findOne({ phone }); // race: created elsewhere
+    return await db.contacts().findOne(key); // race: created elsewhere
   }
 }
 
-// Record a message the user sent from their phone (not via this app) so the
-// conversation thread stays complete. Deduped by WhatsApp message id.
-async function storeOutgoingEcho(phone, msg) {
+// Insert one synced message (dedup by WhatsApp id). Returns true if newly inserted.
+async function storeSyncedMessage(contact, msg, direction) {
   const id = msg.key?.id;
   const body = extractText(msg).trim();
-  if (!id || !body) return;
-  const contact = await upsertContactByPhone(phone, { synced: true });
-  if (!contact) return;
+  if (!id || !body) return false;
   const r = await db.messages().updateOne(
     { wa_message_id: id },
     {
       $setOnInsert: {
         contact_id: String(contact._id),
         campaign_id: null,
-        direction: 'out',
+        direction,
         body,
-        status: 'sent',
+        sender: contact.is_group && direction === 'in' ? msg.pushName || '' : '',
+        status: direction === 'out' ? 'sent' : 'read',
         wa_message_id: id,
+        synced: 1,
         created_at: nowIso(),
         day_key: dayKey(),
       },
     },
     { upsert: true }
   );
-  if (r.upsertedCount) {
+  return !!r.upsertedCount;
+}
+
+// Record a message the user sent from their phone (1:1 or group), deduped.
+async function storeOutgoingEcho(jid, msg) {
+  const isGroup = jid.endsWith('@g.us');
+  const contact = await upsertChat({ jid, isGroup });
+  if (!contact) return;
+  if (await storeSyncedMessage(contact, msg, 'out')) {
     await db.contacts().updateOne({ _id: contact._id }, { $set: { last_outbound_at: nowIso() } });
     emit('message:out', { contactId: String(contact._id) });
   }
 }
 
-// Import a batch of WhatsApp history messages (from messaging-history.set).
-async function importHistory(messages, waContacts) {
+// Record an incoming group message (no lead automation — groups aren't leads).
+async function storeGroupIncoming(jid, msg) {
+  const contact = await upsertChat({ jid, isGroup: true });
+  if (!contact) return;
+  if (await storeSyncedMessage(contact, msg, 'in')) {
+    await db.contacts().updateOne({ _id: contact._id }, { $set: { last_inbound_at: nowIso() } });
+    emit('message:in', { contactId: String(contact._id) });
+    emit('stats:dirty', {});
+  }
+}
+
+// Import a batch of WhatsApp history (from messaging-history.set) — 1:1 chats AND groups.
+async function importHistory(messages, waContacts, waChats) {
   if (!isMongoUp() || !messages?.length) return;
   const nameByJid = new Map();
   for (const c of waContacts || []) {
     if (c?.id) nameByJid.set(c.id, c.name || c.notify || c.verifiedName || '');
   }
+  for (const ch of waChats || []) {
+    const nm = ch?.name || ch?.subject || '';
+    if (ch?.id && nm) nameByJid.set(ch.id, nm);
+  }
 
-  const byPhone = new Map();
+  const byJid = new Map();
   for (const msg of messages) {
     const jid = msg.key?.remoteJid || '';
-    if (!jid || jid.endsWith('@g.us') || jid.endsWith('@newsletter') || jid === 'status@broadcast') continue;
-    const phone = jidToPhone(jid);
-    if (!phone) continue;
-    if (!byPhone.has(phone)) byPhone.set(phone, []);
-    byPhone.get(phone).push(msg);
+    if (!jid || jid.endsWith('@newsletter') || jid === 'status@broadcast') continue; // keep groups; skip channels/status
+    if (!byJid.has(jid)) byJid.set(jid, []);
+    byJid.get(jid).push(msg);
   }
 
   let imported = 0;
-  for (const [phone, msgs] of byPhone) {
-    const name = nameByJid.get(`${phone}@s.whatsapp.net`) || '';
-    const contact = await upsertContactByPhone(phone, { name, synced: true });
+  for (const [jid, msgs] of byJid) {
+    const isGroup = jid.endsWith('@g.us');
+    if (!isGroup && !jidToPhone(jid)) continue;
+    const contact = await upsertChat({ jid, name: nameByJid.get(jid) || '', isGroup });
     if (!contact) continue;
 
     const ops = [];
@@ -338,6 +373,7 @@ async function importHistory(messages, waContacts) {
       const tsNum = Number(msg.messageTimestamp) || 0;
       const ts = tsNum ? new Date(tsNum * 1000).toISOString() : nowIso();
       const dir = msg.key.fromMe ? 'out' : 'in';
+      const sender = isGroup && !msg.key.fromMe ? msg.pushName || '' : '';
       if (dir === 'in') lastIn = !lastIn || ts > lastIn ? ts : lastIn;
       else lastOut = !lastOut || ts > lastOut ? ts : lastOut;
       ops.push({
@@ -349,6 +385,7 @@ async function importHistory(messages, waContacts) {
               campaign_id: null,
               direction: dir,
               body,
+              sender,
               status: dir === 'out' ? 'sent' : 'read',
               wa_message_id: id,
               synced: 1,
@@ -371,7 +408,7 @@ async function importHistory(messages, waContacts) {
   }
 
   if (imported) {
-    audit('connection', `Synced ${imported} messages from WhatsApp history`, { level: 'info' });
+    audit('connection', `Synced ${imported} messages from WhatsApp history`, { level: 'success' });
     emit('message:in', {});
     emit('stats:dirty', {});
   }
@@ -398,17 +435,24 @@ async function handleIncoming({ messages, type }) {
     try {
       if (!msg.message) continue;
       const jid = msg.key.remoteJid || '';
-      if (jid.endsWith('@g.us') || jid.endsWith('@newsletter') || jid === 'status@broadcast') continue; // skip groups/channels/status
+      if (jid.endsWith('@newsletter') || jid === 'status@broadcast') continue; // skip channels/status
 
-      const phone = jidToPhone(jid);
-      if (!phone) continue;
+      const isGroup = jid.endsWith('@g.us');
 
       // Sent from the phone itself (not via this app) — record it and move on.
       if (msg.key.fromMe) {
-        await storeOutgoingEcho(phone, msg);
+        await storeOutgoingEcho(jid, msg);
         continue;
       }
 
+      // Group messages: store them for the thread, but no lead automation.
+      if (isGroup) {
+        await storeGroupIncoming(jid, msg);
+        continue;
+      }
+
+      const phone = jidToPhone(jid);
+      if (!phone) continue;
       const body = extractText(msg).trim();
       const pushName = msg.pushName || '';
 

@@ -53,6 +53,8 @@ async function ensureIndexes() {
   // Speeds the paginated Contacts list (warm-up contacts excluded, newest first) + its count.
   await col('contacts').createIndex({ warmup: 1, _id: -1 });
   await col('contacts').createIndex({ warmup: 1, status: 1, _id: -1 });
+  await col('contacts').createIndex({ list_ids: 1 }); // membership lookups for lists + campaigns
+  await col('lists').createIndex({ name: 1 });
   await col('campaign_targets').createIndex(
     { campaign_id: 1, contact_id: 1 },
     { unique: true }
@@ -100,6 +102,7 @@ export function col(name) {
 
 export const db = {
   contacts: () => col('contacts'),
+  lists: () => col('lists'),
   templates: () => col('templates'),
   campaigns: () => col('campaigns'),
   targets: () => col('campaign_targets'),

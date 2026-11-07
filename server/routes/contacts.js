@@ -10,7 +10,7 @@ function esc(s) {
 
 contacts.get('/', async (req, res) => {
   try {
-    const { q = '', status = '', tag = '' } = req.query;
+    const { q = '', status = '', tag = '', list: listFilter = '' } = req.query;
     // warm-up contacts live in the Warmup page; synced WhatsApp chats live only in Conversations
     const filter = { warmup: { $ne: 1 }, synced: { $ne: 1 } };
     if (q) {
@@ -19,6 +19,7 @@ contacts.get('/', async (req, res) => {
     }
     if (status) filter.status = status;
     if (tag) filter.tags = new RegExp(esc(tag), 'i');
+    if (listFilter) filter.list_ids = listFilter; // contacts belonging to this list
 
     const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
@@ -42,7 +43,7 @@ contacts.get('/', async (req, res) => {
 });
 
 contacts.post('/', async (req, res) => {
-  const { name = '', phone, tags = '', notes = '' } = req.body;
+  const { name = '', phone, tags = '', notes = '', list_ids = [] } = req.body;
   const p = normalizePhone(phone);
   if (!p) return res.status(400).json({ error: 'Valid phone number required' });
   try {
@@ -53,6 +54,7 @@ contacts.post('/', async (req, res) => {
       notes,
       status: 'active',
       synced: 0,
+      list_ids: Array.isArray(list_ids) ? list_ids.map(String).filter(Boolean) : [],
       handoff: 0,
       handoff_reason: '',
       last_inbound_at: null,
@@ -72,12 +74,13 @@ contacts.post('/', async (req, res) => {
 contacts.put('/:id', async (req, res) => {
   const _id = oid(req.params.id);
   if (!_id) return res.status(400).json({ error: 'Bad id' });
-  const { name, tags, notes, status } = req.body;
+  const { name, tags, notes, status, list_ids } = req.body;
   const set = {};
   if (name !== undefined) set.name = name;
   if (tags !== undefined) set.tags = tags;
   if (notes !== undefined) set.notes = notes;
   if (status !== undefined) set.status = status;
+  if (list_ids !== undefined) set.list_ids = Array.isArray(list_ids) ? list_ids.map(String).filter(Boolean) : [];
   const r = await db.contacts().findOneAndUpdate(
     { _id },
     { $set: set },
@@ -98,11 +101,25 @@ contacts.delete('/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
-// Bulk import: { rows:[{name,phone,tags}] } or { text:"csv/lines", tags }.
+// Bulk import: { rows:[{name,phone,tags}] } or { text, tags }, plus optional
+// list_id (add to an existing list) or list_name (create/reuse a list by name).
 contacts.post('/import', async (req, res) => {
-  let { rows, text = '', tags = '' } = req.body;
+  let { rows, text = '', tags = '', list_id = '', list_name = '' } = req.body;
   if (!rows && text) rows = parseText(text, tags);
   if (!Array.isArray(rows)) return res.status(400).json({ error: 'No rows to import' });
+
+  // Resolve the target list (create it if a name was given with no id).
+  let listId = list_id ? String(list_id) : '';
+  if (!listId && list_name.trim()) {
+    const nm = list_name.trim();
+    const existing = await db.lists().findOne({ name: new RegExp(`^${esc(nm)}$`, 'i') });
+    if (existing) listId = String(existing._id);
+    else {
+      const r = await db.lists().insertOne({ name: nm, created_at: nowIso() });
+      listId = String(r.insertedId);
+      audit('system', `Contact list created: ${nm}`);
+    }
+  }
 
   const ops = [];
   let skipped = 0;
@@ -129,6 +146,7 @@ contacts.post('/import', async (req, res) => {
           },
           // Always a real lead (promote it out of "synced" if it was a WhatsApp chat).
           $set: { synced: 0, ...(name ? { name } : {}), ...(t ? { tags: t } : {}) },
+          ...(listId ? { $addToSet: { list_ids: listId } } : {}),
         },
         upsert: true,
       },
@@ -143,7 +161,7 @@ contacts.post('/import', async (req, res) => {
   audit('system', `Imported ${ops.length} contacts (${skipped} skipped)`, {
     level: 'success',
   });
-  res.json({ added, skipped });
+  res.json({ added, skipped, list_id: listId });
 });
 
 function parseText(text, tags) {

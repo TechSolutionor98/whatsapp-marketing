@@ -14,14 +14,25 @@ export default function Contacts() {
   const [q, setQ] = useState('');
   const [dq, setDq] = useState(''); // debounced search term
   const [status, setStatus] = useState('');
+  const [listFilter, setListFilter] = useState(''); // selected contact list id
+  const [lists, setLists] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false); // has the first fetch returned yet?
   const [reloadKey, setReloadKey] = useState(0);
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [showLists, setShowLists] = useState(false);
   const [edit, setEdit] = useState(null);
 
   const reload = () => setReloadKey((k) => k + 1);
+  const loadLists = async () => {
+    try {
+      setLists(await api.get('/lists'));
+    } catch {}
+  };
+  useEffect(() => {
+    loadLists();
+  }, []);
 
   // Debounce the search box so we don't hit the server on every keystroke.
   useEffect(() => {
@@ -35,6 +46,7 @@ export default function Contacts() {
       const params = new URLSearchParams();
       if (dq) params.set('q', dq);
       if (status) params.set('status', status);
+      if (listFilter) params.set('list', listFilter);
       params.set('page', page);
       params.set('limit', LIMIT);
       const r = await api.get('/contacts?' + params);
@@ -50,7 +62,7 @@ export default function Contacts() {
   };
   useEffect(() => {
     load();
-  }, [dq, status, page, reloadKey]);
+  }, [dq, status, listFilter, page, reloadKey]);
 
   async function remove(c) {
     if (!confirm(`Delete ${c.name || c.phone}?`)) return;
@@ -64,7 +76,7 @@ export default function Contacts() {
 
   const start = total === 0 ? 0 : (page - 1) * LIMIT + 1;
   const end = Math.min(total, page * LIMIT);
-  const filtered = !!(dq || status);
+  const filtered = !!(dq || status || listFilter);
 
   return (
     <>
@@ -78,12 +90,21 @@ export default function Contacts() {
             onChange={(e) => { setQ(e.target.value); setPage(1); }}
           />
         </div>
-        <select className="select" style={{ maxWidth: 170 }} value={status} onChange={(e) => { setStatus(e.target.value); setPage(1); }}>
+        <select className="select" style={{ maxWidth: 150 }} value={status} onChange={(e) => { setStatus(e.target.value); setPage(1); }}>
           <option value="">All statuses</option>
           <option value="active">Active</option>
           <option value="opted_out">Opted out</option>
           <option value="bounced">Bounced</option>
         </select>
+        <select className="select" style={{ maxWidth: 190 }} value={listFilter} onChange={(e) => { setListFilter(e.target.value); setPage(1); }}>
+          <option value="">All lists</option>
+          {lists.map((l) => (
+            <option key={l.id} value={l.id}>{l.name} ({l.count})</option>
+          ))}
+        </select>
+        <button className="btn" onClick={() => setShowLists(true)} title="Create & manage contact lists">
+          <Icon.list /> Lists
+        </button>
         <div className="spacer" />
         <button className="btn" onClick={() => setShowImport(true)}>
           <Icon.upload /> Import
@@ -181,16 +202,65 @@ export default function Contacts() {
         )}
       </div>
 
-      {showAdd && <AddModal onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); setPage(1); reload(); refreshStats(); }} />}
-      {edit && <EditModal contact={edit} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); reload(); }} />}
-      {showImport && <ImportModal onClose={() => setShowImport(false)} onDone={() => { setShowImport(false); setPage(1); reload(); refreshStats(); }} />}
+      {showAdd && <AddModal lists={lists} onLists={loadLists} onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); setPage(1); reload(); loadLists(); refreshStats(); }} />}
+      {edit && <EditModal contact={edit} lists={lists} onLists={loadLists} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); reload(); loadLists(); }} />}
+      {showImport && <ImportModal lists={lists} onClose={() => setShowImport(false)} onDone={() => { setShowImport(false); setPage(1); reload(); loadLists(); refreshStats(); }} />}
+      {showLists && <ListsModal lists={lists} onChange={() => { loadLists(); reload(); }} onClose={() => setShowLists(false)} />}
     </>
   );
 }
 
-function AddModal({ onClose, onSaved }) {
+// Selectable list chips with an inline "new list" creator — reused by Add/Edit.
+function ListChips({ lists, value, onChange, onLists }) {
   const { toast } = useApp();
-  const [f, setF] = useState({ name: '', phone: '', tags: '' });
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState('');
+  const sel = new Set(value || []);
+  const toggle = (id) => {
+    const next = new Set(sel);
+    next.has(id) ? next.delete(id) : next.add(id);
+    onChange([...next]);
+  };
+  async function create() {
+    const nm = name.trim();
+    if (!nm) return;
+    try {
+      const l = await api.post('/lists', { name: nm });
+      setName('');
+      setCreating(false);
+      await onLists?.();
+      onChange([...(value || []), l.id]);
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+  return (
+    <div className="field">
+      <label>Lists</label>
+      <div className="list-chips">
+        {lists.map((l) => (
+          <button type="button" key={l.id} className={`list-chip ${sel.has(l.id) ? 'on' : ''}`} onClick={() => toggle(l.id)}>
+            {sel.has(l.id) && <Icon.check />} {l.name}
+          </button>
+        ))}
+        {creating ? (
+          <span className="list-chip-new">
+            <input className="input" autoFocus value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && create()} placeholder="New list name" />
+            <button type="button" className="btn primary sm" onClick={create}>Add</button>
+            <button type="button" className="btn sm" onClick={() => { setCreating(false); setName(''); }}>✕</button>
+          </span>
+        ) : (
+          <button type="button" className="list-chip add" onClick={() => setCreating(true)}><Icon.plus /> New list</button>
+        )}
+      </div>
+      <div className="hint">Group contacts into lists you can target in a campaign.</div>
+    </div>
+  );
+}
+
+function AddModal({ lists, onLists, onClose, onSaved }) {
+  const { toast } = useApp();
+  const [f, setF] = useState({ name: '', phone: '', tags: '', list_ids: [] });
   async function save() {
     try {
       await api.post('/contacts', f);
@@ -218,15 +288,16 @@ function AddModal({ onClose, onSaved }) {
       <div className="field">
         <label>Tags</label>
         <input className="input" value={f.tags} onChange={(e) => setF({ ...f, tags: e.target.value })} placeholder="lead, lahore, premium" />
-        <div className="hint">Comma-separated. Used to target campaigns.</div>
+        <div className="hint">Comma-separated.</div>
       </div>
+      <ListChips lists={lists} value={f.list_ids} onChange={(ids) => setF({ ...f, list_ids: ids })} onLists={onLists} />
     </Modal>
   );
 }
 
-function EditModal({ contact, onClose, onSaved }) {
+function EditModal({ contact, lists, onLists, onClose, onSaved }) {
   const { toast } = useApp();
-  const [f, setF] = useState({ ...contact });
+  const [f, setF] = useState({ ...contact, list_ids: contact.list_ids || [] });
   async function save() {
     try {
       await api.put('/contacts/' + contact.id, f);
@@ -253,7 +324,85 @@ function EditModal({ contact, onClose, onSaved }) {
           <option value="bounced">Bounced</option>
         </select>
       </div>
+      <ListChips lists={lists} value={f.list_ids} onChange={(ids) => setF({ ...f, list_ids: ids })} onLists={onLists} />
       <div className="field"><label>Notes</label><textarea className="textarea" value={f.notes || ''} onChange={(e) => setF({ ...f, notes: e.target.value })} /></div>
+    </Modal>
+  );
+}
+
+// Create / rename / delete contact lists.
+function ListsModal({ lists, onChange, onClose }) {
+  const { toast } = useApp();
+  const [name, setName] = useState('');
+  const [busy, setBusy] = useState(false);
+  async function create() {
+    if (!name.trim()) return;
+    setBusy(true);
+    try {
+      await api.post('/lists', { name: name.trim() });
+      setName('');
+      onChange();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+    setBusy(false);
+  }
+  async function rename(l) {
+    const nm = prompt('Rename list', l.name);
+    if (!nm || !nm.trim() || nm.trim() === l.name) return;
+    try {
+      await api.put('/lists/' + l.id, { name: nm.trim() });
+      onChange();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+  async function remove(l) {
+    if (!confirm(`Delete list "${l.name}"? Contacts stay; they're just removed from this list.`)) return;
+    try {
+      await api.del('/lists/' + l.id);
+      toast('List deleted');
+      onChange();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+  return (
+    <Modal
+      title="Contact lists"
+      onClose={onClose}
+      footer={<button className="btn primary" onClick={onClose}>Done</button>}
+    >
+      <div className="field">
+        <label>New list</label>
+        <div className="flex" style={{ gap: 8 }}>
+          <input className="input" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && create()} placeholder="e.g. Restaurants — Lahore" />
+          <button className="btn primary" onClick={create} disabled={busy || !name.trim()}><Icon.plus /> Add</button>
+        </div>
+      </div>
+      {lists.length === 0 ? (
+        <div className="hint" style={{ marginTop: 8 }}>No lists yet. Create one above, then import or add contacts into it.</div>
+      ) : (
+        <div className="table-wrap" style={{ marginTop: 6 }}>
+          <table>
+            <thead><tr><th>List</th><th>Contacts</th><th></th></tr></thead>
+            <tbody>
+              {lists.map((l) => (
+                <tr key={l.id}>
+                  <td className="cell-strong">{l.name}</td>
+                  <td className="cell-muted">{l.count}</td>
+                  <td>
+                    <div className="flex" style={{ justifyContent: 'flex-end' }}>
+                      <button className="btn ghost sm" onClick={() => rename(l)}><Icon.edit /></button>
+                      <button className="btn ghost sm" onClick={() => remove(l)}><Icon.trash /></button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </Modal>
   );
 }
@@ -372,11 +521,19 @@ function colLabel(matrix, map, c) {
   return hdr ? `${hdr}  (col ${letter})` : `Column ${letter}`;
 }
 
-function ImportModal({ onClose, onDone }) {
+function ImportModal({ lists = [], onClose, onDone }) {
   const { toast } = useApp();
   const [mode, setMode] = useState('file'); // 'file' | 'paste'
   const [tags, setTags] = useState('');
+  const [listChoice, setListChoice] = useState(''); // '' | listId | '__new__'
+  const [newListName, setNewListName] = useState('');
   const [busy, setBusy] = useState(false);
+
+  const listFields = () => {
+    if (listChoice === '__new__') return newListName.trim() ? { list_name: newListName.trim() } : {};
+    if (listChoice) return { list_id: listChoice };
+    return {};
+  };
 
   // paste mode
   const [text, setText] = useState('');
@@ -433,7 +590,7 @@ function ImportModal({ onClose, onDone }) {
         ...r,
         tags: [r.tags, tags].map((s) => (s || '').trim()).filter(Boolean).join(', '),
       }));
-      const r = await api.post('/contacts/import', { rows });
+      const r = await api.post('/contacts/import', { rows, ...listFields() });
       toast(`Imported ${r.added} contacts (${r.skipped} skipped)`, 'success');
       onDone();
     } catch (e) {
@@ -446,7 +603,7 @@ function ImportModal({ onClose, onDone }) {
     if (!text.trim()) return toast('Paste some numbers first', 'error');
     setBusy(true);
     try {
-      const r = await api.post('/contacts/import', { text, tags });
+      const r = await api.post('/contacts/import', { text, tags, ...listFields() });
       toast(`Imported ${r.added} contacts (${r.skipped} skipped)`, 'success');
       onDone();
     } catch (e) {
@@ -615,6 +772,28 @@ function ImportModal({ onClose, onDone }) {
           </div>
         </>
       )}
+
+      <div className="field" style={{ marginTop: 4 }}>
+        <label>Add to list (optional)</label>
+        <select className="select" value={listChoice} onChange={(e) => setListChoice(e.target.value)}>
+          <option value="">— no list —</option>
+          {lists.map((l) => (
+            <option key={l.id} value={l.id}>{l.name} ({l.count})</option>
+          ))}
+          <option value="__new__">+ Create new list…</option>
+        </select>
+        {listChoice === '__new__' && (
+          <input
+            className="input"
+            style={{ marginTop: 8 }}
+            value={newListName}
+            onChange={(e) => setNewListName(e.target.value)}
+            placeholder="New list name"
+            autoFocus
+          />
+        )}
+        <div className="hint">Everyone imported in this batch is added to this list — pick it as the audience when you create a campaign.</div>
+      </div>
     </Modal>
   );
 }
