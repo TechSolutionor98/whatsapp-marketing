@@ -184,10 +184,10 @@ function NewCampaign({ onClose, onSaved }) {
 
   useEffect(() => {
     (async () => {
-      const params = new URLSearchParams({ status: 'active' });
+      const params = new URLSearchParams({ status: 'active', limit: '1' });
       if (f.audience_filter) params.set('tag', f.audience_filter);
-      const c = await api.get('/contacts?' + params);
-      setEstimate(c.length);
+      const r = await api.get('/contacts?' + params);
+      setEstimate(r.total ?? (Array.isArray(r) ? r.length : 0));
     })();
   }, [f.audience_filter]);
 

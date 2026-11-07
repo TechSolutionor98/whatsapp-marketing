@@ -50,6 +50,9 @@ export async function connectMongo() {
 async function ensureIndexes() {
   await col('users').createIndex({ email: 1 }, { unique: true });
   await col('contacts').createIndex({ phone: 1 }, { unique: true });
+  // Speeds the paginated Contacts list (warm-up contacts excluded, newest first) + its count.
+  await col('contacts').createIndex({ warmup: 1, _id: -1 });
+  await col('contacts').createIndex({ warmup: 1, status: 1, _id: -1 });
   await col('campaign_targets').createIndex(
     { campaign_id: 1, contact_id: 1 },
     { unique: true }

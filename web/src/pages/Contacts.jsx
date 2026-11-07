@@ -6,30 +6,63 @@ import { Modal, Empty, StatusBadge, timeAgo } from '../ui.jsx';
 
 export default function Contacts() {
   const { toast, refreshStats } = useApp();
+  const LIMIT = 50;
   const [list, setList] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [pages, setPages] = useState(1);
+  const [page, setPage] = useState(1);
   const [q, setQ] = useState('');
+  const [dq, setDq] = useState(''); // debounced search term
   const [status, setStatus] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [edit, setEdit] = useState(null);
 
+  const reload = () => setReloadKey((k) => k + 1);
+
+  // Debounce the search box so we don't hit the server on every keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setDq(q.trim()), 300);
+    return () => clearTimeout(t);
+  }, [q]);
+
   const load = async () => {
-    const params = new URLSearchParams();
-    if (q) params.set('q', q);
-    if (status) params.set('status', status);
-    setList(await api.get('/contacts?' + params));
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (dq) params.set('q', dq);
+      if (status) params.set('status', status);
+      params.set('page', page);
+      params.set('limit', LIMIT);
+      const r = await api.get('/contacts?' + params);
+      setList(r.items || []);
+      setTotal(r.total || 0);
+      setPages(r.pages || 1);
+    } catch (e) {
+      toast(e.message, 'error');
+    } finally {
+      setLoading(false);
+    }
   };
   useEffect(() => {
     load();
-  }, [q, status]);
+  }, [dq, status, page, reloadKey]);
 
   async function remove(c) {
     if (!confirm(`Delete ${c.name || c.phone}?`)) return;
     await api.del('/contacts/' + c.id);
     toast('Contact deleted');
-    load();
+    // If we just removed the last row on a page past the first, step back a page.
+    if (list.length === 1 && page > 1) setPage((p) => p - 1);
+    else reload();
     refreshStats();
   }
+
+  const start = total === 0 ? 0 : (page - 1) * LIMIT + 1;
+  const end = Math.min(total, page * LIMIT);
+  const filtered = !!(dq || status);
 
   return (
     <>
@@ -40,10 +73,10 @@ export default function Contacts() {
             className="input"
             placeholder="Search name or number…"
             value={q}
-            onChange={(e) => setQ(e.target.value)}
+            onChange={(e) => { setQ(e.target.value); setPage(1); }}
           />
         </div>
-        <select className="select" style={{ maxWidth: 170 }} value={status} onChange={(e) => setStatus(e.target.value)}>
+        <select className="select" style={{ maxWidth: 170 }} value={status} onChange={(e) => { setStatus(e.target.value); setPage(1); }}>
           <option value="">All statuses</option>
           <option value="active">Active</option>
           <option value="opted_out">Opted out</option>
@@ -60,24 +93,31 @@ export default function Contacts() {
 
       <div className="card">
         {list.length === 0 ? (
-          <Empty
-            icon="users"
-            title="No contacts yet"
-            action={
-              <div className="flex" style={{ justifyContent: 'center' }}>
-                <button className="btn" onClick={() => setShowImport(true)}>
-                  <Icon.upload /> Bulk import
-                </button>
-                <button className="btn primary" onClick={() => setShowAdd(true)}>
-                  <Icon.plus /> Add one
-                </button>
-              </div>
-            }
-          >
-            Import a list or add leads one by one. Numbers need a country code.
-          </Empty>
+          filtered ? (
+            <Empty icon="search" title="No matches">
+              No contacts match {dq ? `“${dq}”` : 'this filter'}. Try a different search or status.
+            </Empty>
+          ) : (
+            <Empty
+              icon="users"
+              title="No contacts yet"
+              action={
+                <div className="flex" style={{ justifyContent: 'center' }}>
+                  <button className="btn" onClick={() => setShowImport(true)}>
+                    <Icon.upload /> Bulk import
+                  </button>
+                  <button className="btn primary" onClick={() => setShowAdd(true)}>
+                    <Icon.plus /> Add one
+                  </button>
+                </div>
+              }
+            >
+              Import a list or add leads one by one. Numbers need a country code.
+            </Empty>
+          )
         ) : (
-          <div className="table-wrap">
+          <>
+          <div className={`table-wrap ${loading ? 'is-loading' : ''}`}>
             <table>
               <thead>
                 <tr>
@@ -119,12 +159,27 @@ export default function Contacts() {
               </tbody>
             </table>
           </div>
+          <div className="pager">
+            <div className="pager-info">
+              Showing {start}–{end} of {total.toLocaleString()}
+            </div>
+            <div className="pager-ctrls">
+              <button className="btn sm" disabled={page <= 1 || loading} onClick={() => setPage((p) => Math.max(1, p - 1))}>
+                <Icon.chevronDown style={{ width: 14, transform: 'rotate(90deg)' }} /> Prev
+              </button>
+              <span className="pager-page">Page {page} / {pages}</span>
+              <button className="btn sm" disabled={page >= pages || loading} onClick={() => setPage((p) => Math.min(pages, p + 1))}>
+                Next <Icon.chevronDown style={{ width: 14, transform: 'rotate(-90deg)' }} />
+              </button>
+            </div>
+          </div>
+          </>
         )}
       </div>
 
-      {showAdd && <AddModal onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); load(); refreshStats(); }} />}
-      {edit && <EditModal contact={edit} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />}
-      {showImport && <ImportModal onClose={() => setShowImport(false)} onDone={() => { setShowImport(false); load(); refreshStats(); }} />}
+      {showAdd && <AddModal onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); setPage(1); reload(); refreshStats(); }} />}
+      {edit && <EditModal contact={edit} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); reload(); }} />}
+      {showImport && <ImportModal onClose={() => setShowImport(false)} onDone={() => { setShowImport(false); setPage(1); reload(); refreshStats(); }} />}
     </>
   );
 }

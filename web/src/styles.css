@@ -1726,3 +1726,34 @@ tbody tr:hover {
 }
 .review span { color: var(--text-soft); }
 .review strong { color: var(--text); text-align: right; }
+
+/* ---- Contacts pagination ---- */
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 4px 2px;
+  flex-wrap: wrap;
+}
+.pager-info {
+  font-size: 12.5px;
+  color: var(--text-soft);
+}
+.pager-ctrls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pager-page {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-soft);
+  min-width: 90px;
+  text-align: center;
+}
+.table-wrap.is-loading {
+  opacity: 0.55;
+  transition: opacity 0.1s;
+  pointer-events: none;
+}

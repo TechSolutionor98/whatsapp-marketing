@@ -18,8 +18,23 @@ contacts.get('/', async (req, res) => {
     }
     if (status) filter.status = status;
     if (tag) filter.tags = new RegExp(esc(tag), 'i');
-    const list = await db.contacts().find(filter).sort({ _id: -1 }).limit(1000).toArray();
-    res.json(pubList(list));
+
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const skip = (page - 1) * limit;
+
+    const [list, total] = await Promise.all([
+      db.contacts().find(filter).sort({ _id: -1 }).skip(skip).limit(limit).toArray(),
+      db.contacts().countDocuments(filter),
+    ]);
+
+    res.json({
+      items: pubList(list),
+      total,
+      page,
+      limit,
+      pages: Math.max(1, Math.ceil(total / limit)),
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
