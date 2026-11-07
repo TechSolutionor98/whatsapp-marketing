@@ -87,7 +87,10 @@ export async function startPoolAccount(id, label = '', role = 'warmup', autoRepl
     attachReceipts(sock); // delivery/read receipts for campaigns sent from this number
     sock.ev.on('messages.upsert', (ev) => ingestPool(id, ev)); // capture this number's own chats
     if (isConv) {
-      sock.ev.on('messaging-history.set', (ev) => ingestPoolHistory(id, ev)); // import its existing chats
+      sock.ev.on('messaging-history.set', (ev) => {
+        audit('connection', `History received for conversation number: ${ev.messages?.length || 0} messages, ${ev.chats?.length || 0} chats`, { level: 'info' });
+        ingestPoolHistory(id, ev);
+      });
     }
 
     sock.ev.on('connection.update', async (u) => {
@@ -341,7 +344,10 @@ async function ingestPool(accountId, { messages, type }) {
       }
 
       const phone = jidToPhone(pnOf(msg));
-      if (!phone || ourPhones().has(phone)) continue; // skip warm-up traffic between our own numbers
+      if (!phone) continue;
+      // Warm-up numbers: skip chatter between our own numbers. Conversation numbers: keep everything.
+      const isConvAcct = (accounts.get(accountId)?.role || 'warmup') === 'conversation';
+      if (!isConvAcct && ourPhones().has(phone)) continue;
 
       let contact = await db.contacts().findOne({ phone });
       if (!contact) {
@@ -417,9 +423,9 @@ async function ingestPoolHistory(accountId, { messages, contacts: waContacts, ch
     const nm = ch?.name || ch?.subject || '';
     if (ch?.id && nm) nameByJid.set(ch.id, nm);
   }
-  const mine = ourPhones();
 
-  // Group messages by their chat jid (1:1 jid or group jid).
+  // Group messages by their chat jid (1:1 jid or group jid). Conversation numbers keep
+  // every chat, including ones with your own other numbers.
   const byChat = new Map();
   for (const msg of messages) {
     const raw = msg.key?.remoteJid || '';
@@ -428,7 +434,7 @@ async function ingestPoolHistory(accountId, { messages, contacts: waContacts, ch
     let chatJid = raw;
     if (!isGroup) {
       const phone = jidToPhone(pnOf(msg));
-      if (!phone || mine.has(phone)) continue; // skip our own numbers
+      if (!phone) continue;
       chatJid = `${phone}@s.whatsapp.net`;
     }
     if (!byChat.has(chatJid)) byChat.set(chatJid, []);
