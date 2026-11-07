@@ -335,7 +335,7 @@ async function storeGroupIncoming(jid, msg) {
   const contact = await upsertChat({ jid, isGroup: true });
   if (!contact) return;
   if (await storeSyncedMessage(contact, msg, 'in')) {
-    await db.contacts().updateOne({ _id: contact._id }, { $set: { last_inbound_at: nowIso() } });
+    await db.contacts().updateOne({ _id: contact._id }, { $set: { last_inbound_at: nowIso() }, $inc: { unread: 1 } });
     emit('message:in', { contactId: String(contact._id) });
     emit('stats:dirty', {});
   }
@@ -504,7 +504,7 @@ async function handleIncoming({ messages, type }) {
         created_at: nowIso(),
         day_key: dayKey(),
       });
-      await db.contacts().updateOne({ _id: contact._id }, { $set: { last_inbound_at: nowIso() } });
+      await db.contacts().updateOne({ _id: contact._id }, { $set: { last_inbound_at: nowIso() }, $inc: { unread: 1 } });
 
       // Opt-out detection.
       const stopWords = getSetting('stopKeywords', []);

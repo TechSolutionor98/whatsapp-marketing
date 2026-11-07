@@ -18,6 +18,8 @@ conversations.get('/', async (req, res) => {
           _id: '$contact_id',
           last_message: { $last: '$body' },
           last_direction: { $last: '$direction' },
+          last_status: { $last: '$status' },
+          last_sender: { $last: '$sender' },
           last_at: { $last: '$created_at' },
         },
       },
@@ -29,6 +31,8 @@ conversations.get('/', async (req, res) => {
   const ids = summaries.map((s) => oid(s._id)).filter(Boolean);
   const cfilter = { _id: { $in: ids } };
   if (filter === 'handoff') cfilter.handoff = 1;
+  else if (filter === 'groups') cfilter.is_group = 1;
+  else if (filter === 'unread') cfilter.unread = { $gt: 0 };
   const contactsList = await db.contacts().find(cfilter).toArray();
   const byId = new Map(contactsList.map((c) => [String(c._id), c]));
 
@@ -45,10 +49,13 @@ conversations.get('/', async (req, res) => {
       handoff_reason: c.handoff_reason,
       synced: c.synced ? 1 : 0,
       is_group: c.is_group ? 1 : 0,
+      unread: c.unread || 0,
       last_inbound_at: c.last_inbound_at,
       last_outbound_at: c.last_outbound_at,
       last_message: s.last_message,
       last_direction: s.last_direction,
+      last_status: s.last_status,
+      last_sender: s.last_sender || '',
       last_at: s.last_at,
     });
     if (rows.length >= 300) break;
@@ -67,7 +74,9 @@ conversations.get('/:contactId', async (req, res) => {
     .sort({ created_at: 1, _id: 1 })
     .limit(1000)
     .toArray();
-  res.json({ contact: pub(contact), messages: pubList(messages) });
+  // Opening a thread marks it read.
+  if (contact.unread) db.contacts().updateOne({ _id }, { $set: { unread: 0 } }).catch(() => {});
+  res.json({ contact: pub({ ...contact, unread: 0 }), messages: pubList(messages) });
 });
 
 conversations.post('/:contactId/reply', async (req, res) => {

@@ -155,6 +155,8 @@ function Topbar({ page, go }) {
         <div className="page-sub">{sub}</div>
       </div>
       <div className="topbar-actions">
+        {/* Pages can inject their own controls here (e.g. Conversations filters). */}
+        <span id="topbar-slot" className="topbar-slot" />
         <button
           className="conn-pill"
           onClick={() => go('gateway')}

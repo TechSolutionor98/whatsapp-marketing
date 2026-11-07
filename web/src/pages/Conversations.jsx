@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
@@ -8,6 +9,15 @@ function Ticks({ status }) {
   if (status === 'read') return <span style={{ color: '#53bdeb' }}>✓✓</span>;
   if (status === 'delivered') return <span>✓✓</span>;
   return <span>✓</span>; // sent / unknown
+}
+
+// Grab the header's action slot so page-specific controls render up in the top bar.
+function useHeaderSlot() {
+  const [node, setNode] = useState(null);
+  useEffect(() => {
+    setNode(document.getElementById('topbar-slot'));
+  }, []);
+  return node;
 }
 
 function asDate(iso) {
@@ -135,31 +145,36 @@ export default function Conversations() {
           (t.last_message || '').toLowerCase().includes(q)
       );
 
+  const headerSlot = useHeaderSlot();
+  const controls = (
+    <div className="conv-header-ctrls">
+      <div className="wa-filters">
+        {[['', 'All'], ['unread', 'Unread'], ['groups', 'Groups'], ['handoff', 'Needs human']].map(([v, label]) => (
+          <button key={v || 'all'} className={`wa-pill ${filter === v ? 'active' : ''}`} onClick={() => setFilter(v)}>
+            {v === 'handoff' && <Icon.warn style={{ width: 13, verticalAlign: '-2px' }} />} {label}
+          </button>
+        ))}
+      </div>
+      {aiAvail && (
+        <>
+          <button
+            className={`btn sm ${autoReply ? 'primary' : ''}`}
+            onClick={toggleAutoReply}
+            title="When on, AI answers incoming replies automatically"
+          >
+            <Icon.sparkles /> AI auto-reply: {autoReply ? 'On' : 'Off'}
+          </button>
+          <button className="btn sm" onClick={() => setShowAiSettings(true)} title="AI auto-reply settings">
+            <Icon.settings />
+          </button>
+        </>
+      )}
+    </div>
+  );
+
   return (
     <>
-      <div className="toolbar">
-        <div className="flex" style={{ gap: 6 }}>
-          <button className={`btn sm ${filter === '' ? 'primary' : ''}`} onClick={() => setFilter('')}>All</button>
-          <button className={`btn sm ${filter === 'handoff' ? 'primary' : ''}`} onClick={() => setFilter('handoff')}>
-            <Icon.warn /> Needs human
-          </button>
-        </div>
-        <div className="spacer" />
-        {aiAvail && (
-          <>
-            <button
-              className={`btn sm ${autoReply ? 'primary' : ''}`}
-              onClick={toggleAutoReply}
-              title="When on, AI answers incoming replies automatically"
-            >
-              <Icon.sparkles /> AI auto-reply: {autoReply ? 'On' : 'Off'}
-            </button>
-            <button className="btn sm" onClick={() => setShowAiSettings(true)} title="AI auto-reply settings">
-              <Icon.settings />
-            </button>
-          </>
-        )}
-      </div>
+      {headerSlot ? createPortal(controls, headerSlot) : null}
       {showAiSettings && (
         <AiReplySettings
           onClose={() => setShowAiSettings(false)}
@@ -197,21 +212,29 @@ export default function Conversations() {
                 className={`thread-item ${active === t.id ? 'active' : ''}`}
                 onClick={() => setActive(t.id)}
               >
-                <div className="avatar">{initials(t.name, t.phone)}</div>
+                <div className="avatar lg">{initials(t.name, t.phone)}</div>
                 <div className="thread-main">
-                  <div className="thread-name">
-                    {t.is_group === 1 && <Icon.users style={{ width: 13, flex: 'none', opacity: 0.65 }} />}
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  <div className="thread-row1">
+                    <span className="thread-name-txt">
+                      {t.is_group === 1 && <Icon.users style={{ width: 13, opacity: 0.6, verticalAlign: '-2px', marginRight: 4 }} />}
                       {t.name || (t.is_group ? 'Group chat' : '+' + t.phone)}
                     </span>
-                    {t.handoff === 1 && <span className="badge amber">handoff</span>}
+                    <span className={`thread-time ${t.unread > 0 ? 'unread' : ''}`}>{timeAgo(t.last_at)}</span>
                   </div>
-                  <div className="thread-preview">
-                    {t.last_direction === 'out' && <span style={{ color: 'var(--brand-700)' }}>You: </span>}
-                    {t.last_message}
+                  <div className="thread-row2">
+                    <span className="thread-preview">
+                      {t.last_direction === 'out' && <span className="preview-tick"><Ticks status={t.last_status} /> </span>}
+                      {t.is_group === 1 && t.last_direction === 'in' && t.last_sender ? (
+                        <span className="preview-sender">{t.last_sender}: </span>
+                      ) : null}
+                      {t.last_message}
+                    </span>
+                    <span className="thread-end">
+                      {t.handoff === 1 && <span className="badge amber" style={{ padding: '0 6px' }}>handoff</span>}
+                      {t.unread > 0 && <span className="unread-badge">{t.unread}</span>}
+                    </span>
                   </div>
                 </div>
-                <div className="cell-muted" style={{ fontSize: 11 }}>{timeAgo(t.last_at)}</div>
               </div>
             ))
           )}
@@ -275,7 +298,8 @@ export default function Conversations() {
 
               <div className="chat-compose">
                 <textarea
-                  className="textarea"
+                  className="compose-input"
+                  rows={1}
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
                   onKeyDown={(e) => {
@@ -284,10 +308,10 @@ export default function Conversations() {
                       send();
                     }
                   }}
-                  placeholder={wa.status === 'connected' ? 'Type a reply…' : 'Connect WhatsApp to reply'}
+                  placeholder={wa.status === 'connected' ? 'Type a message' : 'Connect WhatsApp to reply'}
                   disabled={wa.status !== 'connected'}
                 />
-                <button className="btn primary" onClick={send} disabled={sending || !draft.trim()}>
+                <button className="compose-send" onClick={send} disabled={sending || !draft.trim()} title="Send">
                   <Icon.send />
                 </button>
               </div>
