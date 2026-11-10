@@ -5,6 +5,16 @@ import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
 import { Modal, Empty, Loading, StatusBadge, clockTime, timeAgo, initials } from '../ui.jsx';
 
+// What to call a chat: its name, else its number — never an @lid (WhatsApp's id for a
+// contact whose number it hasn't shared with this device), which only looks like a number.
+function chatTitle(c) {
+  if (c?.name) return c.name;
+  if (c?.is_group) return 'Group chat';
+  if (c?.lid_only) return 'Unknown contact';
+  return '+' + c?.phone;
+}
+const chatInitials = (c) => initials(c?.name, c?.lid_only || c?.is_group ? '' : c?.phone);
+
 function Ticks({ status }) {
   if (status === 'read') return <span style={{ color: '#53bdeb' }}>✓✓</span>;
   if (status === 'delivered') return <span>✓✓</span>;
@@ -343,12 +353,12 @@ export default function Conversations({ go }) {
                 className={`thread-item ${active === t.id ? 'active' : ''}`}
                 onClick={() => setActive(t.id)}
               >
-                <div className="avatar lg">{initials(t.name, t.phone)}</div>
+                <div className="avatar lg">{chatInitials(t)}</div>
                 <div className="thread-main">
                   <div className="thread-row1">
                     <span className="thread-name-txt">
                       {t.is_group === 1 && <Icon.users style={{ width: 13, opacity: 0.6, verticalAlign: '-2px', marginRight: 4 }} />}
-                      {t.name || (t.is_group ? 'Group chat' : '+' + t.phone)}
+                      {chatTitle(t)}
                     </span>
                     <span className={`thread-time ${t.unread > 0 ? 'unread' : ''}`}>{timeAgo(t.last_at)}</span>
                   </div>
@@ -387,16 +397,16 @@ export default function Conversations({ go }) {
           ) : (
             <>
               <div className="chat-head">
-                <div className="avatar">{initials(thread.contact.name, thread.contact.phone)}</div>
+                <div className="avatar">{chatInitials(thread.contact)}</div>
                 <div style={{ flex: 1 }}>
                   <strong>
-                    {thread.contact.name || (thread.contact.is_group ? 'Group chat' : '+' + thread.contact.phone)}
+                    {chatTitle(thread.contact)}
                   </strong>
                   <div className="muted" style={{ fontSize: 12 }}>
                     {thread.contact.is_group ? (
                       <><Icon.users style={{ width: 12, verticalAlign: '-2px' }} /> Group</>
                     ) : (
-                      <>+{thread.contact.phone} · <StatusBadge status={thread.contact.status} /></>
+                      <>{thread.contact.lid_only ? 'Number hidden by WhatsApp' : '+' + thread.contact.phone} · <StatusBadge status={thread.contact.status} /></>
                     )}
                   </div>
                 </div>

@@ -30,8 +30,8 @@ const baileysLogSink = new Writable({
       const line = JSON.parse(String(chunk));
       const lvl = Number(line.level) || 0; // 30 info, 40 warn, 50 error
       const msg = String(line.msg || '');
-      // History sync works now; keep only warnings/errors so audit stays readable.
-      if (lvl >= 40 && _dbgCount < 500) {
+      // Only real errors, so the Audit Logs page stays readable.
+      if (lvl >= 50 && _dbgCount < 200) {
         _dbgCount++;
         const err = line.err?.message || line.error?.message || line.err || '';
         audit('debug', `WA[${lvl}] ${msg}${err ? ' — ' + err : ''}`.slice(0, 350), {
@@ -136,20 +136,26 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
           emitPool();
         }
         audit('connection', `History received (type=${ev.syncType ?? '?'}, latest=${ev.isLatest}, progress=${ev.progress ?? '?'}): ${ev.messages?.length || 0} messages, ${ev.chats?.length || 0} chats, ${ev.contacts?.length || 0} contacts`, { level: 'info' });
-        // DIAGNOSTIC (diag-3): dump the real shape of what WhatsApp sends so we can see
-        // where names/real phone numbers live for @lid-addressed chats.
-        try {
-          const trim = (o) => JSON.parse(JSON.stringify(o || {}));
-          const sampleContacts = (ev.contacts || []).slice(0, 3).map(trim);
-          const sampleChats = (ev.chats || []).slice(0, 3).map((c) => ({ id: c?.id, name: c?.name, displayName: c?.displayName, pnJid: c?.pnJid, lidJid: c?.lidJid }));
-          const lidMsg = (ev.messages || []).find((m) => (m.key?.remoteJid || '').endsWith('@lid'));
-          const sampleMsgKey = lidMsg ? { key: trim(lidMsg.key), pushName: lidMsg.pushName, verifiedBizName: lidMsg.verifiedBizName } : 'none';
-          audit('debug', `DIAG3 contacts=${JSON.stringify(sampleContacts)}`.slice(0, 340), { level: 'info' });
-          audit('debug', `DIAG3 chats=${JSON.stringify(sampleChats)}`.slice(0, 340), { level: 'info' });
-          audit('debug', `DIAG3 lidMsg=${JSON.stringify(sampleMsgKey)}`.slice(0, 340), { level: 'info' });
-        } catch {}
-        ingestPoolHistory(id, ev);
+        // Names/lid pairs in this batch first (PUSH_NAME batches have contacts but no
+        // messages), then the messages — serialized with the other identity work.
+        queueIdentity(async () => {
+          await applyContactBatch(ev.contacts);
+          await ingestPoolHistory(id, ev);
+        });
       });
+      // Saved names from the phone's address book + their @lid <-> number pairs arrive via
+      // the app-state contact sync (Baileys chat-utils contactAction → contacts.upsert).
+      sock.ev.on('contacts.upsert', (list) => {
+        queueIdentity(async () => {
+          const n = await applyContactBatch(list);
+          if (n) audit('connection', `Updated ${n} chat name${n === 1 ? '' : 's'} from your WhatsApp contacts`, { level: 'info' });
+        });
+      });
+      // Push names from incoming messages (Baileys chats.js → contacts.update).
+      sock.ev.on('contacts.update', (list) => queueIdentity(() => applyContactBatch(list)));
+      // Group names (subjects) when they're created/changed.
+      sock.ev.on('groups.upsert', (list) => applyGroupSubjects(id, list));
+      sock.ev.on('groups.update', (list) => applyGroupSubjects(id, list));
     }
 
     sock.ev.on('connection.update', async (u) => {
@@ -175,7 +181,13 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
           // Fallback: don't show the loader forever if WhatsApp sends no history.
           clearTimeout(a.syncTimer);
           a.syncTimer = setTimeout(() => { const x = accounts.get(id); if (x) { x.syncing = false; emitPool(); } }, 12000);
-          audit('connection', `Conversation number linked: ${a.me.name || a.me.phone} — syncing history… [diag-2 build, syncFullHistory=${isConv}]`, { level: 'success' });
+          audit('connection', `Conversation number linked: ${a.me.name || a.me.phone} — syncing history…`, { level: 'success' });
+          // Group names: fetch once the initial sync settles, then again after history has
+          // created the group chats (queries during the very first seconds can time out).
+          clearTimeout(a.groupTimer1);
+          clearTimeout(a.groupTimer2);
+          a.groupTimer1 = setTimeout(() => syncGroupNames(id), 6000);
+          a.groupTimer2 = setTimeout(() => syncGroupNames(id), 45000);
         } else {
           audit('warmup', `Warm-up number linked: ${a.me.name || a.me.phone}`, { level: 'success' });
         }
@@ -267,6 +279,15 @@ export async function checkOnWhatsAppVia(fromId, phone) {
   }
 }
 
+// Send to an exact jid (a group, an @lid contact, or a number jid) from one pool account.
+export async function sendJidFrom(fromId, jid, text) {
+  const a = accounts.get(fromId);
+  if (!a?.sock || a.status !== 'connected') throw new Error('Source number not connected');
+  await a.sock.sendPresenceUpdate('composing', jid).catch(() => {});
+  const sent = await a.sock.sendMessage(jid, { text });
+  return sent?.key?.id || null;
+}
+
 export async function sendFromTo(fromId, toPhone, text) {
   const a = accounts.get(fromId);
   if (!a?.sock || a.status !== 'connected') throw new Error('Source number not connected');
@@ -298,12 +319,182 @@ function textOf(msg) {
     ''
   );
 }
+const isLid = (j) => typeof j === 'string' && j.endsWith('@lid');
+const isPn = (j) => typeof j === 'string' && j.endsWith('@s.whatsapp.net');
+
+// The real-number jid of a 1:1 chat, if the message carries one. Baileys puts it in
+// key.senderPn / participantPn (decode-wa-message.js) — but those describe the SENDER,
+// so on our own (fromMe) messages they're OUR number and must not identify the chat.
 function pnOf(msg) {
   const k = msg.key || {};
-  for (const j of [k.remoteJid, k.remoteJidAlt, k.senderPn, k.participantAlt]) {
-    if (typeof j === 'string' && j.endsWith('@s.whatsapp.net')) return j;
-  }
+  const cands = k.fromMe ? [k.remoteJid, k.remoteJidAlt] : [k.remoteJid, k.remoteJidAlt, k.senderPn, k.participantPn, k.participantAlt];
+  for (const j of cands) if (isPn(j)) return j;
   return k.remoteJid || '';
+}
+
+// Where to send for a stored contact: group jid, the @lid when WhatsApp never told us the
+// real number, otherwise the number.
+export function chatJidOf(contact) {
+  if (contact?.is_group) return contact.jid || `${contact.phone}@g.us`;
+  if (contact?.lid_only && isLid(contact.jid)) return contact.jid;
+  return `${normalizePhone(contact?.phone)}@s.whatsapp.net`;
+}
+
+// lid -> { pn, name, notify } from the persistent map.
+async function lidLookup(lids) {
+  const out = new Map();
+  const list = [...new Set((lids || []).filter(isLid))];
+  if (!list.length) return out;
+  try {
+    for (const d of await db.lidMap().find({ _id: { $in: list } }).toArray()) out.set(d._id, d);
+  } catch {}
+  return out;
+}
+
+// Serialize identity work (contact batches + history ingest) so a lid mapping that arrives
+// mid-sync is never raced by the chat it resolves.
+let identityChain = Promise.resolve();
+function queueIdentity(fn) {
+  identityChain = identityChain.then(fn).catch((e) => audit('system', `Contact sync error: ${e.message}`, { level: 'error' }));
+  return identityChain;
+}
+
+// Reconcile WhatsApp contact info into lid_map + our contacts. Real sources (Baileys 6.7):
+//  - contacts.upsert from app-state contactAction → { id, name: fullName, lid, jid }  (saved names)
+//  - contacts.update from incoming messages       → { id, notify, verifiedName }   (push names)
+//  - messaging-history.set contacts (PUSH_NAME)   → { id, notify }
+//  - live message keys                             → senderLid + senderPn pairs
+async function applyContactBatch(list) {
+  const entries = [];
+  for (const c of list || []) {
+    if (!c?.id || typeof c.id !== 'string') continue;
+    if (c.id.endsWith('@g.us') || c.id.endsWith('@newsletter') || c.id.endsWith('@broadcast')) continue;
+    const jids = [c.id, c.lid, c.jid, c.phoneNumber].filter((x) => typeof x === 'string');
+    const lid = jids.find(isLid) || null;
+    const pn = jids.find(isPn) || null;
+    const saved = String(c.name || '').trim();
+    const push = String(c.notify || c.verifiedName || '').trim();
+    if (!(lid && pn) && !saved && !push) continue; // nothing useful (e.g. a picture change)
+    entries.push({ lid, pn, saved, push });
+  }
+  if (!entries.length) return 0;
+
+  // 1) Remember lid -> number/name so later history + live messages resolve straight away.
+  const mapOps = [];
+  for (const e of entries) {
+    if (!e.lid) continue;
+    const set = { updated_at: nowIso() };
+    if (e.pn) set.pn = e.pn;
+    if (e.saved) set.name = e.saved;
+    if (e.push) set.notify = e.push;
+    mapOps.push({ updateOne: { filter: { _id: e.lid }, update: { $set: set }, upsert: true } });
+  }
+  if (mapOps.length) await db.lidMap().bulkWrite(mapOps, { ordered: false }).catch(() => {});
+
+  // 2) Fix the contacts we already store (one lookup query, then only the matches).
+  const lids = entries.filter((e) => e.lid).map((e) => e.lid);
+  const nums = [...lids.map(jidToPhone), ...entries.filter((e) => e.pn).map((e) => jidToPhone(e.pn))];
+  let existing = [];
+  try {
+    existing = await db.contacts().find({ is_group: { $ne: 1 }, $or: [{ phone: { $in: nums } }, { lid: { $in: lids } }] }).toArray();
+  } catch {}
+  if (!existing.length) return 0;
+  const byPhone = new Map(existing.map((x) => [x.phone, x]));
+  const byLid = new Map(existing.filter((x) => x.lid).map((x) => [x.lid, x]));
+  let fixed = 0;
+  for (const e of entries) {
+    try {
+      if (await reconcileContact(e, byPhone, byLid)) fixed++;
+    } catch {}
+  }
+  if (fixed) emit('message:in', {});
+  return fixed;
+}
+
+async function reconcileContact(e, byPhone, byLid) {
+  const lidNum = e.lid ? jidToPhone(e.lid) : null;
+  const pnNum = e.pn ? jidToPhone(e.pn) : null;
+  let lidC = e.lid ? byLid.get(e.lid) || byPhone.get(lidNum) || null : null;
+  const pnC = pnNum ? byPhone.get(pnNum) || null : null;
+  if (lidC && pnC && String(lidC._id) === String(pnC._id)) lidC = null;
+
+  // Same person stored twice (once by @lid, once by real number) → merge into the number.
+  if (lidC && pnC) {
+    await db.messages().updateMany({ contact_id: String(lidC._id) }, { $set: { contact_id: String(pnC._id) } });
+    const set = { lid: e.lid };
+    const nm = e.saved || pnC.name || lidC.name || e.push;
+    if (nm && nm !== pnC.name) set.name = nm;
+    if (lidC.pinned) set.pinned = 1;
+    const upd = { $set: set, $unset: { lid_only: '' } };
+    if (lidC.unread) upd.$inc = { unread: lidC.unread };
+    await db.contacts().updateOne({ _id: pnC._id }, upd);
+    await db.contacts().deleteOne({ _id: lidC._id });
+    Object.assign(pnC, set);
+    byPhone.delete(lidC.phone);
+    byLid.set(e.lid, pnC);
+    return true;
+  }
+
+  const target = lidC || pnC;
+  if (!target) return false;
+  const set = {};
+  let resolved = false;
+  if (lidC && pnNum) {
+    set.phone = pnNum; // we finally know the real number
+    set.jid = e.pn;
+    set.lid = e.lid;
+    resolved = true;
+  } else if (lidC && !lidC.lid_only) {
+    set.lid = e.lid; // older rows stored the lid as if it were a phone number
+    set.jid = e.lid;
+    set.lid_only = 1;
+  } else if (pnC && e.lid && !pnC.lid) {
+    set.lid = e.lid;
+  }
+  if (e.saved && target.name !== e.saved) set.name = e.saved; // address-book name wins
+  else if (!e.saved && e.push && !target.name) set.name = e.push;
+  if (!Object.keys(set).length) return false;
+  const upd = { $set: set };
+  if (resolved) upd.$unset = { lid_only: '' };
+  await db.contacts().updateOne({ _id: target._id }, upd);
+  if (resolved) {
+    byPhone.delete(lidC.phone);
+    byPhone.set(pnNum, target);
+  }
+  Object.assign(target, set);
+  return true;
+}
+
+// Group subjects (names) — history sync carries none, so fetch them like WhatsApp Web does.
+async function syncGroupNames(id) {
+  const a = accounts.get(id);
+  if (!a?.sock || a.status !== 'connected') return;
+  let groups;
+  try {
+    groups = await a.sock.groupFetchAllParticipating();
+  } catch {
+    return;
+  }
+  const subjects = new Map();
+  for (const [jid, g] of Object.entries(groups || {})) if (g?.subject) subjects.set(jid, g.subject);
+  a.groupSubjects = subjects;
+  if (!subjects.size) return;
+  const ops = [...subjects].map(([jid, subject]) => ({
+    updateMany: { filter: { jid, is_group: 1, name: { $ne: subject } }, update: { $set: { name: subject } } },
+  }));
+  try {
+    const r = await db.contacts().bulkWrite(ops, { ordered: false });
+    if (r.modifiedCount) emit('message:in', {});
+  } catch {}
+}
+
+function applyGroupSubjects(id, list) {
+  const a = accounts.get(id);
+  for (const g of list || []) {
+    if (!g?.id || !g.subject) continue;
+    if (a) (a.groupSubjects ||= new Map()).set(g.id, g.subject);
+    db.contacts().updateMany({ jid: g.id, is_group: 1 }, { $set: { name: g.subject } }).then((r) => r.modifiedCount && emit('message:in', {})).catch(() => {});
+  }
 }
 // Our own numbers (pool + main) — chats between them are warm-up, not conversations.
 function ourPhones() {
@@ -316,25 +507,11 @@ function ourPhones() {
   return set;
 }
 
-// Find/create a contact for a pool chat (1:1 by phone, group by jid).
-async function upsertPoolChat({ phone, jid, isGroup = false, name = '' }) {
-  const key = isGroup ? { jid } : { phone };
-  const existing = await db.contacts().findOne(key);
-  if (existing) {
-    const set = {};
-    if (!existing.name && name) set.name = name;
-    if (isGroup && !existing.jid) set.jid = jid;
-    if (Object.keys(set).length) {
-      await db.contacts().updateOne({ _id: existing._id }, { $set: set });
-      Object.assign(existing, set);
-    }
-    return existing;
-  }
-  const doc = {
-    name: name || '',
-    phone: isGroup ? jid.split('@')[0] : phone,
-    jid: jid || null,
-    is_group: isGroup ? 1 : 0,
+// Find/create a contact for a pool chat. Groups by jid. 1:1 by real number — or, when
+// WhatsApp only gave us an @lid, by that lid (flagged lid_only so the UI never shows the
+// lid as if it were a phone number).
+async function upsertPoolChat({ phone, jid, isGroup = false, name = '', lid = null }) {
+  const base = {
     tags: isGroup ? 'group' : 'whatsapp',
     status: 'active',
     synced: isGroup ? 1 : 0,
@@ -344,11 +521,64 @@ async function upsertPoolChat({ phone, jid, isGroup = false, name = '' }) {
     last_outbound_at: null,
     created_at: nowIso(),
   };
+
+  if (isGroup) {
+    const existing = await db.contacts().findOne({ jid });
+    if (existing) {
+      if (name && existing.name !== name) {
+        await db.contacts().updateOne({ _id: existing._id }, { $set: { name } });
+        existing.name = name;
+      }
+      return existing;
+    }
+    const doc = { ...base, name: name || '', phone: jid.split('@')[0], jid, is_group: 1 };
+    try {
+      const r = await db.contacts().insertOne(doc);
+      return { _id: r.insertedId, ...doc };
+    } catch {
+      return await db.contacts().findOne({ jid });
+    }
+  }
+
+  const lidNum = lid ? jidToPhone(lid) : null;
+  const resolved = !!phone && phone !== lidNum; // we know the real number
+  let existing = null;
+  if (resolved) existing = await db.contacts().findOne({ phone });
+  if (!existing && lid) existing = await db.contacts().findOne({ lid });
+  if (!existing && lidNum) existing = await db.contacts().findOne({ phone: lidNum }); // older rows
+
+  if (existing) {
+    const set = {};
+    const upd = {};
+    if (name && !existing.name) set.name = name;
+    if (lid && !existing.lid) set.lid = lid;
+    if (resolved && existing.phone !== phone) {
+      set.phone = phone;
+      set.jid = `${phone}@s.whatsapp.net`;
+      upd.$unset = { lid_only: '' };
+    } else if (!resolved && lid && !existing.lid_only && existing.phone === lidNum) {
+      set.lid_only = 1;
+      set.jid = lid;
+    }
+    if (Object.keys(set).length) {
+      upd.$set = set;
+      try {
+        await db.contacts().updateOne({ _id: existing._id }, upd);
+        Object.assign(existing, set);
+      } catch {}
+    }
+    return existing;
+  }
+
+  const doc = resolved
+    ? { ...base, name: name || '', phone, jid: `${phone}@s.whatsapp.net`, is_group: 0, ...(lid ? { lid } : {}) }
+    : { ...base, name: name || '', phone: lidNum, jid: lid, lid, lid_only: 1, is_group: 0 };
+  if (!doc.phone) return null;
   try {
     const r = await db.contacts().insertOne(doc);
     return { _id: r.insertedId, ...doc };
   } catch {
-    return await db.contacts().findOne(key);
+    return await db.contacts().findOne({ phone: doc.phone });
   }
 }
 
@@ -366,7 +596,7 @@ async function poolAutoReply(accountId, contact, phone) {
     const maxS = getSetting('autoReplyMaxSec', 30);
     const waitMs = randInt(Math.max(0, minS), Math.max(minS, maxS)) * 1000;
     if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
-    const waId = await sendFromTo(accountId, phone, reply);
+    const waId = await sendJidFrom(accountId, chatJidOf(contact), reply);
     await db.messages().insertOne({
       contact_id: String(contact._id),
       campaign_id: null,
@@ -406,7 +636,7 @@ async function ingestPool(accountId, { messages, type }) {
       if (isGroup) {
         if ((accounts.get(accountId)?.role || 'warmup') !== 'conversation') continue;
         if (!body && !msg.key.fromMe) continue;
-        const gc = await upsertPoolChat({ jid: raw, isGroup: true });
+        const gc = await upsertPoolChat({ jid: raw, isGroup: true, name: accounts.get(accountId)?.groupSubjects?.get(raw) || '' });
         if (!gc || !body) continue;
         const r = await db.messages().updateOne(
           { wa_message_id: id },
@@ -420,30 +650,27 @@ async function ingestPool(accountId, { messages, type }) {
         continue;
       }
 
-      const phone = jidToPhone(pnOf(msg));
-      if (!phone) continue;
+      if (!body) continue; // nothing to show (every path below needs text)
+
+      // Who is this chat with? Live stanzas carry the @lid AND the real number
+      // (senderLid/senderPn); learn the pair so the chat shows the real contact.
+      let pnJid = pnOf(msg);
+      const lidJid = isLid(raw) ? raw : !msg.key.fromMe && isLid(msg.key.senderLid) ? msg.key.senderLid : null;
+      if (!isPn(pnJid) && lidJid) {
+        const info = (await lidLookup([lidJid])).get(lidJid);
+        if (isPn(info?.pn)) pnJid = info.pn;
+      }
+      if (lidJid && isPn(pnJid) && !msg.key.fromMe) {
+        // Remember the pair + merge any older @lid copy of this chat (don't block this message).
+        queueIdentity(() => applyContactBatch([{ id: lidJid, jid: pnJid, notify: msg.pushName || '' }]));
+      }
+      const phone = isPn(pnJid) ? jidToPhone(pnJid) : null;
+      if (!phone && !lidJid) continue;
       // Warm-up numbers: skip chatter between our own numbers. Conversation numbers: keep everything.
       const isConvAcct = (accounts.get(accountId)?.role || 'warmup') === 'conversation';
-      if (!isConvAcct && ourPhones().has(phone)) continue;
+      if (!isConvAcct && phone && ourPhones().has(phone)) continue;
 
-      let contact = await db.contacts().findOne({ phone });
-      if (!contact) {
-        if (!body) continue;
-        const doc = {
-          name: msg.pushName || '',
-          phone,
-          tags: 'inbound',
-          status: 'active',
-          synced: 0,
-          handoff: 0,
-          handoff_reason: '',
-          last_inbound_at: null,
-          last_outbound_at: null,
-          created_at: nowIso(),
-        };
-        const r = await db.contacts().insertOne(doc).catch(() => null);
-        contact = r ? { _id: r.insertedId, ...doc } : await db.contacts().findOne({ phone });
-      }
+      const contact = await upsertPoolChat({ phone, lid: lidJid, name: msg.key.fromMe ? '' : msg.pushName || '' });
       if (!contact || contact.warmup === 1) continue;
 
       if (msg.key.fromMe) {
@@ -474,14 +701,14 @@ async function ingestPool(accountId, { messages, type }) {
       const acctAutoReply = !!accounts.get(accountId)?.autoReply; // this number's own AI toggle
       if (stop.some((w) => lc === w || lc.startsWith(w))) {
         await db.contacts().updateOne({ _id: contact._id }, { $set: { status: 'opted_out', handoff: 0 } });
-        audit('reply', `${phone} opted out ("${body}")`, { level: 'warn', meta: { contactId: String(contact._id) } });
+        audit('reply', `${contact.name || (phone ? '+' + phone : 'A contact')} opted out ("${body}")`, { level: 'warn', meta: { contactId: String(contact._id) } });
       } else if (acctAutoReply && aiAvailable()) {
         await db.targets().updateMany({ contact_id: String(contact._id), status: 'queued' }, { $set: { status: 'replied' } });
         await poolAutoReply(accountId, contact, phone);
       } else if (getSetting('handoffOnReply', true)) {
         await db.contacts().updateOne({ _id: contact._id }, { $set: { handoff: 1, handoff_reason: 'reply' } });
         await db.targets().updateMany({ contact_id: String(contact._id), status: 'queued' }, { $set: { status: 'replied' } });
-        audit('handoff', `${msg.pushName || phone} replied — handed to a human`, { level: 'info', meta: { contactId: String(contact._id) } });
+        audit('handoff', `${contact.name || msg.pushName || (phone ? '+' + phone : 'A contact')} replied — handed to a human`, { level: 'info', meta: { contactId: String(contact._id) } });
       }
       emit('message:in', { contactId: String(contact._id) });
       emit('stats:dirty', {});
@@ -492,59 +719,46 @@ async function ingestPool(accountId, { messages, type }) {
 }
 
 // Import a conversation number's existing chat history (1:1 + groups, excluding our own numbers).
-async function ingestPoolHistory(accountId, { messages, contacts: waContacts, chats }) {
+async function ingestPoolHistory(accountId, { messages, chats }) {
   if (!messages?.length) return;
+  // Note: the batch's contacts were already applied (names + lid pairs) by the caller.
 
-  // Build a name map and a lid→phone map keyed by EVERY jid form we can see, so a chat
-  // that arrives @lid-addressed still resolves to a real name/number. (WhatsApp often
-  // delivers history 1:1 chats by @lid instead of the real @s.whatsapp.net number.)
-  const nameByJid = new Map();
-  const lidToPn = new Map(); // '<lid>@lid' -> '<phone>@s.whatsapp.net'
-  const addPair = (...jids) => {
-    const list = jids.filter((x) => typeof x === 'string');
-    const lid = list.find((x) => x.endsWith('@lid'));
-    const pn = list.find((x) => x.endsWith('@s.whatsapp.net'));
-    if (lid && pn) lidToPn.set(lid, pn);
-  };
-  for (const c of waContacts || []) {
-    if (!c) continue;
-    const nm = c.name || c.notify || c.verifiedName || '';
-    for (const j of [c.id, c.lid, c.jid, c.pnJid]) if (j && nm) nameByJid.set(j, nm);
-    addPair(c.id, c.lid, c.jid, c.pnJid);
-  }
+  // Real shape (diag-3): chats/contacts arrive as bare { id } — no names, and @lid chats
+  // carry no phone number. So names/numbers come from lid_map (filled by the app-state
+  // contact sync + live traffic) and group names from the group-metadata fetch.
+  const lids = messages.map((m) => m.key?.remoteJid).filter(isLid);
+  const lidInfo = await lidLookup(lids);
+  const groupSubjects = accounts.get(accountId)?.groupSubjects || new Map();
+  const chatName = new Map();
   for (const ch of chats || []) {
     const nm = ch?.name || ch?.subject || ch?.displayName || '';
-    for (const j of [ch?.id, ch?.lidJid, ch?.pnJid]) if (j && nm) nameByJid.set(j, nm);
-    addPair(ch?.id, ch?.lidJid, ch?.pnJid);
+    if (ch?.id && nm) chatName.set(ch.id, nm);
   }
 
-  // Resolve a 1:1 chat's real phone jid: explicit pn on the key → lid map → raw.
-  const resolvePnJid = (raw, msg) => {
-    const keyed = pnOf(msg);
-    if (keyed && keyed.endsWith('@s.whatsapp.net')) return keyed;
-    if (raw.endsWith('@lid') && lidToPn.has(raw)) return lidToPn.get(raw);
-    return raw;
-  };
-
-  // Group messages by their chat jid (1:1 jid or group jid). Conversation numbers keep
-  // every chat, including ones with your own other numbers.
-  const byChat = new Map(); // chatJid -> { msgs, origJid }
+  // Group messages by chat: groups by jid; 1:1 by real number when known, else by the @lid.
+  const byChat = new Map(); // key -> { msgs, isGroup, phone, lid, name }
   for (const msg of messages) {
     const raw = msg.key?.remoteJid || '';
-    if (!raw || raw.endsWith('@newsletter') || raw === 'status@broadcast') continue;
-    const isGroup = raw.endsWith('@g.us');
-    let chatJid = raw;
-    if (!isGroup) {
-      const phone = jidToPhone(resolvePnJid(raw, msg));
-      if (!phone) continue;
-      chatJid = `${phone}@s.whatsapp.net`;
+    if (!raw || raw.endsWith('@newsletter') || raw.endsWith('@broadcast')) continue;
+    if (raw.endsWith('@g.us')) {
+      if (!byChat.has(raw)) byChat.set(raw, { msgs: [], isGroup: true, name: groupSubjects.get(raw) || chatName.get(raw) || '' });
+      byChat.get(raw).msgs.push(msg);
+      continue;
     }
-    if (!byChat.has(chatJid)) byChat.set(chatJid, { msgs: [], origJid: raw });
-    byChat.get(chatJid).msgs.push(msg);
-    // Use the sender's push name as a fallback display name when we have nothing better.
-    if (!isGroup && !nameByJid.get(chatJid) && !nameByJid.get(raw) && msg.pushName && !msg.key?.fromMe) {
-      nameByJid.set(chatJid, msg.pushName);
+    const lid = isLid(raw) ? raw : null;
+    let pnJid = pnOf(msg);
+    if (!isPn(pnJid) && lid && isPn(lidInfo.get(lid)?.pn)) pnJid = lidInfo.get(lid).pn;
+    const phone = isPn(pnJid) ? jidToPhone(pnJid) : null;
+    if (!phone && !lid) continue;
+    const key = phone ? `${phone}@s.whatsapp.net` : lid;
+    if (!byChat.has(key)) {
+      const info = lid ? lidInfo.get(lid) : null;
+      byChat.set(key, { msgs: [], isGroup: false, phone, lid, name: info?.name || info?.notify || chatName.get(raw) || '' });
     }
+    const e = byChat.get(key);
+    e.msgs.push(msg);
+    if (!e.lid && lid) e.lid = lid;
+    if (!e.name && msg.pushName && !msg.key?.fromMe) e.name = msg.pushName;
   }
 
   // The linked number's own phone — tag every message with it so a chat stays attached
@@ -552,12 +766,10 @@ async function ingestPoolHistory(accountId, { messages, contacts: waContacts, ch
   const myPhone = accounts.get(accountId)?.me?.phone || null;
 
   let imported = 0;
-  for (const [chatJid, { msgs, origJid }] of byChat) {
-    const isGroup = chatJid.endsWith('@g.us');
-    const phone = isGroup ? null : jidToPhone(chatJid);
-    const name = nameByJid.get(chatJid) || nameByJid.get(origJid) || '';
-    // Keep the original jid (may be @lid) on 1:1 contacts so replies can target it later.
-    const contact = await upsertPoolChat({ phone, jid: isGroup ? chatJid : origJid, isGroup, name });
+  for (const [chatJid, { msgs, isGroup, phone, lid, name }] of byChat) {
+    const contact = isGroup
+      ? await upsertPoolChat({ jid: chatJid, isGroup: true, name })
+      : await upsertPoolChat({ phone, lid, name });
     if (!contact || contact.warmup === 1) continue;
 
     const ops = [];
@@ -602,3 +814,6 @@ export async function reconnectPoolAccounts() {
     /* mongo not ready yet; caller retries */
   }
 }
+
+// Internals exposed for the local test harness only (no runtime effect).
+export const __test = { accounts, applyContactBatch, upsertPoolChat, ingestPoolHistory, ingestPool, applyGroupSubjects };

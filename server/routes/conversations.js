@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { db, audit, oid, pub, pubList, nowIso, dayKey, getSetting, setSetting } from '../db/mongo.js';
 import { emit } from '../events.js';
 import { sendText, sendToJid, isConnected, getWaState } from '../whatsapp/client.js';
-import { poolState, sendFromTo, isAccountConnected, startPoolAccount, removePoolAccount, setPoolLabel, setPoolAutoReply } from '../whatsapp/pool.js';
+import { poolState, sendJidFrom, chatJidOf, isAccountConnected, startPoolAccount, removePoolAccount, setPoolLabel, setPoolAutoReply } from '../whatsapp/pool.js';
 
 export const conversations = Router();
 
@@ -211,6 +211,7 @@ conversations.get('/', async (req, res) => {
       handoff_reason: c.handoff_reason,
       synced: c.synced ? 1 : 0,
       is_group: c.is_group ? 1 : 0,
+      lid_only: c.lid_only ? 1 : 0, // WhatsApp hid this contact's number (@lid) — don't show the lid as a phone
       pinned: c.pinned ? 1 : 0,
       unread: c.unread || 0,
       last_inbound_at: c.last_inbound_at,
@@ -269,13 +270,13 @@ conversations.post('/:contactId/reply', async (req, res) => {
   if (!useMain && !poolId) return res.status(400).json({ error: 'That number is not connected' });
 
   try {
+    // Groups go to the group jid, @lid-only contacts to their lid, everyone else to the number.
+    const jid = chatJidOf(contact);
     let waId;
     if (useMain) {
-      waId = contact.is_group
-        ? await sendToJid(contact.jid || `${contact.phone}@g.us`, body.trim())
-        : await sendText(contact.phone, body.trim());
+      waId = contact.is_group || contact.lid_only ? await sendToJid(jid, body.trim()) : await sendText(contact.phone, body.trim());
     } else {
-      waId = await sendFromTo(poolId, contact.phone, body.trim());
+      waId = await sendJidFrom(poolId, jid, body.trim());
     }
     await db.messages().insertOne({
       contact_id: String(_id),

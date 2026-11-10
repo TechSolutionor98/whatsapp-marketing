@@ -64,6 +64,11 @@ async function ensureIndexes() {
   await col('messages').createIndex({ direction: 1, day_key: 1 });
   // Dedup key for history sync + outgoing echoes (many nulls on legacy rows → sparse).
   await col('messages').createIndex({ wa_message_id: 1 }, { sparse: true });
+  // Conversation tabs match chats by the linked number's phone.
+  await col('messages').createIndex({ account_phone: 1, created_at: 1 }, { sparse: true });
+  // WhatsApp @lid identities: contacts keep their lid, and lid_map remembers lid -> real number/name.
+  await col('contacts').createIndex({ lid: 1 }, { sparse: true });
+  await col('contacts').createIndex({ jid: 1 }, { sparse: true });
   await col('audit_logs').createIndex({ created_at: -1 });
   await col('warmup_log').createIndex({ day_key: 1 });
   await col('warmup_log').createIndex({ created_at: -1 });
@@ -111,6 +116,7 @@ export const db = {
   users: () => col('users'),
   warmupAccounts: () => col('warmup_accounts'),
   warmupLog: () => col('warmup_log'),
+  lidMap: () => col('lid_map'), // { _id: '<lid>@lid', pn: '<phone>@s.whatsapp.net', name, notify }
 };
 
 // Kept for routes/auth.js which imports `users`.
