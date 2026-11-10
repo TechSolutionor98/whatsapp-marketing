@@ -2066,3 +2066,126 @@ tbody tr:hover {
 }
 .wa-tab:hover .wa-tab-x { opacity: 0.8; }
 .wa-tab-x:hover { background: var(--danger-soft); color: var(--danger); opacity: 1; }
+
+/* ---- Conversations: fit the window exactly (like WhatsApp Web) ----
+   The chat used a hard-coded height (calc(100vh - 172px)); the header is taller now, so the
+   whole page scrolled, the composer was pushed off-screen, and the messages pane never became
+   the scroller (so "jump to newest" did nothing). Size it from the real space instead: only
+   the chat list and the messages scroll. */
+.main:has(> .content > .chat-layout) { overflow: hidden; }
+.content:has(> .chat-layout) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding-top: 14px;
+  padding-bottom: 16px;
+  max-width: none;
+}
+.content > .wa-tabs { flex: none; }
+.content > .chat-layout { flex: 1; min-height: 0; height: auto; grid-template-rows: minmax(0, 1fr); }
+.chat-layout > .thread-list,
+.chat-layout > .chat-panel { min-height: 0; }
+.chat-panel { overflow: hidden; }
+.chat-msgs { min-height: 0; overscroll-behavior: contain; }
+.chat-head, .chat-compose { flex: none; }
+.chat-older {
+  align-self: center;
+  font-size: 11.5px;
+  color: var(--text-soft);
+  background: rgba(255, 255, 255, 0.8);
+  padding: 4px 12px;
+  border-radius: 999px;
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+/* ---- Message content like WhatsApp: media, formatting, reactions ---- */
+.bubble.rich { padding: 4px 4px 6px; }
+.bubble.rich .bubble-text, .bubble.rich .time, .bubble.rich .bubble-sender { padding: 0 8px; }
+.bubble-text a { color: #027eb5; text-decoration: underline; word-break: break-all; }
+.bubble-text code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  background: rgba(0, 0, 0, 0.06);
+  padding: 0 4px;
+  border-radius: 4px;
+}
+.msg-img {
+  display: block;
+  width: 300px;
+  max-width: 100%;
+  max-height: 360px;
+  border-radius: 9px;
+  overflow: hidden;
+  background: #d6d0c8 center / cover no-repeat;
+  margin-bottom: 4px;
+}
+.msg-img img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.msg-video {
+  display: block;
+  width: 300px;
+  max-width: 100%;
+  max-height: 360px;
+  border-radius: 9px;
+  background: #000;
+  margin-bottom: 4px;
+  object-fit: contain;
+}
+.bubble.sticker { background: transparent; box-shadow: none; padding: 0; }
+.bubble.sticker .time { background: rgba(255, 255, 255, 0.85); border-radius: 8px; padding: 1px 6px; display: inline-block; float: right; }
+.msg-sticker { display: block; width: 150px; height: 150px; object-fit: contain; }
+.msg-audio { display: flex; align-items: center; gap: 8px; padding: 4px 6px 0; }
+.msg-audio audio { height: 36px; width: 250px; max-width: 100%; }
+.msg-audio-ico { font-size: 18px; }
+.msg-audio-dur { font-size: 11px; color: var(--text-faint); }
+.msg-doc {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 220px;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 9px;
+  color: inherit;
+  text-decoration: none;
+  margin-bottom: 4px;
+}
+.msg-doc:hover { background: rgba(0, 0, 0, 0.08); }
+.msg-doc-ico { font-size: 22px; }
+.msg-doc-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.msg-doc em { font-style: normal; font-size: 11px; color: var(--text-faint); }
+.msg-loc {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 9px;
+  color: inherit;
+  text-decoration: none;
+  margin-bottom: 4px;
+  min-width: 220px;
+}
+.msg-loc-pin { font-size: 22px; }
+.msg-loc b { display: block; font-size: 13px; }
+.msg-loc small { color: #027eb5; font-size: 11.5px; }
+.msg-media-missing { display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-size: 12px; color: var(--text-soft); font-style: italic; }
+.msg-media-missing img { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; filter: grayscale(0.4); }
+.bubble.has-reacts { margin-bottom: 14px; }
+.bubble-reacts {
+  position: absolute;
+  bottom: -13px;
+  left: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 13px;
+  line-height: 22px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  white-space: nowrap;
+}
+.bubble.out .bubble-reacts { left: auto; right: 10px; }
+.bubble-reacts span { font-size: 11px; color: var(--text-soft); margin-left: 3px; }

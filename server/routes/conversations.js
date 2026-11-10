@@ -1,8 +1,14 @@
 import { Router } from 'express';
+import fs from 'node:fs';
+import path from 'node:path';
+import { DATA_DIR } from '../config.js';
 import { db, audit, oid, pub, pubList, nowIso, dayKey, getSetting, setSetting } from '../db/mongo.js';
 import { emit } from '../events.js';
 import { sendText, sendToJid, isConnected, getWaState } from '../whatsapp/client.js';
-import { poolState, sendJidFrom, chatJidOf, isAccountConnected, startPoolAccount, removePoolAccount, setPoolLabel, setPoolAutoReply } from '../whatsapp/pool.js';
+import { poolState, sendJidFrom, chatJidOf, isAccountConnected, startPoolAccount, removePoolAccount, setPoolLabel, setPoolAutoReply, downloadStoredMedia } from '../whatsapp/pool.js';
+
+const MEDIA_DIR = path.join(DATA_DIR, 'media_cache');
+const mediaInflight = new Map(); // one download per file even if the page asks twice
 
 export const conversations = Router();
 
@@ -237,21 +243,62 @@ conversations.post('/:contactId/pin', async (req, res) => {
   res.json({ ok: true });
 });
 
+// A message's photo / voice note / video / sticker / document: fetched from WhatsApp and
+// decrypted on first view, then served from a local cache. sendFile handles Range requests,
+// so audio and video can seek.
+conversations.get('/media/:messageId', async (req, res) => {
+  const _id = oid(req.params.messageId);
+  if (!_id) return res.status(400).json({ error: 'Bad id' });
+  const doc = await db.messages().findOne({ _id }, { projection: { media_raw: 1, mime: 1, account_phone: 1, file_name: 1, type: 1 } });
+  if (!doc?.media_raw) return res.status(404).json({ error: 'No media on this message' });
+  const file = path.join(MEDIA_DIR, String(_id));
+  try {
+    if (!fs.existsSync(file)) {
+      if (!mediaInflight.has(file)) {
+        mediaInflight.set(
+          file,
+          (async () => {
+            const buf = await downloadStoredMedia(doc);
+            await fs.promises.mkdir(MEDIA_DIR, { recursive: true });
+            await fs.promises.writeFile(file, buf);
+          })().finally(() => mediaInflight.delete(file))
+        );
+      }
+      await mediaInflight.get(file);
+    }
+    res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+    if (doc.type === 'document' && doc.file_name) {
+      res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(doc.file_name)}`);
+    }
+    res.sendFile(file, { headers: { 'Content-Type': doc.mime || 'application/octet-stream' } });
+  } catch (e) {
+    res.status(404).json({ error: `This media is no longer available on WhatsApp (${e.message})` });
+  }
+});
+
+// One chat's messages, newest page first (like WhatsApp): ?before=<created_at> loads the
+// page of older messages before that point. Previously this returned the OLDEST 1000, so a
+// busy chat never showed its latest messages.
 conversations.get('/:contactId', async (req, res) => {
   const _id = oid(req.params.contactId);
   if (!_id) return res.status(400).json({ error: 'Bad id' });
   const contact = await db.contacts().findOne({ _id });
   if (!contact) return res.status(404).json({ error: 'Not found' });
   const account = req.query.account || 'main';
-  const messages = await db
+  const limit = Math.min(Math.max(Number(req.query.limit) || 150, 20), 500);
+  const q = { contact_id: String(_id), ...accountMatch(account) };
+  if (req.query.before) q.created_at = { $lt: String(req.query.before) };
+  const page = await db
     .messages()
-    .find({ contact_id: String(_id), ...accountMatch(account) })
-    .sort({ created_at: 1, _id: 1 })
-    .limit(1000)
+    .find(q, { projection: { media_raw: 0 } }) // download keys stay server-side
+    .sort({ created_at: -1, _id: -1 })
+    .limit(limit + 1)
     .toArray();
+  const has_more = page.length > limit;
+  const messages = page.slice(0, limit).reverse();
   // Opening a thread marks it read.
-  if (contact.unread) db.contacts().updateOne({ _id }, { $set: { unread: 0 } }).catch(() => {});
-  res.json({ contact: pub({ ...contact, unread: 0 }), messages: pubList(messages) });
+  if (contact.unread && !req.query.before) db.contacts().updateOne({ _id }, { $set: { unread: 0 } }).catch(() => {});
+  res.json({ contact: pub({ ...contact, unread: 0 }), messages: pubList(messages), has_more });
 });
 
 conversations.post('/:contactId/reply', async (req, res) => {

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../api.js';
 import { useApp } from '../store.jsx';
@@ -14,6 +14,99 @@ function chatTitle(c) {
   return '+' + c?.phone;
 }
 const chatInitials = (c) => initials(c?.name, c?.lid_only || c?.is_group ? '' : c?.phone);
+
+// WhatsApp text formatting: *bold*, _italic_, ~strike~, ```mono``` and clickable links.
+// Built as React nodes (never innerHTML), so message text can't inject markup.
+const WA_FMT = /(https?:\/\/[^\s<]+)|(?<!\w)\*([^*\n]+)\*(?!\w)|(?<!\w)_([^_\n]+)_(?!\w)|(?<!\w)~([^~\n]+)~(?!\w)|```([^`]+)```/g;
+function formatWa(text) {
+  if (!text) return text;
+  const out = [];
+  let last = 0;
+  let k = 0;
+  WA_FMT.lastIndex = 0;
+  for (let m = WA_FMT.exec(text); m; m = WA_FMT.exec(text)) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    if (m[1]) out.push(<a key={k++} href={m[1]} target="_blank" rel="noreferrer noopener">{m[1]}</a>);
+    else if (m[2]) out.push(<strong key={k++}>{m[2]}</strong>);
+    else if (m[3]) out.push(<em key={k++}>{m[3]}</em>);
+    else if (m[4]) out.push(<s key={k++}>{m[4]}</s>);
+    else if (m[5]) out.push(<code key={k++}>{m[5]}</code>);
+    last = WA_FMT.lastIndex;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+function fmtSize(n) {
+  if (!n) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1048576) return `${Math.round(n / 1024)} KB`;
+  return `${(n / 1048576).toFixed(1)} MB`;
+}
+const fmtDur = (s) => (s ? `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}` : '');
+
+// Photo / sticker / video / GIF / voice note / audio / document / location inside a bubble.
+// Files stream from /api/conversations/media/:id (fetched + decrypted from WhatsApp on first
+// view); photos and videos show WhatsApp's tiny inline preview until the full file loads.
+function MessageMedia({ m, onLoad }) {
+  const [failed, setFailed] = useState(false);
+  const url = `/api/conversations/media/${m.id}`;
+  const preview = m.thumb ? `data:image/jpeg;base64,${m.thumb}` : undefined;
+  if (m.type === 'location' && m.location) {
+    return (
+      <a className="msg-loc" href={`https://maps.google.com/?q=${m.location.lat},${m.location.lng}`} target="_blank" rel="noreferrer noopener">
+        <span className="msg-loc-pin">📍</span>
+        <span>
+          <b>{m.location.name || 'Location'}</b>
+          <small>Open in Google Maps</small>
+        </span>
+      </a>
+    );
+  }
+  if (!m.media) return null;
+  if (failed) {
+    return (
+      <div className="msg-media-missing">
+        {preview && m.type !== 'sticker' ? <img src={preview} alt="" /> : null}
+        <span>{m.body} · no longer available on WhatsApp</span>
+      </div>
+    );
+  }
+  const ratio = m.w && m.h ? `${m.w} / ${m.h}` : undefined;
+  switch (m.type) {
+    case 'image':
+      return (
+        <a className="msg-img" href={url} target="_blank" rel="noreferrer noopener" style={{ aspectRatio: ratio, backgroundImage: preview ? `url(${preview})` : undefined }}>
+          <img src={url} alt="" loading="lazy" onLoad={onLoad} onError={() => setFailed(true)} />
+        </a>
+      );
+    case 'sticker':
+      return <img className="msg-sticker" src={url} alt="Sticker" loading="lazy" onLoad={onLoad} onError={() => setFailed(true)} />;
+    case 'gif':
+      return <video className="msg-video" src={url} poster={preview} style={{ aspectRatio: ratio }} autoPlay loop muted playsInline onLoadedData={onLoad} onError={() => setFailed(true)} />;
+    case 'video':
+      return <video className="msg-video" src={url} poster={preview} style={{ aspectRatio: ratio }} controls preload="none" playsInline onError={() => setFailed(true)} />;
+    case 'voice':
+    case 'audio':
+      return (
+        <div className={`msg-audio ${m.type}`}>
+          <span className="msg-audio-ico">{m.type === 'voice' ? '🎤' : '🎵'}</span>
+          <audio src={url} controls preload="none" onError={() => setFailed(true)} />
+          {m.seconds ? <span className="msg-audio-dur">{fmtDur(m.seconds)}</span> : null}
+        </div>
+      );
+    case 'document':
+      return (
+        <a className="msg-doc" href={url} target="_blank" rel="noreferrer noopener" download={m.file_name || true}>
+          <span className="msg-doc-ico">📄</span>
+          <span className="msg-doc-name">{m.file_name || 'Document'}</span>
+          {m.size ? <em>{fmtSize(m.size)}</em> : null}
+        </a>
+      );
+    default:
+      return null;
+  }
+}
 
 function Ticks({ status }) {
   if (status === 'read') return <span style={{ color: '#53bdeb' }}>✓✓</span>;
@@ -76,6 +169,9 @@ export default function Conversations({ go }) {
   const [account, setAccount] = useState('main'); // active account tab
   const [syncingChats, setSyncingChats] = useState(false); // polling a just-connected number
   const msgsRef = useRef(null);
+  const stickRef = useRef(true); // keep the chat pinned to its newest message while at the bottom
+  const restoreRef = useRef(null); // scroll position to restore after prepending older messages
+  const olderBusy = useRef(false);
 
   const loadAccounts = async () => {
     try {
@@ -147,14 +243,61 @@ export default function Conversations({ go }) {
       setThreadsLoaded(true);
     }
   };
-  const loadThread = async (id) => {
+  // Load a chat's newest page. A live refresh merges into what's shown, keeping older
+  // pages already loaded (scrolled up), instead of replacing them.
+  const loadThread = async (id, { reset = false } = {}) => {
     if (!id) return;
     const t = await api.get(`/conversations/${id}?account=${account}`);
-    setThread(t);
-    setTimeout(() => {
-      if (msgsRef.current) msgsRef.current.scrollTop = msgsRef.current.scrollHeight;
-    }, 50);
+    if (reset) stickRef.current = true; // a freshly opened chat starts at its newest message
+    setThread((prev) => {
+      if (reset || !prev || prev.contact.id !== t.contact.id) return t;
+      const first = t.messages[0]?.created_at;
+      const ids = new Set(t.messages.map((m) => m.id));
+      const older = first ? prev.messages.filter((m) => m.created_at < first && !ids.has(m.id)) : [];
+      return { ...t, messages: [...older, ...t.messages], has_more: older.length ? prev.has_more : t.has_more };
+    });
   };
+
+  // Scrolled to the top → fetch the previous page and keep the view where it was.
+  const loadOlder = async () => {
+    if (!thread?.has_more || olderBusy.current || !thread.messages.length) return;
+    olderBusy.current = true;
+    const el = msgsRef.current;
+    try {
+      const before = encodeURIComponent(thread.messages[0].created_at);
+      const t = await api.get(`/conversations/${thread.contact.id}?account=${account}&before=${before}`);
+      if (el) restoreRef.current = { h: el.scrollHeight, top: el.scrollTop };
+      setThread((p) => {
+        if (!p || p.contact.id !== t.contact.id) return p;
+        const ids = new Set(p.messages.map((m) => m.id));
+        return { ...p, messages: [...t.messages.filter((m) => !ids.has(m.id)), ...p.messages], has_more: t.has_more };
+      });
+    } finally {
+      olderBusy.current = false;
+    }
+  };
+
+  const onMsgsScroll = (e) => {
+    const el = e.currentTarget;
+    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; // at the bottom?
+    if (el.scrollTop < 120) loadOlder();
+  };
+  // Media finished loading → it grew the chat; stay at the bottom if we were there.
+  const onMediaLoad = () => {
+    const el = msgsRef.current;
+    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
+  };
+
+  useLayoutEffect(() => {
+    const el = msgsRef.current;
+    if (!el || !thread) return;
+    if (restoreRef.current) {
+      el.scrollTop = el.scrollHeight - restoreRef.current.h + restoreRef.current.top; // older page prepended
+      restoreRef.current = null;
+    } else if (stickRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [thread]);
 
   useEffect(() => {
     loadThreads();
@@ -165,7 +308,7 @@ export default function Conversations({ go }) {
     setThread(null);
   }, [account]);
   useEffect(() => {
-    loadThread(active);
+    loadThread(active, { reset: true });
   }, [active]);
 
   // Live refresh on inbound/outbound events.
@@ -209,6 +352,7 @@ export default function Conversations({ go }) {
     try {
       await api.post(`/conversations/${thread.contact.id}/reply`, { body: draft, account });
       setDraft('');
+      stickRef.current = true; // jump to the message just sent
       loadThread(thread.contact.id);
       loadThreads();
     } catch (e) {
@@ -415,29 +559,40 @@ export default function Conversations({ go }) {
                 )}
               </div>
 
-              <div className="chat-msgs" ref={msgsRef}>
+              <div className="chat-msgs" ref={msgsRef} onScroll={onMsgsScroll}>
+                {thread.has_more ? <div className="chat-older"><span className="wa-spin" /> Loading older messages…</div> : null}
                 {thread.messages.map((m, i) => {
                   const prev = thread.messages[i - 1];
                   const showDay = !prev || !sameDay(asDate(prev.created_at), asDate(m.created_at));
+                  const rich = m.media === 1 || m.type === 'location';
+                  const text = rich ? m.caption : m.body; // media: show its caption, not the "📷 Photo" label
+                  const reacts = m.reactions || [];
                   return (
                     <Fragment key={m.id}>
                       {showDay && (
                         <div className="chat-day"><span>{dayDivider(m.created_at)}</span></div>
                       )}
-                      <div className={`bubble ${m.direction}`}>
+                      <div className={`bubble ${m.direction}${m.type === 'sticker' && m.media ? ' sticker' : ''}${rich ? ' rich' : ''}${reacts.length ? ' has-reacts' : ''}`}>
                         {thread.contact.is_group === 1 && m.direction === 'in' && m.sender ? (
                           <div className="bubble-sender">{m.sender}</div>
                         ) : null}
                         {m.media_url && (
-                          <img src={m.media_url} alt="" style={{ width: '100%', borderRadius: 8, marginBottom: m.body ? 6 : 0, display: 'block' }} />
+                          <img src={m.media_url} alt="" onLoad={onMediaLoad} style={{ width: '100%', borderRadius: 8, marginBottom: m.body ? 6 : 0, display: 'block' }} />
                         )}
-                        {m.body}
+                        {rich && <MessageMedia m={m} onLoad={onMediaLoad} />}
+                        {text ? <div className="bubble-text">{formatWa(text)}</div> : null}
                         {m.ai_auto && (
                           <span className="chip" style={{ marginLeft: 6, fontSize: 9.5, padding: '0 6px' }}>AI</span>
                         )}
                         <div className="time">
                           {clockTime(m.created_at)} {m.direction === 'out' && <Ticks status={m.status} />}
                         </div>
+                        {reacts.length ? (
+                          <div className="bubble-reacts" title={reacts.map((r) => r.emoji).join(' ')}>
+                            {[...new Set(reacts.map((r) => r.emoji))].slice(0, 3).join('')}
+                            {reacts.length > 1 ? <span>{reacts.length}</span> : null}
+                          </div>
+                        ) : null}
                       </div>
                     </Fragment>
                   );

@@ -10,6 +10,8 @@ import makeWASocket, {
   downloadHistory,
   processHistoryMessage,
   normalizeMessageContent,
+  downloadMediaMessage,
+  BufferJSON,
   proto,
 } from 'baileys';
 import { inflate } from 'node:zlib';
@@ -354,6 +356,63 @@ function textOf(msg) {
   const poll = m.pollCreationMessage || m.pollCreationMessageV2 || m.pollCreationMessageV3;
   if (poll) return `📊 ${poll.name || 'Poll'}`;
   return ''; // reactions, deletes, protocol messages — not shown as chat lines
+}
+
+// What a message needs stored to render like WhatsApp: for media, the download key material
+// (so /api/conversations/media/:id can fetch + decrypt it later via Baileys
+// downloadMediaMessage), its type/mime/caption, and the tiny inline JPEG preview WhatsApp
+// ships with photos/videos (shown instantly while the full file loads); for locations, coords.
+const MEDIA_NODES = ['imageMessage', 'videoMessage', 'audioMessage', 'stickerMessage', 'documentMessage'];
+function mediaFieldsOf(msg) {
+  const m = normalizeMessageContent(msg?.message);
+  if (!m) return {};
+  const node = MEDIA_NODES.find((k) => m[k]);
+  if (node) {
+    const c = m[node];
+    const type =
+      node === 'audioMessage' ? (c.ptt ? 'voice' : 'audio') : node === 'videoMessage' && c.gifPlayback ? 'gif' : node.replace('Message', '');
+    const { jpegThumbnail, contextInfo, ...rest } = c; // keep the stored key small
+    const out = {
+      type,
+      media: 1,
+      media_raw: JSON.stringify({ key: msg.key, message: { [node]: rest } }, BufferJSON.replacer),
+      mime: c.mimetype || '',
+      caption: c.caption || '',
+    };
+    if (c.fileName) out.file_name = c.fileName;
+    if (Number(c.seconds)) out.seconds = Number(c.seconds);
+    if (Number(c.fileLength)) out.size = Number(c.fileLength);
+    if (c.width && c.height) {
+      out.w = c.width;
+      out.h = c.height;
+    }
+    if (jpegThumbnail?.length) out.thumb = Buffer.from(jpegThumbnail).toString('base64');
+    return out;
+  }
+  const loc = m.locationMessage || m.liveLocationMessage;
+  if (loc) {
+    return { type: 'location', location: { lat: loc.degreesLatitude, lng: loc.degreesLongitude, name: loc.name || loc.address || '' } };
+  }
+  return {};
+}
+
+// A reaction (👍 on a message) updates the message it points at, like WhatsApp shows it.
+async function applyReaction(msg) {
+  const r = normalizeMessageContent(msg?.message)?.reactionMessage;
+  if (!r?.key?.id) return false;
+  const from = msg.key?.fromMe ? 'me' : msg.key?.participant || msg.key?.remoteJid || '';
+  await db.messages().updateOne({ wa_message_id: r.key.id }, { $pull: { reactions: { from } } });
+  if (r.text) await db.messages().updateOne({ wa_message_id: r.key.id }, { $push: { reactions: { emoji: r.text, from } } });
+  return true;
+}
+
+// Fetch + decrypt a stored media message. If WhatsApp's server already deleted the file
+// (404/410), Baileys asks the linked phone to re-upload it (reuploadRequest), like WA Web.
+export async function downloadStoredMedia(doc) {
+  const waMsg = JSON.parse(doc.media_raw, BufferJSON.reviver);
+  const live = [...accounts.values()].filter((a) => a.sock && a.status === 'connected');
+  const acc = live.find((a) => doc.account_phone && a.me?.phone === doc.account_phone) || live.find((a) => a.role === 'conversation');
+  return downloadMediaMessage(waMsg, 'buffer', {}, acc ? { logger, reuploadRequest: acc.sock.updateMediaMessage } : undefined);
 }
 
 // A message's own send time (WhatsApp timestamp), not the time we happened to receive it —
@@ -849,6 +908,11 @@ async function ingestPool(accountId, { messages, type }) {
       const isGroup = raw.endsWith('@g.us');
       const id = msg.key.id;
       if (!id) continue;
+      // Reaction → attach to the message it targets (not a chat line of its own).
+      if (await applyReaction(msg)) {
+        emit('message:status', {});
+        continue;
+      }
       const body = textOf(msg).trim();
 
       // Group message: store for the thread (conversation numbers only), no lead automation.
@@ -859,7 +923,7 @@ async function ingestPool(accountId, { messages, type }) {
         if (!gc || !body) continue;
         const r = await db.messages().updateOne(
           { wa_message_id: id },
-          { $set: { account_phone: myPhone }, $setOnInsert: { contact_id: String(gc._id), campaign_id: null, account_id: accountId, direction: msg.key.fromMe ? 'out' : 'in', body, sender: msg.key.fromMe ? '' : msg.pushName || '', status: msg.key.fromMe ? 'sent' : 'read', wa_message_id: id, synced: 1, created_at: msgTime(msg), day_key: dayKey() } },
+          { $set: { account_phone: myPhone, ...mediaFieldsOf(msg) }, $setOnInsert: { contact_id: String(gc._id), campaign_id: null, account_id: accountId, direction: msg.key.fromMe ? 'out' : 'in', body, sender: msg.key.fromMe ? '' : msg.pushName || '', status: msg.key.fromMe ? 'sent' : 'read', wa_message_id: id, synced: 1, created_at: msgTime(msg), day_key: dayKey() } },
           { upsert: true }
         );
         if (r.upsertedCount) {
@@ -898,7 +962,7 @@ async function ingestPool(accountId, { messages, type }) {
         if (!body) continue;
         const r = await db.messages().updateOne(
           { wa_message_id: id },
-          { $set: { account_phone: myPhone }, $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'out', body, status: 'sent', wa_message_id: id, created_at: msgTime(msg), day_key: dayKey() } },
+          { $set: { account_phone: myPhone, ...mediaFieldsOf(msg) }, $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'out', body, status: 'sent', wa_message_id: id, created_at: msgTime(msg), day_key: dayKey() } },
           { upsert: true }
         );
         if (r.upsertedCount) {
@@ -911,7 +975,7 @@ async function ingestPool(accountId, { messages, type }) {
       if (!body) continue;
       const r = await db.messages().updateOne(
         { wa_message_id: id },
-        { $set: { account_phone: myPhone }, $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'in', body, status: 'read', wa_message_id: id, created_at: msgTime(msg), day_key: dayKey() } },
+        { $set: { account_phone: myPhone, ...mediaFieldsOf(msg) }, $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'in', body, status: 'read', wa_message_id: id, created_at: msgTime(msg), day_key: dayKey() } },
         { upsert: true }
       );
       if (!r.upsertedCount) continue; // already stored
@@ -1015,7 +1079,7 @@ async function ingestPoolHistory(accountId, { messages, chats }) {
         updateOne: {
           filter: { wa_message_id: id },
           update: {
-            $set: { account_phone: myPhone },
+            $set: { account_phone: myPhone, ...mediaFieldsOf(msg) },
             $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: dir, body, sender, status: dir === 'out' ? 'sent' : 'read', wa_message_id: id, synced: 1, created_at: ts, day_key: ts.slice(0, 10) },
           },
           upsert: true,
@@ -1026,6 +1090,8 @@ async function ingestPoolHistory(accountId, { messages, chats }) {
       const r = await db.messages().bulkWrite(ops, { ordered: false }).catch(() => null);
       if (r) imported += r.upsertedCount || 0;
     }
+    // Reactions in this chat's history (after their target messages are stored).
+    for (const msg of msgs) await applyReaction(msg).catch(() => {});
   }
   if (imported) {
     audit('connection', `Synced ${imported} messages for a conversation number`, { level: 'success' });
