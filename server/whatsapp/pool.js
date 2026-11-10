@@ -8,6 +8,7 @@ import makeWASocket, {
   DisconnectReason,
   Browsers,
   downloadHistory,
+  processHistoryMessage,
 } from 'baileys';
 
 import { DATA_DIR } from '../config.js';
@@ -34,7 +35,8 @@ const baileysLogSink = new Writable({
       // Only real errors, so the Audit Logs page stays readable.
       if (lvl >= 50 && _dbgCount < 200) {
         _dbgCount++;
-        const err = line.err?.message || line.error?.message || line.err || '';
+        // Baileys logs errors under both `err` and `error` (e.g. 'error in handling message').
+        const err = line.err?.message || line.error?.message || '';
         audit('debug', `WA[${lvl}] ${msg}${err ? ' — ' + err : ''}`.slice(0, 350), {
           level: lvl >= 50 ? 'error' : lvl >= 40 ? 'warn' : 'info',
         });
@@ -43,7 +45,12 @@ const baileysLogSink = new Writable({
     cb();
   },
 });
-const logger = pino({ level: 'debug' }, baileysLogSink);
+// pino only serializes Error objects under `err` by default — anything under `error` was
+// written as {} and its message lost. Serialize both.
+const logger = pino(
+  { level: 'debug', serializers: { err: pino.stdSerializers.err, error: pino.stdSerializers.err } },
+  baileysLogSink
+);
 
 // id -> runtime { id, label, sock, status, qr, me, lastError, starting, manualLogout, reconnectTimer }
 const accounts = new Map();
@@ -113,7 +120,7 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
       // Called with each history notification (Baileys chats.js). Baileys' own history
       // processing drops WhatsApp's @lid -> phone-number table, so read it ourselves.
       shouldSyncHistoryMessage: (notif) => {
-        if (isConv) captureHistoryMappings(id, notif);
+        if (isConv) onHistoryNotification(id, notif);
         return true;
       },
       // Answer recipients' retry requests so our messages decrypt (avoids "Waiting for this message").
@@ -148,6 +155,8 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
           await applyContactBatch(ev.contacts);
           await ingestPoolHistory(id, ev);
         });
+        // Baileys finished a batch — now (not in parallel with it) read that batch's number table.
+        markBaileysBatchDone(id);
       });
       // Saved names from the phone's address book + their @lid <-> number pairs arrive via
       // the app-state contact sync (Baileys chat-utils contactAction → contacts.upsert).
@@ -395,7 +404,24 @@ async function applyContactBatch(list) {
     if (e.push) set.notify = e.push;
     mapOps.push({ updateOne: { filter: { _id: e.lid }, update: { $set: set }, upsert: true } });
   }
-  if (mapOps.length) await db.lidMap().bulkWrite(mapOps, { ordered: false }).catch(() => {});
+  if (mapOps.length) {
+    // 60 learned pairs once came back as only 3 saved — the error was swallowed. Retry, and
+    // report what actually failed (duplicate-key races on upsert are harmless).
+    let lastErr = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await db.lidMap().bulkWrite(mapOps, { ordered: false });
+        lastErr = null;
+        break;
+      } catch (e) {
+        const real = (e?.writeErrors || []).filter((w) => w.code !== 11000);
+        lastErr = e?.writeErrors && !real.length ? null : e;
+        if (!lastErr) break;
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+    }
+    if (lastErr) audit('connection', `Couldn't save ${mapOps.length} phone-number mappings: ${lastErr.message}`, { level: 'warn' });
+  }
 
   // 2) Fix the contacts we already store (one lookup query, then only the matches).
   const lids = entries.filter((e) => e.lid).map((e) => e.lid);
@@ -488,26 +514,83 @@ function mappingsFromHistory(data) {
   return [...pairs].map(([lid, pn]) => ({ id: lid, jid: pn }));
 }
 
-// Download one history blob (exactly as Baileys does, via its exported downloadHistory) and
-// apply the number table. Runs alongside Baileys' own processing; identity work is queued,
-// and reconcileContact fixes chats that were already stored, so order doesn't matter.
-async function captureHistoryMappings(id, notif) {
+// History batches: Baileys downloads each blob and emits messaging-history.set. We read the
+// same blob for its number table only AFTER Baileys is done with it, one at a time — a parallel
+// download raced Baileys' own (Baileys then errored and never delivered that history). If
+// Baileys hasn't delivered a batch after a while (its download failed, or the initial-sync
+// buffer is waiting on the phone), we import that batch ourselves from the raw blob.
+const HIST_FALLBACK_MS = 60000;
+function onHistoryNotification(id, notif) {
   if (!notif?.directPath || !notif?.mediaKey) return; // Baileys' "will we sync?" probe has no media
   const a = accounts.get(id);
   if (!a) return;
   a.histSeen ||= new Set();
   if (a.histSeen.has(notif.directPath)) return;
   a.histSeen.add(notif.directPath);
-  try {
-    const pairs = mappingsFromHistory(await downloadHistory(notif, {}));
-    if (!pairs.length) return;
-    queueIdentity(async () => {
-      const fixed = await applyContactBatch(pairs);
-      audit('connection', `Learned ${pairs.length} phone number${pairs.length === 1 ? '' : 's'} from WhatsApp history (${fixed} chat${fixed === 1 ? '' : 's'} updated)`, { level: 'info' });
+  const job = { notif, retries: 0 };
+  (a.histJobs ||= []).push(job);
+  const arm = () => {
+    job.timer = setTimeout(() => {
+      const acc = accounts.get(id);
+      // Baileys still delivering batches recently → it's progressing; give it more time.
+      if (acc?.lastHistAt && Date.now() - acc.lastHistAt < 20000 && job.retries++ < 3) return arm();
+      runHistJob(id, job, true);
+    }, HIST_FALLBACK_MS);
+  };
+  arm();
+}
+
+function markBaileysBatchDone(id) {
+  const a = accounts.get(id);
+  if (!a) return;
+  a.lastHistAt = Date.now();
+  // Strict arrival order (a batch our fallback already imported still counts as this one).
+  const job = a.histJobs?.find((j) => !j.baileysDone);
+  if (!job) return;
+  job.baileysDone = true;
+  if (!job.started) runHistJob(id, job, false);
+}
+
+let histChain = Promise.resolve();
+function runHistJob(id, job, fullImport) {
+  if (job.started) return;
+  job.started = true;
+  clearTimeout(job.timer);
+  histChain = histChain.then(async () => {
+    if (!accounts.get(id)) return; // number was removed meanwhile
+    const t0 = Date.now();
+    let raw;
+    try {
+      raw = await downloadHistory(job.notif, {});
+    } catch (e) {
+      audit('connection', `Couldn't download a history batch${fullImport ? ' (WhatsApp never delivered it)' : ''}: ${e.message}`, { level: 'warn' });
+      return;
+    }
+    const pairs = mappingsFromHistory(raw);
+    const a = accounts.get(id);
+    if (a && pairs.length) {
+      a.learnedPairs ||= new Map(); // in-memory backup in case the lid_map write fails
+      for (const p of pairs) a.learnedPairs.set(p.id, p.jid);
+    }
+    const secs = Math.round((Date.now() - t0) / 1000);
+    await queueIdentity(async () => {
+      const fixed = pairs.length ? await applyContactBatch(pairs) : 0;
+      if (pairs.length) {
+        audit('connection', `Learned ${pairs.length} phone number${pairs.length === 1 ? '' : 's'} from WhatsApp history (type=${raw.syncType}, ${fixed} chat${fixed === 1 ? '' : 's'} updated, ${secs}s)`, { level: 'info' });
+      }
+      if (fullImport) {
+        const data = processHistoryMessage(raw); // Baileys' own parser → same shape as the event
+        audit('connection', `Imported a history batch directly (type=${raw.syncType}): ${data.messages.length} messages, ${data.chats.length} chats — WhatsApp hadn't delivered it`, { level: 'info' });
+        await applyContactBatch(data.contacts);
+        await ingestPoolHistory(id, data); // idempotent: messages dedupe by WhatsApp id
+        const acc = accounts.get(id);
+        if (acc?.syncing) {
+          acc.syncing = false;
+          emitPool();
+        }
+      }
     });
-  } catch (e) {
-    audit('connection', `Couldn't read phone numbers from a history batch: ${e.message}`, { level: 'warn' });
-  }
+  });
 }
 
 // Group subjects (names) — history sync carries none, so fetch them like WhatsApp Web does.
@@ -703,7 +786,9 @@ async function ingestPool(accountId, { messages, type }) {
       const lidJid = isLid(raw) ? raw : !msg.key.fromMe && isLid(msg.key.senderLid) ? msg.key.senderLid : null;
       if (!isPn(pnJid) && lidJid) {
         const info = (await lidLookup([lidJid])).get(lidJid);
+        const learned = accounts.get(accountId)?.learnedPairs?.get(lidJid);
         if (isPn(info?.pn)) pnJid = info.pn;
+        else if (isPn(learned)) pnJid = learned;
       }
       if (lidJid && isPn(pnJid) && !msg.key.fromMe) {
         // Remember the pair + merge any older @lid copy of this chat (don't block this message).
@@ -773,6 +858,9 @@ async function ingestPoolHistory(accountId, { messages, chats }) {
   // contact sync + live traffic) and group names from the group-metadata fetch.
   const lids = messages.map((m) => m.key?.remoteJid).filter(isLid);
   const lidInfo = await lidLookup(lids);
+  // Pairs learned this session (backup in case the lid_map write didn't persist).
+  const learned = accounts.get(accountId)?.learnedPairs;
+  if (learned) for (const lid of lids) if (!isPn(lidInfo.get(lid)?.pn) && learned.has(lid)) lidInfo.set(lid, { ...(lidInfo.get(lid) || {}), pn: learned.get(lid) });
   const groupSubjects = accounts.get(accountId)?.groupSubjects || new Map();
   const chatName = new Map();
   for (const ch of chats || []) {
