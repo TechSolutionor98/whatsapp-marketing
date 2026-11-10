@@ -9,7 +9,13 @@ import makeWASocket, {
   Browsers,
   downloadHistory,
   processHistoryMessage,
+  normalizeMessageContent,
+  proto,
 } from 'baileys';
+import { inflate } from 'node:zlib';
+import { promisify } from 'node:util';
+
+const inflateAsync = promisify(inflate);
 
 import { DATA_DIR } from '../config.js';
 import { db, audit, oid, getSetting, nowIso, dayKey } from '../db/mongo.js';
@@ -321,18 +327,40 @@ export async function sendMediaFromTo(fromId, toPhone, buffer, caption) {
 }
 
 // ---- Per-account inbound: capture chats for this pool number (not warm-up traffic) ----
+// Text to show for a message. Unwraps disappearing / view-once / edited / captioned-document
+// wrappers (Baileys normalizeMessageContent) — before, those came back empty and the message
+// (often a chat's latest) was dropped. Media without text gets a WhatsApp-Web-style label.
 function textOf(msg) {
-  const m = msg.message;
+  const m = normalizeMessageContent(msg.message);
   if (!m) return '';
-  return (
+  const text =
     m.conversation ||
     m.extendedTextMessage?.text ||
     m.imageMessage?.caption ||
     m.videoMessage?.caption ||
+    m.documentMessage?.caption ||
     m.buttonsResponseMessage?.selectedDisplayText ||
+    m.templateButtonReplyMessage?.selectedDisplayText ||
     m.listResponseMessage?.title ||
-    ''
-  );
+    '';
+  if (text) return text;
+  if (m.imageMessage) return '📷 Photo';
+  if (m.videoMessage) return m.videoMessage.gifPlayback ? 'GIF' : '🎥 Video';
+  if (m.audioMessage) return m.audioMessage.ptt ? '🎤 Voice message' : '🎵 Audio';
+  if (m.stickerMessage) return 'Sticker';
+  if (m.documentMessage) return `📄 ${m.documentMessage.fileName || 'Document'}`;
+  if (m.locationMessage || m.liveLocationMessage) return '📍 Location';
+  if (m.contactMessage || m.contactsArrayMessage) return '👤 Contact';
+  const poll = m.pollCreationMessage || m.pollCreationMessageV2 || m.pollCreationMessageV3;
+  if (poll) return `📊 ${poll.name || 'Poll'}`;
+  return ''; // reactions, deletes, protocol messages — not shown as chat lines
+}
+
+// A message's own send time (WhatsApp timestamp), not the time we happened to receive it —
+// matters for messages caught up from the offline queue after a reconnect.
+function msgTime(msg) {
+  const t = Number(msg?.messageTimestamp) || 0;
+  return t ? new Date(t * 1000).toISOString() : nowIso();
 }
 const isLid = (j) => typeof j === 'string' && j.endsWith('@lid');
 const isPn = (j) => typeof j === 'string' && j.endsWith('@s.whatsapp.net');
@@ -521,9 +549,22 @@ function mappingsFromHistory(data) {
 // buffer is waiting on the phone), we import that batch ourselves from the raw blob.
 const HIST_FALLBACK_MS = 60000;
 function onHistoryNotification(id, notif) {
-  if (!notif?.directPath || !notif?.mediaKey) return; // Baileys' "will we sync?" probe has no media
   const a = accounts.get(id);
   if (!a) return;
+  // WhatsApp sends the FIRST batch (your most recent chats) inline in the notification
+  // (WAProto HistorySyncNotification.initialHistBootstrapInlinePayload) — no file to download.
+  // Baileys 6.7 never reads that field and tries to download it, failing with
+  // "Cannot derive from empty media key", so those chats were lost. Import it ourselves.
+  const inline = notif?.initialHistBootstrapInlinePayload;
+  if (inline?.length) {
+    a.histSeen ||= new Set();
+    const key = `inline:${notif.syncType}:${notif.chunkOrder ?? ''}:${inline.length}`;
+    if (a.histSeen.has(key)) return;
+    a.histSeen.add(key);
+    importInlineHistory(id, notif);
+    return;
+  }
+  if (!notif?.directPath || !notif?.mediaKey) return; // Baileys' "will we sync?" probe has no media
   a.histSeen ||= new Set();
   if (a.histSeen.has(notif.directPath)) return;
   a.histSeen.add(notif.directPath);
@@ -538,6 +579,53 @@ function onHistoryNotification(id, notif) {
     }, HIST_FALLBACK_MS);
   };
   arm();
+}
+
+// The inline payload is a HistorySync, zlib-compressed like the downloaded blobs (Baileys'
+// downloadHistory inflates then decodes). Try that first, then plain, and keep whichever
+// decodes to real content — the audit line records which one it was.
+async function decodeInlineHistory(bytes) {
+  const buf = Buffer.from(bytes);
+  let lastErr = null;
+  for (const compressed of [true, false]) {
+    try {
+      const data = proto.HistorySync.decode(compressed ? await inflateAsync(buf) : buf);
+      if (data?.conversations?.length || data?.phoneNumberToLidMappings?.length || data?.pushnames?.length) {
+        return { data, compressed };
+      }
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error('payload had no chats');
+}
+
+function importInlineHistory(id, notif) {
+  histChain = histChain.then(async () => {
+    if (!accounts.get(id)) return;
+    let res;
+    try {
+      res = await decodeInlineHistory(notif.initialHistBootstrapInlinePayload);
+    } catch (e) {
+      audit('connection', `Couldn't read WhatsApp's first history batch (recent chats, type=${notif.syncType}): ${e.message}`, { level: 'warn' });
+      return;
+    }
+    const raw = res.data;
+    if (raw.syncType == null) raw.syncType = notif.syncType;
+    const pairs = mappingsFromHistory(raw);
+    const a = accounts.get(id);
+    if (a && pairs.length) {
+      a.learnedPairs ||= new Map();
+      for (const p of pairs) a.learnedPairs.set(p.id, p.jid);
+    }
+    await queueIdentity(async () => {
+      if (pairs.length) await applyContactBatch(pairs);
+      const data = processHistoryMessage(raw); // Baileys' own parser → same shape as its event
+      audit('connection', `Imported your most recent chats (type=${raw.syncType}, ${res.compressed ? 'compressed' : 'plain'}): ${data.messages.length} messages, ${data.chats.length} chats${pairs.length ? `, ${pairs.length} phone numbers` : ''}`, { level: 'success' });
+      await applyContactBatch(data.contacts);
+      await ingestPoolHistory(id, data);
+    });
+  });
 }
 
 function markBaileysBatchDone(id) {
@@ -746,7 +834,10 @@ async function poolAutoReply(accountId, contact, phone) {
 }
 
 async function ingestPool(accountId, { messages, type }) {
-  if (type !== 'notify') return;
+  // 'notify' = new message; 'append' = delivered from WhatsApp's offline queue after we were
+  // briefly disconnected (Baileys messages-recv: node.attrs.offline). Store both — dropping
+  // 'append' lost every message that arrived during a restart/reconnect.
+  if (type !== 'notify' && type !== 'append') return;
   // Warm-up numbers are isolated — they only message each other and never show in Conversations.
   if ((accounts.get(accountId)?.role || 'warmup') !== 'conversation') return;
   const myPhone = accounts.get(accountId)?.me?.phone || null; // tag chats by the linked number
@@ -768,7 +859,7 @@ async function ingestPool(accountId, { messages, type }) {
         if (!gc || !body) continue;
         const r = await db.messages().updateOne(
           { wa_message_id: id },
-          { $set: { account_phone: myPhone }, $setOnInsert: { contact_id: String(gc._id), campaign_id: null, account_id: accountId, direction: msg.key.fromMe ? 'out' : 'in', body, sender: msg.key.fromMe ? '' : msg.pushName || '', status: msg.key.fromMe ? 'sent' : 'read', wa_message_id: id, synced: 1, created_at: nowIso(), day_key: dayKey() } },
+          { $set: { account_phone: myPhone }, $setOnInsert: { contact_id: String(gc._id), campaign_id: null, account_id: accountId, direction: msg.key.fromMe ? 'out' : 'in', body, sender: msg.key.fromMe ? '' : msg.pushName || '', status: msg.key.fromMe ? 'sent' : 'read', wa_message_id: id, synced: 1, created_at: msgTime(msg), day_key: dayKey() } },
           { upsert: true }
         );
         if (r.upsertedCount) {
@@ -807,7 +898,7 @@ async function ingestPool(accountId, { messages, type }) {
         if (!body) continue;
         const r = await db.messages().updateOne(
           { wa_message_id: id },
-          { $set: { account_phone: myPhone }, $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'out', body, status: 'sent', wa_message_id: id, created_at: nowIso(), day_key: dayKey() } },
+          { $set: { account_phone: myPhone }, $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'out', body, status: 'sent', wa_message_id: id, created_at: msgTime(msg), day_key: dayKey() } },
           { upsert: true }
         );
         if (r.upsertedCount) {
@@ -820,11 +911,16 @@ async function ingestPool(accountId, { messages, type }) {
       if (!body) continue;
       const r = await db.messages().updateOne(
         { wa_message_id: id },
-        { $set: { account_phone: myPhone }, $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'in', body, status: 'read', wa_message_id: id, created_at: nowIso(), day_key: dayKey() } },
+        { $set: { account_phone: myPhone }, $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'in', body, status: 'read', wa_message_id: id, created_at: msgTime(msg), day_key: dayKey() } },
         { upsert: true }
       );
       if (!r.upsertedCount) continue; // already stored
       await db.contacts().updateOne({ _id: contact._id }, { $set: { last_inbound_at: nowIso() }, $inc: { unread: 1 } });
+      if (type !== 'notify') {
+        // Caught-up offline message: show it, but don't fire auto-replies/handoffs for backlog.
+        emit('message:in', { contactId: String(contact._id) });
+        continue;
+      }
 
       const stop = getSetting('stopKeywords', []);
       const lc = body.toLowerCase();
@@ -949,4 +1045,7 @@ export async function reconnectPoolAccounts() {
 }
 
 // Internals exposed for the local test harness only (no runtime effect).
-export const __test = { accounts, applyContactBatch, upsertPoolChat, ingestPoolHistory, ingestPool, applyGroupSubjects, mappingsFromHistory };
+export const __test = {
+  accounts, applyContactBatch, upsertPoolChat, ingestPoolHistory, ingestPool, applyGroupSubjects, mappingsFromHistory, onHistoryNotification, textOf,
+  settle: async () => { await histChain; await identityChain; }, // wait for queued history/identity work
+};
