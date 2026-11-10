@@ -52,16 +52,16 @@ function emitPool() {
   emit('pool:update', poolState());
 }
 
-export async function startPoolAccount(id, label = '', role = 'warmup', autoReply = false) {
+export async function startPoolAccount(id, label = '', role, autoReply) {
   let a = accounts.get(id);
   if (a?.sock) return; // already live
   if (!a) {
-    a = { id, label, role, autoReply, status: 'connecting', qr: null, me: null };
+    a = { id, label, role: role || 'warmup', autoReply: !!autoReply, status: 'connecting', qr: null, me: null };
     accounts.set(id, a);
   }
   if (label) a.label = label;
-  if (role) a.role = role;
-  a.autoReply = !!autoReply;
+  if (role) a.role = role; // only override when a role is explicitly passed
+  if (autoReply !== undefined) a.autoReply = !!autoReply;
   a.starting = true;
   a.manualLogout = false;
   a.status = 'connecting';
@@ -157,7 +157,9 @@ export async function startPoolAccount(id, label = '', role = 'warmup', autoRepl
         } else {
           a.status = 'connecting';
           emitPool();
-          a.reconnectTimer = setTimeout(() => startPoolAccount(id, a.label), 3000);
+          // Preserve role + auto-reply on reconnect (otherwise a conversation number
+          // silently reverts to a warm-up number and vanishes from Conversations).
+          a.reconnectTimer = setTimeout(() => startPoolAccount(id, a.label, a.role, a.autoReply), 3000);
         }
       }
     });
@@ -167,7 +169,7 @@ export async function startPoolAccount(id, label = '', role = 'warmup', autoRepl
     a.status = 'disconnected';
     a.lastError = e.message;
     emitPool();
-    a.reconnectTimer = setTimeout(() => startPoolAccount(id, a.label), 5000);
+    a.reconnectTimer = setTimeout(() => startPoolAccount(id, a.label, a.role, a.autoReply), 5000);
   } finally {
     a.starting = false;
   }

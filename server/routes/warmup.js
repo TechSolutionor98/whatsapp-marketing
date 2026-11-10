@@ -29,7 +29,7 @@ warmup.post('/accounts', async (req, res) => {
 warmup.post('/accounts/:id/reconnect', async (req, res) => {
   const doc = await db.warmupAccounts().findOne({ _id: oid(req.params.id) });
   if (!doc) return res.status(404).json({ error: 'Not found' });
-  startPoolAccount(req.params.id, doc.label || '');
+  startPoolAccount(req.params.id, doc.label || '', doc.role || 'warmup', !!doc.auto_reply);
   res.json({ ok: true });
 });
 
