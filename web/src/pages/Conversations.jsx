@@ -171,6 +171,20 @@ export default function Conversations({ go }) {
     });
   }, [active, filter, account]);
 
+  // A just-connected number is still syncing its history in the background. Poll briefly
+  // so its chats appear on their own, instead of needing a manual Refresh.
+  useEffect(() => {
+    if (!acctConnected || threads.length > 0) return;
+    let n = 0;
+    const t = setInterval(() => {
+      n += 1;
+      loadThreads();
+      loadAccounts();
+      if (n >= 15) clearInterval(t); // ~45s, then stop (number genuinely has no chats)
+    }, 3000);
+    return () => clearInterval(t);
+  }, [account, acctConnected, threads.length]);
+
   async function send() {
     if (!draft.trim() || !thread) return;
     setSending(true);

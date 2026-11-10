@@ -30,8 +30,8 @@ const baileysLogSink = new Writable({
       const line = JSON.parse(String(chunk));
       const lvl = Number(line.level) || 0; // 30 info, 40 warn, 50 error
       const msg = String(line.msg || '');
-      const keyword = /histor|sync|decrypt|download|offline|notification|mac|hmac|media|key/i.test(msg);
-      if ((keyword || lvl >= 40) && _dbgCount < 500) {
+      // History sync works now; keep only warnings/errors so audit stays readable.
+      if (lvl >= 40 && _dbgCount < 500) {
         _dbgCount++;
         const err = line.err?.message || line.error?.message || line.err || '';
         audit('debug', `WA[${lvl}] ${msg}${err ? ' — ' + err : ''}`.slice(0, 350), {
