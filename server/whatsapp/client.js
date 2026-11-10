@@ -22,12 +22,14 @@ const state = {
   qr: null, // data URL
   me: null, // { phone, name }
   lastError: null,
+  syncing: false, // pulling chat history after linking
 };
 
 let sock = null;
 let starting = false;
 let manualLogout = false;
 let reconnectTimer = null;
+let historySyncTimer = null;
 
 export function getWaState() {
   return { ...state };
@@ -101,6 +103,8 @@ export async function connectWhatsApp() {
         const loggedOut = code === DisconnectReason.loggedOut || manualLogout;
         sock = null;
         starting = false;
+        clearTimeout(historySyncTimer);
+        state.syncing = false;
 
         if (loggedOut) {
           // Session is dead — wipe credentials so the next connect shows a fresh QR.
@@ -124,7 +128,12 @@ export async function connectWhatsApp() {
 
     sock.ev.on('messages.upsert', handleIncoming);
     // WhatsApp history sync: recent chats (incl. groups) from the phone, after linking.
-    sock.ev.on('messaging-history.set', async ({ messages, contacts, chats }) => {
+    sock.ev.on('messaging-history.set', async (ev) => {
+      const { messages, contacts, chats, isLatest, progress } = ev;
+      // Show a "syncing…" state until WhatsApp marks the last batch.
+      setStatus(state.status, { syncing: !(isLatest || (progress != null && progress >= 100)) });
+      clearTimeout(historySyncTimer);
+      historySyncTimer = setTimeout(() => setStatus(state.status, { syncing: false }), 25000);
       try {
         audit('connection', `History sync received: ${messages?.length || 0} messages, ${chats?.length || 0} chats`, { level: 'info' });
         await importHistory(messages || [], contacts || [], chats || []);

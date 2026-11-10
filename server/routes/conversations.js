@@ -50,7 +50,7 @@ conversations.get('/accounts', async (req, res) => {
       connected: wa.status === 'connected',
       role: 'main',
       auto_reply: !!getSetting('autoReplyEnabled', false),
-      syncing: false,
+      syncing: !!wa.syncing,
     },
   ];
   for (const d of docs) {
