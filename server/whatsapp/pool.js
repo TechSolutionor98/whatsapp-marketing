@@ -129,7 +129,12 @@ export async function startPoolAccount(id, label = '', role = 'warmup', autoRepl
             { $set: { phone: a.me.phone, name: a.me.name } }
           );
         } catch {}
-        audit('warmup', `Warm-up number linked: ${a.me.name || a.me.phone}`, { level: 'success' });
+        if ((a.role || 'warmup') === 'conversation') {
+          a.syncing = true; // expect history to start arriving
+          audit('connection', `Conversation number linked: ${a.me.name || a.me.phone} — syncing history…`, { level: 'success' });
+        } else {
+          audit('warmup', `Warm-up number linked: ${a.me.name || a.me.phone}`, { level: 'success' });
+        }
         emitPool();
       }
       if (connection === 'close') {
