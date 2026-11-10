@@ -160,6 +160,8 @@ export default function Conversations({ go }) {
   // Live refresh on inbound/outbound events.
   useEffect(() => {
     return onBus((ev, data) => {
+      // A number connected/disconnected/linked — refresh the tab list immediately.
+      if (ev === 'pool:update' || ev === 'wa:status') loadAccounts();
       if (ev === 'message:in' || ev === 'message:out') {
         loadThreads();
         loadAccounts(); // refresh the syncing indicator as history batches land
