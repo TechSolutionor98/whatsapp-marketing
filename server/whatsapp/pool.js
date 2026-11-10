@@ -81,7 +81,11 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
       browser: Browsers.appropriate('Desktop'),
       printQRInTerminal: false,
       markOnlineOnConnect: false,
-      syncFullHistory: false, // grab RECENT chats fast (like WhatsApp Web) instead of the whole archive
+      // Conversation numbers need their real chat history (WhatsApp only pushes it on a
+      // FRESH link/scan). `false` delivered nothing, so request the full sync for those;
+      // warm-up numbers don't need history, so keep them light.
+      syncFullHistory: isConv,
+      shouldSyncHistoryMessage: () => true,
       // Answer recipients' retry requests so our messages decrypt (avoids "Waiting for this message").
       getMessage: async (key) => {
         try {
