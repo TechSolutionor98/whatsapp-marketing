@@ -60,7 +60,7 @@ export async function connectWhatsApp() {
       browser: Browsers.appropriate('Desktop'),
       printQRInTerminal: false,
       markOnlineOnConnect: false, // do not force "online" — looks more natural
-      syncFullHistory: true, // pull the phone's chat history on (re)link so recent chats show
+      syncFullHistory: false, // grab RECENT chats fast (like WhatsApp Web) instead of the whole archive
       // Answer recipients' retry requests so our messages decrypt (avoids "Waiting for this message").
       getMessage: async (key) => {
         try {

@@ -81,7 +81,7 @@ export async function startPoolAccount(id, label = '', role = 'warmup', autoRepl
       browser: Browsers.appropriate('Desktop'),
       printQRInTerminal: false,
       markOnlineOnConnect: false,
-      syncFullHistory: isConv, // conversation-only numbers pull their chat history on link
+      syncFullHistory: false, // grab RECENT chats fast (like WhatsApp Web) instead of the whole archive
       // Answer recipients' retry requests so our messages decrypt (avoids "Waiting for this message").
       getMessage: async (key) => {
         try {
