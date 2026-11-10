@@ -127,11 +127,12 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
       sock.ev.on('messaging-history.set', (ev) => {
         const acc = accounts.get(id);
         if (acc) {
-          // Still syncing until WhatsApp marks this the last batch.
-          acc.syncing = !(ev.isLatest || (ev.progress != null && ev.progress >= 100));
+          // Stay "syncing" until WhatsApp marks the FINAL batch (isLatest). progress hits
+          // 100 on every batch, so it can't tell us the sync is actually finished.
+          acc.syncing = !ev.isLatest;
           clearTimeout(acc.syncTimer);
           // Fallback: if the final batch never arrives, stop the loader after a quiet gap.
-          acc.syncTimer = setTimeout(() => { const a2 = accounts.get(id); if (a2) { a2.syncing = false; emitPool(); } }, 10000);
+          acc.syncTimer = setTimeout(() => { const a2 = accounts.get(id); if (a2) { a2.syncing = false; emitPool(); } }, 20000);
           emitPool();
         }
         audit('connection', `History received (type=${ev.syncType ?? '?'}, latest=${ev.isLatest}, progress=${ev.progress ?? '?'}): ${ev.messages?.length || 0} messages, ${ev.chats?.length || 0} chats, ${ev.contacts?.length || 0} contacts`, { level: 'info' });
@@ -378,6 +379,7 @@ async function ingestPool(accountId, { messages, type }) {
   if (type !== 'notify') return;
   // Warm-up numbers are isolated — they only message each other and never show in Conversations.
   if ((accounts.get(accountId)?.role || 'warmup') !== 'conversation') return;
+  const myPhone = accounts.get(accountId)?.me?.phone || null; // tag chats by the linked number
   for (const msg of messages) {
     try {
       if (!msg.message) continue;
@@ -396,7 +398,7 @@ async function ingestPool(accountId, { messages, type }) {
         if (!gc || !body) continue;
         const r = await db.messages().updateOne(
           { wa_message_id: id },
-          { $setOnInsert: { contact_id: String(gc._id), campaign_id: null, account_id: accountId, direction: msg.key.fromMe ? 'out' : 'in', body, sender: msg.key.fromMe ? '' : msg.pushName || '', status: msg.key.fromMe ? 'sent' : 'read', wa_message_id: id, synced: 1, created_at: nowIso(), day_key: dayKey() } },
+          { $set: { account_phone: myPhone }, $setOnInsert: { contact_id: String(gc._id), campaign_id: null, account_id: accountId, direction: msg.key.fromMe ? 'out' : 'in', body, sender: msg.key.fromMe ? '' : msg.pushName || '', status: msg.key.fromMe ? 'sent' : 'read', wa_message_id: id, synced: 1, created_at: nowIso(), day_key: dayKey() } },
           { upsert: true }
         );
         if (r.upsertedCount) {
@@ -436,7 +438,7 @@ async function ingestPool(accountId, { messages, type }) {
         if (!body) continue;
         const r = await db.messages().updateOne(
           { wa_message_id: id },
-          { $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'out', body, status: 'sent', wa_message_id: id, created_at: nowIso(), day_key: dayKey() } },
+          { $set: { account_phone: myPhone }, $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'out', body, status: 'sent', wa_message_id: id, created_at: nowIso(), day_key: dayKey() } },
           { upsert: true }
         );
         if (r.upsertedCount) {
@@ -449,7 +451,7 @@ async function ingestPool(accountId, { messages, type }) {
       if (!body) continue;
       const r = await db.messages().updateOne(
         { wa_message_id: id },
-        { $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'in', body, status: 'read', wa_message_id: id, created_at: nowIso(), day_key: dayKey() } },
+        { $set: { account_phone: myPhone }, $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'in', body, status: 'read', wa_message_id: id, created_at: nowIso(), day_key: dayKey() } },
         { upsert: true }
       );
       if (!r.upsertedCount) continue; // already stored
@@ -533,6 +535,10 @@ async function ingestPoolHistory(accountId, { messages, contacts: waContacts, ch
     }
   }
 
+  // The linked number's own phone — tag every message with it so a chat stays attached
+  // to its tab even if the number is removed and re-added later (which changes account_id).
+  const myPhone = accounts.get(accountId)?.me?.phone || null;
+
   let imported = 0;
   for (const [chatJid, { msgs, origJid }] of byChat) {
     const isGroup = chatJid.endsWith('@g.us');
@@ -555,7 +561,10 @@ async function ingestPoolHistory(accountId, { messages, contacts: waContacts, ch
       ops.push({
         updateOne: {
           filter: { wa_message_id: id },
-          update: { $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: dir, body, sender, status: dir === 'out' ? 'sent' : 'read', wa_message_id: id, synced: 1, created_at: ts, day_key: ts.slice(0, 10) } },
+          update: {
+            $set: { account_phone: myPhone },
+            $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: dir, body, sender, status: dir === 'out' ? 'sent' : 'read', wa_message_id: id, synced: 1, created_at: ts, day_key: ts.slice(0, 10) },
+          },
           upsert: true,
         },
       });

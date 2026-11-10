@@ -64,6 +64,7 @@ export default function Conversations({ go }) {
   const [showAddAccount, setShowAddAccount] = useState(false);
   const [accounts, setAccounts] = useState([{ id: 'main', label: 'Main number', phone: null, connected: false }]);
   const [account, setAccount] = useState('main'); // active account tab
+  const [syncingChats, setSyncingChats] = useState(false); // polling a just-connected number
   const msgsRef = useRef(null);
 
   const loadAccounts = async () => {
@@ -177,13 +178,17 @@ export default function Conversations({ go }) {
   useEffect(() => {
     const acct = accounts.find((a) => a.id === account);
     const connected = account === 'main' ? wa.status === 'connected' : !!acct?.connected;
-    if (!connected || threads.length > 0) return;
+    if (!connected || threads.length > 0) {
+      setSyncingChats(false);
+      return;
+    }
+    setSyncingChats(true); // show the "Syncing your chats…" loader while we wait
     let n = 0;
     const t = setInterval(() => {
       n += 1;
       loadThreads();
       loadAccounts();
-      if (n >= 15) clearInterval(t); // ~45s, then stop (number genuinely has no chats)
+      if (n >= 15) { clearInterval(t); setSyncingChats(false); } // ~45s, then give up
     }, 3000);
     return () => clearInterval(t);
   }, [account, accounts, wa.status, threads.length]);
@@ -318,7 +323,7 @@ export default function Conversations({ go }) {
           {!threadsLoaded ? (
             <Loading label="Loading chats…" minHeight={200} />
           ) : threads.length === 0 ? (
-            activeAcct?.syncing ? (
+            activeAcct?.syncing || syncingChats ? (
               <Loading label="Syncing your chats…" minHeight={200} />
             ) : (
               <div style={{ padding: 30 }}>

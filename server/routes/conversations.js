@@ -24,9 +24,12 @@ function accountGroup(account) {
 }
 
 // Match messages belonging to one account tab ('main' also matches legacy untagged rows).
+// Primary match is by the linked phone number (account_phone) so a tab keeps its chats
+// even after the number is removed and re-added (which assigns a new account_id).
 function accountMatch(account) {
-  const { ids, includeLegacy } = accountGroup(account);
+  const { ids, includeLegacy, phone } = accountGroup(account);
   const or = [{ account_id: { $in: ids } }];
+  if (phone) or.push({ account_phone: phone });
   if (includeLegacy) or.push({ account_id: null }, { account_id: { $exists: false } });
   return { $or: or };
 }
