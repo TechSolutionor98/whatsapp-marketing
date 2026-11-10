@@ -562,8 +562,9 @@ function AddAccountModal({ onClose, onLinked }) {
   }, [id]);
 
   async function cancel() {
-    // Remove the pending slot if it never connected.
-    if (id && status !== 'connected') {
+    // Only discard if it was never scanned (still showing a QR). If it's linking or
+    // linked, keep it — its tab appears on its own once connected.
+    if (id && (status === 'qr' || status === '')) {
       try { await api.del(`/conversations/accounts/${id}`); } catch {}
     }
     onClose();
