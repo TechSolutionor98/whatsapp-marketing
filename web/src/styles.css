@@ -2189,3 +2189,12 @@ tbody tr:hover {
 }
 .bubble.out .bubble-reacts { left: auto; right: 10px; }
 .bubble-reacts span { font-size: 11px; color: var(--text-soft); margin-left: 3px; }
+
+/* Admins-only group / failed send (like WhatsApp) */
+.chat-readonly {
+  justify-content: center;
+  color: var(--text-soft);
+  font-size: 13px;
+  padding: 18px;
+}
+.msg-failed { color: #e5484d; font-weight: 700; font-size: 10.5px; }

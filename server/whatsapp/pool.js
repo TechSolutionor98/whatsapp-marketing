@@ -12,6 +12,7 @@ import makeWASocket, {
   normalizeMessageContent,
   downloadMediaMessage,
   BufferJSON,
+  jidNormalizedUser,
   proto,
 } from 'baileys';
 import { inflate } from 'node:zlib';
@@ -179,6 +180,10 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
       // Group names (subjects) when they're created/changed.
       sock.ev.on('groups.upsert', (list) => applyGroupSubjects(id, list));
       sock.ev.on('groups.update', (list) => applyGroupSubjects(id, list));
+      // Someone was made/removed as admin → our own posting rights may have changed.
+      sock.ev.on('group-participants.update', (ev) => {
+        if (ev?.action === 'promote' || ev?.action === 'demote') refreshGroupPermission(id, ev.id);
+      });
     }
 
     sock.ev.on('connection.update', async (u) => {
@@ -740,7 +745,32 @@ function runHistJob(id, job, fullImport) {
   });
 }
 
-// Group subjects (names) — history sync carries none, so fetch them like WhatsApp Web does.
+// Can this linked number post in a group? From Baileys group metadata (groups.js):
+//  isCommunity        → the community itself; nobody posts there (you post in its groups)
+//  announce / isCommunityAnnounce → admins only ("Only admins can send messages")
+//  participants[].admin           → 'admin' | 'superadmin' | null for each member (by pn or lid)
+function myIds(a) {
+  const u = a?.sock?.user || {};
+  return new Set([u.id, u.lid].filter(Boolean).map((j) => jidNormalizedUser(j)));
+}
+export function groupReadOnly(g, mine) {
+  if (g?.isCommunity) return true;
+  if (!(g?.announce || g?.isCommunityAnnounce)) return false;
+  const me = (g.participants || []).find((p) => [p.id, p.jid, p.lid].some((x) => x && mine.has(jidNormalizedUser(x))));
+  return !me?.admin;
+}
+// read_only_for = the linked numbers (phones) that can't post in this group.
+function readOnlyOp(jid, phone, ro) {
+  return {
+    updateMany: {
+      filter: { jid, is_group: 1 },
+      update: ro ? { $addToSet: { read_only_for: phone } } : { $pull: { read_only_for: phone } },
+    },
+  };
+}
+
+// Group subjects (names) + posting permission — history sync carries neither, so fetch them
+// like WhatsApp Web does.
 async function syncGroupNames(id) {
   const a = accounts.get(id);
   if (!a?.sock || a.status !== 'connected') return;
@@ -751,22 +781,61 @@ async function syncGroupNames(id) {
     return;
   }
   const subjects = new Map();
-  for (const [jid, g] of Object.entries(groups || {})) if (g?.subject) subjects.set(jid, g.subject);
+  const mine = myIds(a);
+  const ops = [];
+  for (const [jid, g] of Object.entries(groups || {})) {
+    if (g?.subject) {
+      subjects.set(jid, g.subject);
+      ops.push({ updateMany: { filter: { jid, is_group: 1, name: { $ne: g.subject } }, update: { $set: { name: g.subject } } } });
+    }
+    if (a.me?.phone) ops.push(readOnlyOp(jid, a.me.phone, groupReadOnly(g, mine)));
+  }
   a.groupSubjects = subjects;
-  if (!subjects.size) return;
-  const ops = [...subjects].map(([jid, subject]) => ({
-    updateMany: { filter: { jid, is_group: 1, name: { $ne: subject } }, update: { $set: { name: subject } } },
-  }));
+  a.groupRO = new Map(Object.entries(groups || {}).map(([jid, g]) => [jid, groupReadOnly(g, mine)]));
+  if (!ops.length) return;
   try {
     const r = await db.contacts().bulkWrite(ops, { ordered: false });
     if (r.modifiedCount) emit('message:in', {});
   } catch {}
 }
 
+// One group's metadata changed (admins-only toggled, we were promoted/demoted) → re-check.
+async function refreshGroupPermission(id, jid) {
+  const a = accounts.get(id);
+  if (!a?.sock || a.status !== 'connected' || !a.me?.phone || !jid) return;
+  try {
+    const g = await a.sock.groupMetadata(jid);
+    const ro = groupReadOnly(g, myIds(a));
+    (a.groupRO ||= new Map()).set(jid, ro);
+    await db.contacts().bulkWrite([readOnlyOp(jid, a.me.phone, ro)]);
+    emit('message:status', {});
+  } catch {}
+}
+
+// Checked right before sending to a group: cached permission, else ask WhatsApp for this
+// group's metadata. If WhatsApp can't be asked, allow it (a rejection is still caught and
+// shown as "not sent" via the error ack).
+export async function canPostInGroup(id, jid) {
+  const a = accounts.get(id);
+  if (!a?.sock || !jid) return true;
+  if (a.groupRO?.has(jid)) return !a.groupRO.get(jid);
+  try {
+    const g = await Promise.race([a.sock.groupMetadata(jid), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 6000))]);
+    const ro = groupReadOnly(g, myIds(a));
+    (a.groupRO ||= new Map()).set(jid, ro);
+    if (a.me?.phone) db.contacts().bulkWrite([readOnlyOp(jid, a.me.phone, ro)]).catch(() => {});
+    return !ro;
+  } catch {
+    return true;
+  }
+}
+
 function applyGroupSubjects(id, list) {
   const a = accounts.get(id);
   for (const g of list || []) {
-    if (!g?.id || !g.subject) continue;
+    if (!g?.id) continue;
+    if ('announce' in g || 'restrict' in g || 'participants' in g) refreshGroupPermission(id, g.id);
+    if (!g.subject) continue;
     if (a) (a.groupSubjects ||= new Map()).set(g.id, g.subject);
     db.contacts().updateMany({ jid: g.id, is_group: 1 }, { $set: { name: g.subject } }).then((r) => r.modifiedCount && emit('message:in', {})).catch(() => {});
   }

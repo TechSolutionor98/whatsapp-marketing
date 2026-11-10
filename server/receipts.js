@@ -1,5 +1,24 @@
-import { db, isMongoUp } from './db/mongo.js';
+import { db, isMongoUp, audit } from './db/mongo.js';
 import { emit } from './events.js';
+
+// WhatsApp refused a message we sent (Baileys handleBadAck → status ERROR with the server's
+// error code), e.g. posting in an admins-only group. It was never delivered, so show it as
+// "not sent" instead of leaving it at a single tick.
+export async function markFailed(waId, errorCode) {
+  if (!waId || !isMongoUp()) return;
+  try {
+    const r = await db.messages().updateOne(
+      { wa_message_id: waId, direction: 'out', $or: [{ status_code: { $exists: false } }, { status_code: { $lt: 3 } }] },
+      { $set: { status: 'failed', error_code: errorCode ? String(errorCode) : '' } }
+    );
+    if (r.modifiedCount) {
+      audit('reply', `WhatsApp rejected a sent message${errorCode ? ` (error ${errorCode})` : ''} — marked as not sent`, { level: 'warn' });
+      emit('message:status', { waId });
+    }
+  } catch {
+    /* ignore */
+  }
+}
 
 // WhatsApp message status numbers: 2=server ack (sent), 3=delivered, 4=read, 5=played.
 function codeFrom(status) {
@@ -47,6 +66,10 @@ export function attachReceipts(sock) {
       if (!u?.key?.fromMe) continue;
       const st = u.update?.status;
       if (st === undefined || st === null) continue;
+      if (st === 0 || st === 'ERROR') {
+        markFailed(u.key.id, u.update?.messageStubParameters?.[0]); // codeFrom() ignored these before
+        continue;
+      }
       applyReceipt(u.key.id, st);
     }
   });

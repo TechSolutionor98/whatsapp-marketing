@@ -109,6 +109,8 @@ function MessageMedia({ m, onLoad }) {
 }
 
 function Ticks({ status }) {
+  // WhatsApp refused it (e.g. admins-only group) — it was never delivered.
+  if (status === 'failed') return <span className="msg-failed" title="Not sent — WhatsApp rejected this message">! Not sent</span>;
   if (status === 'read') return <span style={{ color: '#53bdeb' }}>✓✓</span>;
   if (status === 'delivered') return <span>✓✓</span>;
   return <span>✓</span>; // sent / unknown
@@ -599,6 +601,9 @@ export default function Conversations({ go }) {
                 })}
               </div>
 
+              {thread.contact.read_only ? (
+                <div className="chat-compose chat-readonly">Only admins can send messages</div>
+              ) : (
               <div className="chat-compose">
                 <textarea
                   className="compose-input"
@@ -618,6 +623,7 @@ export default function Conversations({ go }) {
                   <Icon.send />
                 </button>
               </div>
+              )}
             </>
           )}
         </div>

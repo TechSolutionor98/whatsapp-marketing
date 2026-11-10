@@ -5,7 +5,7 @@ import { DATA_DIR } from '../config.js';
 import { db, audit, oid, pub, pubList, nowIso, dayKey, getSetting, setSetting } from '../db/mongo.js';
 import { emit } from '../events.js';
 import { sendText, sendToJid, isConnected, getWaState } from '../whatsapp/client.js';
-import { poolState, sendJidFrom, chatJidOf, isAccountConnected, startPoolAccount, removePoolAccount, setPoolLabel, setPoolAutoReply, downloadStoredMedia } from '../whatsapp/pool.js';
+import { poolState, sendJidFrom, chatJidOf, isAccountConnected, startPoolAccount, removePoolAccount, setPoolLabel, setPoolAutoReply, downloadStoredMedia, canPostInGroup } from '../whatsapp/pool.js';
 
 const MEDIA_DIR = path.join(DATA_DIR, 'media_cache');
 const mediaInflight = new Map(); // one download per file even if the page asks twice
@@ -298,7 +298,12 @@ conversations.get('/:contactId', async (req, res) => {
   const messages = page.slice(0, limit).reverse();
   // Opening a thread marks it read.
   if (contact.unread && !req.query.before) db.contacts().updateOne({ _id }, { $set: { unread: 0 } }).catch(() => {});
-  res.json({ contact: pub({ ...contact, unread: 0 }), messages: pubList(messages), has_more });
+  // Admins-only group (or a community itself) for THIS linked number → UI shows WhatsApp's
+  // "Only admins can send messages" instead of the message box.
+  const { phone } = accountGroup(account);
+  const read_only = !!(contact.is_group && phone && (contact.read_only_for || []).includes(phone));
+  const { read_only_for, ...shown } = contact;
+  res.json({ contact: pub({ ...shown, unread: 0, read_only }), messages: pubList(messages), has_more });
 });
 
 conversations.post('/:contactId/reply', async (req, res) => {
@@ -315,6 +320,14 @@ conversations.post('/:contactId/reply', async (req, res) => {
   const useMain = ids.includes('main') && isConnected();
   const poolId = ids.find((id) => id !== 'main' && isAccountConnected(id));
   if (!useMain && !poolId) return res.status(400).json({ error: 'That number is not connected' });
+
+  // Like WhatsApp: no posting in admins-only groups / community announcements unless admin.
+  if (contact.is_group) {
+    const { phone } = accountGroup(account);
+    const flagged = phone && (contact.read_only_for || []).includes(phone);
+    const allowed = !flagged && (useMain || (await canPostInGroup(poolId, contact.jid)));
+    if (!allowed) return res.status(403).json({ error: 'Only admins can send messages to this group' });
+  }
 
   try {
     // Groups go to the group jid, @lid-only contacts to their lid, everyone else to the number.
