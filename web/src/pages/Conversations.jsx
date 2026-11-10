@@ -172,9 +172,12 @@ export default function Conversations({ go }) {
   }, [active, filter, account]);
 
   // A just-connected number is still syncing its history in the background. Poll briefly
-  // so its chats appear on their own, instead of needing a manual Refresh.
+  // so its chats appear on their own, instead of needing a manual Refresh. (Computed
+  // inline from `accounts`/`wa` so it doesn't reference values declared further below.)
   useEffect(() => {
-    if (!acctConnected || threads.length > 0) return;
+    const acct = accounts.find((a) => a.id === account);
+    const connected = account === 'main' ? wa.status === 'connected' : !!acct?.connected;
+    if (!connected || threads.length > 0) return;
     let n = 0;
     const t = setInterval(() => {
       n += 1;
@@ -183,7 +186,7 @@ export default function Conversations({ go }) {
       if (n >= 15) clearInterval(t); // ~45s, then stop (number genuinely has no chats)
     }, 3000);
     return () => clearInterval(t);
-  }, [account, acctConnected, threads.length]);
+  }, [account, accounts, wa.status, threads.length]);
 
   async function send() {
     if (!draft.trim() || !thread) return;

@@ -480,35 +480,66 @@ async function ingestPool(accountId, { messages, type }) {
 // Import a conversation number's existing chat history (1:1 + groups, excluding our own numbers).
 async function ingestPoolHistory(accountId, { messages, contacts: waContacts, chats }) {
   if (!messages?.length) return;
+
+  // Build a name map and a lid→phone map keyed by EVERY jid form we can see, so a chat
+  // that arrives @lid-addressed still resolves to a real name/number. (WhatsApp often
+  // delivers history 1:1 chats by @lid instead of the real @s.whatsapp.net number.)
   const nameByJid = new Map();
-  for (const c of waContacts || []) if (c?.id) nameByJid.set(c.id, c.name || c.notify || c.verifiedName || '');
-  for (const ch of chats || []) {
-    const nm = ch?.name || ch?.subject || '';
-    if (ch?.id && nm) nameByJid.set(ch.id, nm);
+  const lidToPn = new Map(); // '<lid>@lid' -> '<phone>@s.whatsapp.net'
+  const addPair = (...jids) => {
+    const list = jids.filter((x) => typeof x === 'string');
+    const lid = list.find((x) => x.endsWith('@lid'));
+    const pn = list.find((x) => x.endsWith('@s.whatsapp.net'));
+    if (lid && pn) lidToPn.set(lid, pn);
+  };
+  for (const c of waContacts || []) {
+    if (!c) continue;
+    const nm = c.name || c.notify || c.verifiedName || '';
+    for (const j of [c.id, c.lid, c.jid, c.pnJid]) if (j && nm) nameByJid.set(j, nm);
+    addPair(c.id, c.lid, c.jid, c.pnJid);
   }
+  for (const ch of chats || []) {
+    const nm = ch?.name || ch?.subject || ch?.displayName || '';
+    for (const j of [ch?.id, ch?.lidJid, ch?.pnJid]) if (j && nm) nameByJid.set(j, nm);
+    addPair(ch?.id, ch?.lidJid, ch?.pnJid);
+  }
+
+  // Resolve a 1:1 chat's real phone jid: explicit pn on the key → lid map → raw.
+  const resolvePnJid = (raw, msg) => {
+    const keyed = pnOf(msg);
+    if (keyed && keyed.endsWith('@s.whatsapp.net')) return keyed;
+    if (raw.endsWith('@lid') && lidToPn.has(raw)) return lidToPn.get(raw);
+    return raw;
+  };
 
   // Group messages by their chat jid (1:1 jid or group jid). Conversation numbers keep
   // every chat, including ones with your own other numbers.
-  const byChat = new Map();
+  const byChat = new Map(); // chatJid -> { msgs, origJid }
   for (const msg of messages) {
     const raw = msg.key?.remoteJid || '';
     if (!raw || raw.endsWith('@newsletter') || raw === 'status@broadcast') continue;
     const isGroup = raw.endsWith('@g.us');
     let chatJid = raw;
     if (!isGroup) {
-      const phone = jidToPhone(pnOf(msg));
+      const phone = jidToPhone(resolvePnJid(raw, msg));
       if (!phone) continue;
       chatJid = `${phone}@s.whatsapp.net`;
     }
-    if (!byChat.has(chatJid)) byChat.set(chatJid, []);
-    byChat.get(chatJid).push(msg);
+    if (!byChat.has(chatJid)) byChat.set(chatJid, { msgs: [], origJid: raw });
+    byChat.get(chatJid).msgs.push(msg);
+    // Use the sender's push name as a fallback display name when we have nothing better.
+    if (!isGroup && !nameByJid.get(chatJid) && !nameByJid.get(raw) && msg.pushName && !msg.key?.fromMe) {
+      nameByJid.set(chatJid, msg.pushName);
+    }
   }
 
   let imported = 0;
-  for (const [chatJid, msgs] of byChat) {
+  for (const [chatJid, { msgs, origJid }] of byChat) {
     const isGroup = chatJid.endsWith('@g.us');
     const phone = isGroup ? null : jidToPhone(chatJid);
-    const contact = await upsertPoolChat({ phone, jid: chatJid, isGroup, name: nameByJid.get(chatJid) || '' });
+    const name = nameByJid.get(chatJid) || nameByJid.get(origJid) || '';
+    // Keep the original jid (may be @lid) on 1:1 contacts so replies can target it later.
+    const contact = await upsertPoolChat({ phone, jid: isGroup ? chatJid : origJid, isGroup, name });
     if (!contact || contact.warmup === 1) continue;
 
     const ops = [];
