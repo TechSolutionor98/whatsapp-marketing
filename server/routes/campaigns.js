@@ -1,7 +1,14 @@
 import { Router } from 'express';
 import { db, audit, getSetting, oid, pub, nowIso } from '../db/mongo.js';
+import { isConnected } from '../whatsapp/client.js';
+import { isAccountConnected, accountRole } from '../whatsapp/pool.js';
 
 export const campaigns = Router();
+
+// Is the number this campaign sends from actually connected right now?
+function senderConnected(c) {
+  return c.sender_id ? isAccountConnected(c.sender_id) : isConnected();
+}
 
 function esc(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -259,7 +266,16 @@ campaigns.post('/:id/start', async (req, res) => {
   if (!c.template_id) return res.status(400).json({ error: 'Attach a template before starting' });
   const queued = await db.targets().countDocuments({ campaign_id: String(_id), status: 'queued' });
   if (queued === 0) return res.status(400).json({ error: 'No queued recipients left' });
-  await db.campaigns().updateOne({ _id }, { $set: { status: 'running', scheduled_at: null } });
+  if (c.sender_id && accountRole(c.sender_id) === 'warmup')
+    return res.status(400).json({ error: 'This campaign is set to a warm-up number. Edit it to send from your main or a linked number.' });
+  // The assigned sending number must be connected to start.
+  if (!senderConnected(c))
+    return res.status(400).json({
+      error: c.sender_id
+        ? "This campaign's sending number isn't connected — connect it on the Warmup page, then start."
+        : 'Your main WhatsApp number isn\'t connected — link it on the Gateway page, then start.',
+    });
+  await db.campaigns().updateOne({ _id }, { $set: { status: 'running', scheduled_at: null }, $unset: { pause_reason: '' } });
   audit('campaign', `Campaign "${c.name}" started`, { level: 'success' });
   res.json({ ok: true });
 });

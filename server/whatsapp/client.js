@@ -59,6 +59,14 @@ export async function connectWhatsApp() {
       printQRInTerminal: false,
       markOnlineOnConnect: false, // do not force "online" — looks more natural
       syncFullHistory: true, // pull the phone's chat history on (re)link so recent chats show
+      // Answer recipients' retry requests so our messages decrypt (avoids "Waiting for this message").
+      getMessage: async (key) => {
+        try {
+          const m = await db.messages().findOne({ wa_message_id: key?.id });
+          if (m?.body) return { conversation: m.body };
+        } catch {}
+        return undefined;
+      },
     });
 
     sock.ev.on('creds.update', saveCreds);

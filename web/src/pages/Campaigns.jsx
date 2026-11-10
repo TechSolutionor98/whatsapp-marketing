@@ -108,6 +108,16 @@ export default function Campaigns() {
               <div className="muted" style={{ fontSize: 12.5, margin: '6px 0 12px' }}>
                 <Icon.clock style={{ width: 13, verticalAlign: '-2px' }} /> {c.window_start}–{c.window_end} · {c.daily_limit}/day · ~{c.min_delay_sec}-{c.max_delay_sec}s gap
               </div>
+              {c.status === 'paused' && c.pause_reason === 'sender_offline' && (
+                <div style={{ fontSize: 12.5, margin: '0 0 12px', color: 'var(--danger)', fontWeight: 600 }}>
+                  <Icon.warn style={{ width: 13, verticalAlign: '-2px' }} /> Sending number offline — reconnect it, then Start.
+                </div>
+              )}
+              {c.status === 'paused' && c.pause_reason === 'warmup_sender' && (
+                <div style={{ fontSize: 12.5, margin: '0 0 12px', color: 'var(--danger)', fontWeight: 600 }}>
+                  <Icon.warn style={{ width: 13, verticalAlign: '-2px' }} /> This number is a warm-up number — edit the campaign to use your main or a linked number.
+                </div>
+              )}
               {c.status === 'scheduled' && c.scheduled_at && (
                 <div style={{ fontSize: 12.5, margin: '0 0 12px', color: '#1d4ed8', fontWeight: 600 }}>
                   <Icon.clock style={{ width: 13, verticalAlign: '-2px' }} /> Starts {new Date(c.scheduled_at).toLocaleString()}
@@ -192,8 +202,9 @@ function NewCampaign({ onClose, onSaved }) {
         setAiStatus(await api.get('/ai/status'));
       } catch {}
       try {
-        const w = await api.get('/warmup/status');
-        setSenders((w.accounts || []).filter((a) => a.status === 'connected' && a.me?.phone));
+        // Senders = main + your linked conversation numbers (warm-up numbers are isolated).
+        const accs = await api.get('/conversations/accounts');
+        setSenders((accs || []).filter((a) => a.id !== 'main' && a.connected).map((a) => ({ id: a.id, me: { phone: a.phone }, label: a.label })));
       } catch {}
     })();
   }, []);
@@ -318,14 +329,14 @@ function NewCampaign({ onClose, onSaved }) {
               <option value="">Main number (WhatsApp Gateway)</option>
               {senders.map((a) => (
                 <option key={a.id} value={a.id}>
-                  +{a.me.phone}{a.label ? ` — ${a.label}` : ''} (warmed number)
+                  +{a.me.phone}{a.label ? ` — ${a.label}` : ''}
                 </option>
               ))}
             </select>
             <div className="hint">
               {senders.length
-                ? 'Pick a warmed-up number to send this campaign from, or use your main number.'
-                : 'Connect numbers in Warmup to send campaigns from them. Using your main number for now.'}
+                ? 'Send from your main number or any linked number. (Warm-up numbers are separate and not used here.)'
+                : 'Sends from your main number. Add linked numbers in Conversations to send from them.'}
             </div>
           </div>
 
@@ -606,8 +617,8 @@ function EditCampaignModal({ id, onClose, onSaved }) {
       });
       try { setAiStatus(await api.get('/ai/status')); } catch {}
       try {
-        const w = await api.get('/warmup/status');
-        setSenders((w.accounts || []).filter((a) => a.status === 'connected' && a.me?.phone));
+        const accs = await api.get('/conversations/accounts');
+        setSenders((accs || []).filter((a) => a.id !== 'main' && a.connected).map((a) => ({ id: a.id, me: { phone: a.phone }, label: a.label })));
       } catch {}
     })();
   }, [id]);
@@ -658,7 +669,7 @@ function EditCampaignModal({ id, onClose, onSaved }) {
             <label>Send from</label>
             <select className="select" value={f.sender_id} onChange={(e) => setF({ ...f, sender_id: e.target.value })}>
               <option value="">Main number (WhatsApp Gateway)</option>
-              {senders.map((a) => <option key={a.id} value={a.id}>+{a.me.phone}{a.label ? ` — ${a.label}` : ''} (warmed number)</option>)}
+              {senders.map((a) => <option key={a.id} value={a.id}>+{a.me.phone}{a.label ? ` — ${a.label}` : ''}</option>)}
             </select>
           </div>
 

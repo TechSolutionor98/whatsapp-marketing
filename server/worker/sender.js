@@ -3,7 +3,7 @@ import { emit, bus } from '../events.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { isConnected, sendText, sendTyping, sendImage, checkOnWhatsApp } from '../whatsapp/client.js';
-import { isAccountConnected, sendFromTo, sendMediaFromTo, checkOnWhatsAppVia } from '../whatsapp/pool.js';
+import { isAccountConnected, sendFromTo, sendMediaFromTo, checkOnWhatsAppVia, accountRole } from '../whatsapp/pool.js';
 import { aiAvailable, rewriteMessage } from '../ai.js';
 import { UPLOADS_DIR } from '../routes/uploads.js';
 import { renderTemplate, randInt, nowInTz, withinWindow } from '../utils.js';
@@ -100,7 +100,25 @@ async function nextEligibleTarget() {
 
   for (const c of campaigns) {
     await resetDaily(c);
-    if (!senderFor(c).connected()) continue; // this campaign's sending number is offline
+    // Warm-up numbers are isolated — they can't send campaigns.
+    if (c.sender_id && accountRole(c.sender_id) === 'warmup') {
+      await db.campaigns().updateOne({ _id: c._id }, { $set: { status: 'paused', pause_reason: 'warmup_sender' } });
+      audit('campaign', `Campaign "${c.name}" paused — its number is a warm-up number. Edit the campaign to send from your main or a linked number.`, { level: 'warn' });
+      emit('campaign:update', { id: String(c._id) });
+      continue;
+    }
+    // A campaign must send from its assigned number. If that number isn't connected,
+    // stop the campaign and tell the user to reconnect it (don't silently do nothing).
+    if (!senderFor(c).connected()) {
+      await db.campaigns().updateOne({ _id: c._id }, { $set: { status: 'paused', pause_reason: 'sender_offline' } });
+      audit(
+        'campaign',
+        `Campaign "${c.name}" paused — ${c.sender_id ? 'its sending number' : 'the main WhatsApp number'} is not connected. Reconnect it, then press Start.`,
+        { level: 'warn' }
+      );
+      emit('campaign:update', { id: String(c._id) });
+      continue;
+    }
     const { hhmm } = nowInTz(c.timezone);
     if (!withinWindow(hhmm, c.window_start, c.window_end)) continue;
     if (c.sent_today >= c.daily_limit) continue;

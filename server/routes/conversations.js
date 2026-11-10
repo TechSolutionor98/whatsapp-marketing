@@ -56,6 +56,8 @@ conversations.get('/accounts', async (req, res) => {
   for (const d of docs) {
     const id = String(d._id);
     const a = live.get(id);
+    const role = a?.role || d.role || 'warmup';
+    if (role === 'warmup') continue; // warm-up numbers live only in the Warmup page
     const phone = a?.me?.phone || d.phone || null;
     if (!phone) continue; // not linked yet (awaiting first QR scan)
     raw.push({
@@ -63,7 +65,7 @@ conversations.get('/accounts', async (req, res) => {
       label: a?.label ?? d.label ?? '',
       phone,
       connected: a?.status === 'connected',
-      role: a?.role || d.role || 'warmup',
+      role,
       auto_reply: a ? !!a.auto_reply : !!d.auto_reply,
       syncing: !!a?.syncing,
     });

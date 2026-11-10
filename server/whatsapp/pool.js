@@ -82,6 +82,14 @@ export async function startPoolAccount(id, label = '', role = 'warmup', autoRepl
       printQRInTerminal: false,
       markOnlineOnConnect: false,
       syncFullHistory: isConv, // conversation-only numbers pull their chat history on link
+      // Answer recipients' retry requests so our messages decrypt (avoids "Waiting for this message").
+      getMessage: async (key) => {
+        try {
+          const m = await db.messages().findOne({ wa_message_id: key?.id });
+          if (m?.body) return { conversation: m.body };
+        } catch {}
+        return undefined;
+      },
     });
     a.sock = sock;
     sock.ev.on('creds.update', saveCreds);
@@ -189,6 +197,11 @@ export function setPoolLabel(id, label) {
 export function setPoolAutoReply(id, enabled) {
   const a = accounts.get(id);
   if (a) a.autoReply = !!enabled;
+}
+
+// The role of a pool account ('warmup' | 'conversation'), or null if unknown.
+export function accountRole(id) {
+  return accounts.get(id)?.role || null;
 }
 
 export async function checkOnWhatsAppVia(fromId, phone) {
@@ -325,6 +338,8 @@ async function poolAutoReply(accountId, contact, phone) {
 
 async function ingestPool(accountId, { messages, type }) {
   if (type !== 'notify') return;
+  // Warm-up numbers are isolated — they only message each other and never show in Conversations.
+  if ((accounts.get(accountId)?.role || 'warmup') !== 'conversation') return;
   for (const msg of messages) {
     try {
       if (!msg.message) continue;
