@@ -19,27 +19,29 @@ import { jidToPhone, normalizePhone, randInt } from '../utils.js';
 
 const POOL_DIR = path.join(DATA_DIR, 'wa_pool');
 
-// DIAGNOSTIC: surface Baileys' internal history-sync / error logs into our audit log
-// (the logger was 'silent', so a failing history-blob download was invisible). We only
-// forward history/sync/decrypt chatter and warnings+errors, to keep the noise down.
+// DIAGNOSTIC (build: diag-2): surface Baileys' internal history-sync / error logs into
+// our audit log (the logger was 'silent', so a failing history-blob download was invisible).
+// We forward history/sync/decrypt chatter and warnings+errors, capped to limit noise.
+import { Writable } from 'node:stream';
 let _dbgCount = 0;
-const baileysLogSink = {
-  write(chunk) {
+const baileysLogSink = new Writable({
+  write(chunk, _enc, cb) {
     try {
       const line = JSON.parse(String(chunk));
       const lvl = Number(line.level) || 0; // 30 info, 40 warn, 50 error
       const msg = String(line.msg || '');
-      const keyword = /histor|sync|decrypt|download|offline|notification|mac|hmac|media/i.test(msg);
-      if ((keyword || lvl >= 40) && _dbgCount < 400) {
+      const keyword = /histor|sync|decrypt|download|offline|notification|mac|hmac|media|key/i.test(msg);
+      if ((keyword || lvl >= 40) && _dbgCount < 500) {
         _dbgCount++;
-        const err = line.err?.message || line.error?.message || '';
+        const err = line.err?.message || line.error?.message || line.err || '';
         audit('debug', `WA[${lvl}] ${msg}${err ? ' — ' + err : ''}`.slice(0, 350), {
           level: lvl >= 50 ? 'error' : lvl >= 40 ? 'warn' : 'info',
         });
       }
     } catch {}
+    cb();
   },
-};
+});
 const logger = pino({ level: 'debug' }, baileysLogSink);
 
 // id -> runtime { id, label, sock, status, qr, me, lastError, starting, manualLogout, reconnectTimer }
@@ -132,7 +134,7 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
           acc.syncTimer = setTimeout(() => { const a2 = accounts.get(id); if (a2) { a2.syncing = false; emitPool(); } }, 10000);
           emitPool();
         }
-        audit('connection', `History received for conversation number: ${ev.messages?.length || 0} messages, ${ev.chats?.length || 0} chats`, { level: 'info' });
+        audit('connection', `History received (type=${ev.syncType ?? '?'}, latest=${ev.isLatest}, progress=${ev.progress ?? '?'}): ${ev.messages?.length || 0} messages, ${ev.chats?.length || 0} chats, ${ev.contacts?.length || 0} contacts`, { level: 'info' });
         ingestPoolHistory(id, ev);
       });
     }
@@ -160,7 +162,7 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
           // Fallback: don't show the loader forever if WhatsApp sends no history.
           clearTimeout(a.syncTimer);
           a.syncTimer = setTimeout(() => { const x = accounts.get(id); if (x) { x.syncing = false; emitPool(); } }, 12000);
-          audit('connection', `Conversation number linked: ${a.me.name || a.me.phone} — syncing history…`, { level: 'success' });
+          audit('connection', `Conversation number linked: ${a.me.name || a.me.phone} — syncing history… [diag-2 build, syncFullHistory=${isConv}]`, { level: 'success' });
         } else {
           audit('warmup', `Warm-up number linked: ${a.me.name || a.me.phone}`, { level: 'success' });
         }
