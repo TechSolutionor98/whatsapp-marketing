@@ -18,7 +18,29 @@ import { getWaState } from './client.js';
 import { jidToPhone, normalizePhone, randInt } from '../utils.js';
 
 const POOL_DIR = path.join(DATA_DIR, 'wa_pool');
-const logger = pino({ level: 'silent' });
+
+// DIAGNOSTIC: surface Baileys' internal history-sync / error logs into our audit log
+// (the logger was 'silent', so a failing history-blob download was invisible). We only
+// forward history/sync/decrypt chatter and warnings+errors, to keep the noise down.
+let _dbgCount = 0;
+const baileysLogSink = {
+  write(chunk) {
+    try {
+      const line = JSON.parse(String(chunk));
+      const lvl = Number(line.level) || 0; // 30 info, 40 warn, 50 error
+      const msg = String(line.msg || '');
+      const keyword = /histor|sync|decrypt|download|offline|notification|mac|hmac|media/i.test(msg);
+      if ((keyword || lvl >= 40) && _dbgCount < 400) {
+        _dbgCount++;
+        const err = line.err?.message || line.error?.message || '';
+        audit('debug', `WA[${lvl}] ${msg}${err ? ' — ' + err : ''}`.slice(0, 350), {
+          level: lvl >= 50 ? 'error' : lvl >= 40 ? 'warn' : 'info',
+        });
+      }
+    } catch {}
+  },
+};
+const logger = pino({ level: 'debug' }, baileysLogSink);
 
 // id -> runtime { id, label, sock, status, qr, me, lastError, starting, manualLogout, reconnectTimer }
 const accounts = new Map();
