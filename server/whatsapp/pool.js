@@ -7,6 +7,7 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   DisconnectReason,
   Browsers,
+  downloadHistory,
 } from 'baileys';
 
 import { DATA_DIR } from '../config.js';
@@ -109,7 +110,12 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
       // FRESH link/scan). `false` delivered nothing, so request the full sync for those;
       // warm-up numbers don't need history, so keep them light.
       syncFullHistory: isConv,
-      shouldSyncHistoryMessage: () => true,
+      // Called with each history notification (Baileys chats.js). Baileys' own history
+      // processing drops WhatsApp's @lid -> phone-number table, so read it ourselves.
+      shouldSyncHistoryMessage: (notif) => {
+        if (isConv) captureHistoryMappings(id, notif);
+        return true;
+      },
       // Answer recipients' retry requests so our messages decrypt (avoids "Waiting for this message").
       getMessage: async (key) => {
         try {
@@ -465,6 +471,45 @@ async function reconcileContact(e, byPhone, byLid) {
   return true;
 }
 
+// WhatsApp's own @lid -> number table from a raw HistorySync (WAProto: HistorySync field 15
+// `phoneNumberToLidMappings` {pnJid, lidJid}, plus each Conversation's `pnJid`/`lidJid`).
+// This is how WhatsApp Web shows a number for a lid chat; Baileys' processHistoryMessage
+// never reads these fields, so its messaging-history.set event doesn't include them.
+function mappingsFromHistory(data) {
+  const pairs = new Map(); // lid -> pn
+  for (const m of data?.phoneNumberToLidMappings || []) {
+    if (isLid(m?.lidJid) && isPn(m?.pnJid)) pairs.set(m.lidJid, m.pnJid);
+  }
+  for (const c of data?.conversations || []) {
+    const lid = [c?.id, c?.lidJid].find(isLid);
+    const pn = [c?.id, c?.pnJid].find(isPn);
+    if (lid && pn) pairs.set(lid, pn);
+  }
+  return [...pairs].map(([lid, pn]) => ({ id: lid, jid: pn }));
+}
+
+// Download one history blob (exactly as Baileys does, via its exported downloadHistory) and
+// apply the number table. Runs alongside Baileys' own processing; identity work is queued,
+// and reconcileContact fixes chats that were already stored, so order doesn't matter.
+async function captureHistoryMappings(id, notif) {
+  if (!notif?.directPath || !notif?.mediaKey) return; // Baileys' "will we sync?" probe has no media
+  const a = accounts.get(id);
+  if (!a) return;
+  a.histSeen ||= new Set();
+  if (a.histSeen.has(notif.directPath)) return;
+  a.histSeen.add(notif.directPath);
+  try {
+    const pairs = mappingsFromHistory(await downloadHistory(notif, {}));
+    if (!pairs.length) return;
+    queueIdentity(async () => {
+      const fixed = await applyContactBatch(pairs);
+      audit('connection', `Learned ${pairs.length} phone number${pairs.length === 1 ? '' : 's'} from WhatsApp history (${fixed} chat${fixed === 1 ? '' : 's'} updated)`, { level: 'info' });
+    });
+  } catch (e) {
+    audit('connection', `Couldn't read phone numbers from a history batch: ${e.message}`, { level: 'warn' });
+  }
+}
+
 // Group subjects (names) — history sync carries none, so fetch them like WhatsApp Web does.
 async function syncGroupNames(id) {
   const a = accounts.get(id);
@@ -816,4 +861,4 @@ export async function reconnectPoolAccounts() {
 }
 
 // Internals exposed for the local test harness only (no runtime effect).
-export const __test = { accounts, applyContactBatch, upsertPoolChat, ingestPoolHistory, ingestPool, applyGroupSubjects };
+export const __test = { accounts, applyContactBatch, upsertPoolChat, ingestPoolHistory, ingestPool, applyGroupSubjects, mappingsFromHistory };
