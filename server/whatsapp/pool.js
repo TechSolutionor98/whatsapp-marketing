@@ -136,6 +136,18 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
           emitPool();
         }
         audit('connection', `History received (type=${ev.syncType ?? '?'}, latest=${ev.isLatest}, progress=${ev.progress ?? '?'}): ${ev.messages?.length || 0} messages, ${ev.chats?.length || 0} chats, ${ev.contacts?.length || 0} contacts`, { level: 'info' });
+        // DIAGNOSTIC (diag-3): dump the real shape of what WhatsApp sends so we can see
+        // where names/real phone numbers live for @lid-addressed chats.
+        try {
+          const trim = (o) => JSON.parse(JSON.stringify(o || {}));
+          const sampleContacts = (ev.contacts || []).slice(0, 3).map(trim);
+          const sampleChats = (ev.chats || []).slice(0, 3).map((c) => ({ id: c?.id, name: c?.name, displayName: c?.displayName, pnJid: c?.pnJid, lidJid: c?.lidJid }));
+          const lidMsg = (ev.messages || []).find((m) => (m.key?.remoteJid || '').endsWith('@lid'));
+          const sampleMsgKey = lidMsg ? { key: trim(lidMsg.key), pushName: lidMsg.pushName, verifiedBizName: lidMsg.verifiedBizName } : 'none';
+          audit('debug', `DIAG3 contacts=${JSON.stringify(sampleContacts)}`.slice(0, 340), { level: 'info' });
+          audit('debug', `DIAG3 chats=${JSON.stringify(sampleChats)}`.slice(0, 340), { level: 'info' });
+          audit('debug', `DIAG3 lidMsg=${JSON.stringify(sampleMsgKey)}`.slice(0, 340), { level: 'info' });
+        } catch {}
         ingestPoolHistory(id, ev);
       });
     }
