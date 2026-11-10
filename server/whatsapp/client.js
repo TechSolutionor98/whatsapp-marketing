@@ -133,7 +133,7 @@ export async function connectWhatsApp() {
       // Show a "syncing…" state until WhatsApp marks the last batch.
       setStatus(state.status, { syncing: !(isLatest || (progress != null && progress >= 100)) });
       clearTimeout(historySyncTimer);
-      historySyncTimer = setTimeout(() => setStatus(state.status, { syncing: false }), 25000);
+      historySyncTimer = setTimeout(() => setStatus(state.status, { syncing: false }), 10000);
       try {
         audit('connection', `History sync received: ${messages?.length || 0} messages, ${chats?.length || 0} chats`, { level: 'info' });
         await importHistory(messages || [], contacts || [], chats || []);

@@ -103,7 +103,7 @@ export async function startPoolAccount(id, label = '', role = 'warmup', autoRepl
           acc.syncing = !(ev.isLatest || (ev.progress != null && ev.progress >= 100));
           clearTimeout(acc.syncTimer);
           // Fallback: if the final batch never arrives, stop the loader after a quiet gap.
-          acc.syncTimer = setTimeout(() => { const a2 = accounts.get(id); if (a2) { a2.syncing = false; emitPool(); } }, 25000);
+          acc.syncTimer = setTimeout(() => { const a2 = accounts.get(id); if (a2) { a2.syncing = false; emitPool(); } }, 10000);
           emitPool();
         }
         audit('connection', `History received for conversation number: ${ev.messages?.length || 0} messages, ${ev.chats?.length || 0} chats`, { level: 'info' });
@@ -131,6 +131,9 @@ export async function startPoolAccount(id, label = '', role = 'warmup', autoRepl
         } catch {}
         if ((a.role || 'warmup') === 'conversation') {
           a.syncing = true; // expect history to start arriving
+          // Fallback: don't show the loader forever if WhatsApp sends no history.
+          clearTimeout(a.syncTimer);
+          a.syncTimer = setTimeout(() => { const x = accounts.get(id); if (x) { x.syncing = false; emitPool(); } }, 12000);
           audit('connection', `Conversation number linked: ${a.me.name || a.me.phone} — syncing history…`, { level: 'success' });
         } else {
           audit('warmup', `Warm-up number linked: ${a.me.name || a.me.phone}`, { level: 'success' });
