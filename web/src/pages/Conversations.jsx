@@ -271,7 +271,14 @@ export default function Conversations({ go }) {
       {showAddAccount && (
         <AddAccountModal
           onClose={() => setShowAddAccount(false)}
-          onLinked={(id) => { setShowAddAccount(false); loadAccounts(); if (id) setAccount(id); }}
+          onLinked={(id) => {
+            setShowAddAccount(false);
+            if (id) setAccount(id);
+            // The new number takes a moment to register server-side — refresh the tab
+            // list a few times so it appears without a manual page reload.
+            let n = 0;
+            const iv = setInterval(() => { loadAccounts(); if (++n >= 8) clearInterval(iv); }, 1500);
+          }}
         />
       )}
 
