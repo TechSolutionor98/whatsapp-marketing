@@ -22,7 +22,7 @@ import { promisify } from 'node:util';
 const inflateAsync = promisify(inflate);
 
 import { DATA_DIR } from '../config.js';
-import { db, audit, oid, getSetting, nowIso, dayKey } from '../db/mongo.js';
+import { db, audit, oid, getSetting, setSetting, nowIso, dayKey } from '../db/mongo.js';
 import { emit } from '../events.js';
 import { attachReceipts } from '../receipts.js';
 import { aiAvailable, conversationReply } from '../ai.js';
@@ -259,7 +259,7 @@ export function attachConversationHandlers(id, sock) {
     // Names/lid pairs in this batch first (PUSH_NAME batches have contacts but no
     // messages), then the messages — serialized with the other identity work.
     queueIdentity(async () => {
-      await applyContactBatch(ev.contacts);
+      await applyContactBatch(ev.contacts, phoneOfAccount(id));
       await ingestPoolHistory(id, ev);
     });
     // Baileys finished a batch — now (not in parallel with it) read that batch's number table.
@@ -269,12 +269,12 @@ export function attachConversationHandlers(id, sock) {
   // the app-state contact sync (Baileys chat-utils contactAction → contacts.upsert).
   sock.ev.on('contacts.upsert', (list) => {
     queueIdentity(async () => {
-      const n = await applyContactBatch(list);
+      const n = await applyContactBatch(list, phoneOfAccount(id));
       if (n) audit('connection', `Updated ${n} chat name${n === 1 ? '' : 's'} from your WhatsApp contacts`, { level: 'info' });
     });
   });
   // Push names from incoming messages (Baileys chats.js → contacts.update).
-  sock.ev.on('contacts.update', (list) => queueIdentity(() => applyContactBatch(list)));
+  sock.ev.on('contacts.update', (list) => queueIdentity(() => applyContactBatch(list, phoneOfAccount(id))));
   // Group names (subjects) when they're created/changed.
   sock.ev.on('groups.upsert', (list) => applyGroupSubjects(id, list));
   sock.ev.on('groups.update', (list) => applyGroupSubjects(id, list));
@@ -291,6 +291,41 @@ export function historyHook(id) {
     onHistoryNotification(id, notif);
     return true;
   };
+}
+
+// Re-read one linked phone's address book on the live connection (no QR): clear the stored
+// version of WhatsApp's contacts collection (critical_unblock_low) so Baileys resyncs it from
+// scratch — the same full snapshot a fresh link gets — and every saved name arrives again as
+// contacts.upsert, now attributed to THIS phone.
+export async function refreshAddressBook(id) {
+  const a = ctxOf(id);
+  if (!a?.sock || a.status !== 'connected' || !a.me?.phone) return false;
+  await a.sock.authState.keys.set({ 'app-state-sync-version': { critical_unblock_low: null } });
+  await a.sock.resyncAppState(['critical_unblock_low'], false);
+  return true;
+}
+
+// One-time cleanup: names used to be stored once for all linked numbers, mixing address-book
+// names from different phones and people's own WhatsApp names into `name`. Move those aside
+// (kept in legacy_name), keep push names separately, drop the unattributed lid_map name, and
+// un-flag contacts wrongly marked "number hidden". Each phone's address book is then re-read
+// (refreshAddressBook) so saved names come back per number.
+export async function migrateContactNames() {
+  if (getSetting('namesV2', null)) return;
+  const synced = { is_group: { $ne: 1 }, tags: { $in: ['whatsapp', 'inbound'] }, $or: [{ list_ids: { $exists: false } }, { list_ids: { $size: 0 } }] };
+  const moved = await db.contacts().updateMany({ ...synced, name: { $nin: ['', null] } }, [{ $set: { legacy_name: '$name', name: '' } }]);
+  const pushOps = [];
+  for (const m of await db.lidMap().find({ notify: { $exists: true } }).toArray()) {
+    pushOps.push({ updateMany: { filter: { lid: m._id, $or: [{ push_name: { $exists: false } }, { push_name: '' }] }, update: { $set: { push_name: m.notify } } } });
+  }
+  if (pushOps.length) await db.contacts().bulkWrite(pushOps, { ordered: false }).catch(() => {});
+  await db.lidMap().updateMany({ name: { $exists: true } }, { $unset: { name: '' } });
+  const unhidden = await db.contacts().updateMany(
+    { lid_only: 1, lid: { $exists: true }, $expr: { $ne: ['$phone', { $arrayElemAt: [{ $split: ['$lid', '@'] }, 0] }] } },
+    [{ $set: { jid: { $concat: ['$phone', '@s.whatsapp.net'] } } }, { $unset: 'lid_only' }]
+  );
+  await setSetting('namesV2', nowIso());
+  audit('system', `Contact names: ${moved.modifiedCount} names reset to follow each number's own address book; ${unhidden.modifiedCount} chats no longer wrongly shown as "number hidden"`, { level: 'info' });
 }
 
 // A conversation number (or the main number) just connected.
@@ -314,6 +349,21 @@ export function onConversationOpen(id) {
   clearTimeout(a.groupTimer2);
   a.groupTimer1 = setTimeout(() => syncGroupNames(id), 6000);
   a.groupTimer2 = setTimeout(() => syncGroupNames(id), 45000);
+  // Once per number: re-read its address book so saved names are this phone's own (after the
+  // initial sync has settled).
+  clearTimeout(a.abTimer);
+  a.abTimer = setTimeout(async () => {
+    const phone = a.me?.phone;
+    if (!phone || (getSetting('addressBookV2', {}) || {})[phone]) return;
+    try {
+      if (await refreshAddressBook(id)) {
+        await setSetting('addressBookV2', { ...(getSetting('addressBookV2', {}) || {}), [phone]: nowIso() });
+        audit('connection', `Re-read the saved contacts of +${phone} — chat names now follow this number's own address book`, { level: 'info' });
+      }
+    } catch (e) {
+      audit('connection', `Couldn't re-read the saved contacts of +${phone}: ${e.message}`, { level: 'warn' });
+    }
+  }, 25000);
 }
 
 export async function removePoolAccount(id) {
@@ -531,7 +581,10 @@ function queueIdentity(fn) {
 //  - contacts.update from incoming messages       → { id, notify, verifiedName }   (push names)
 //  - messaging-history.set contacts (PUSH_NAME)   → { id, notify }
 //  - live message keys                             → senderLid + senderPn pairs
-async function applyContactBatch(list) {
+// Like WhatsApp: a SAVED name belongs to the address book of the linked phone it came from
+// (ownerPhone) — kept per number in saved_names — while the push name (the person's own
+// WhatsApp name, shown as "~Name") is the same everywhere.
+async function applyContactBatch(list, ownerPhone = null) {
   const entries = [];
   for (const c of list || []) {
     if (!c?.id || typeof c.id !== 'string') continue;
@@ -541,8 +594,9 @@ async function applyContactBatch(list) {
     const pn = jids.find(isPn) || null;
     const saved = String(c.name || '').trim();
     const push = String(c.notify || c.verifiedName || '').trim();
-    if (!(lid && pn) && !saved && !push) continue; // nothing useful (e.g. a picture change)
-    entries.push({ lid, pn, saved, push });
+    const savedHere = ownerPhone ? saved : ''; // can't attribute a saved name without its phone
+    if (!(lid && pn) && !savedHere && !push) continue; // nothing useful (e.g. a picture change)
+    entries.push({ lid, pn, saved: savedHere, push });
   }
   if (!entries.length) return 0;
 
@@ -552,7 +606,7 @@ async function applyContactBatch(list) {
     if (!e.lid) continue;
     const set = { updated_at: nowIso() };
     if (e.pn) set.pn = e.pn;
-    if (e.saved) set.name = e.saved;
+    if (e.saved) set[`names.${ownerPhone}`] = e.saved;
     if (e.push) set.notify = e.push;
     mapOps.push({ updateOne: { filter: { _id: e.lid }, update: { $set: set }, upsert: true } });
   }
@@ -588,7 +642,7 @@ async function applyContactBatch(list) {
   const w = contactWriter();
   let fixed = 0;
   for (const e of entries) {
-    if (reconcileContact(e, byPhone, byLid, w)) fixed++;
+    if (reconcileContact(e, byPhone, byLid, w, ownerPhone)) fixed++;
   }
   if (fixed) {
     await w.flush(); // one round of writes for the whole batch
@@ -598,7 +652,7 @@ async function applyContactBatch(list) {
 }
 
 // Decides in memory what to change for one contact entry; writes go through `w` (batched).
-function reconcileContact(e, byPhone, byLid, w) {
+function reconcileContact(e, byPhone, byLid, w, ownerPhone) {
   const lidNum = e.lid ? jidToPhone(e.lid) : null;
   const pnNum = e.pn ? jidToPhone(e.pn) : null;
   let lidC = e.lid ? byLid.get(e.lid) || byPhone.get(lidNum) || null : null;
@@ -609,12 +663,15 @@ function reconcileContact(e, byPhone, byLid, w) {
   if (lidC && pnC) {
     w.moveMessages(lidC._id, pnC._id);
     const set = { lid: e.lid };
-    const nm = e.saved || pnC.name || lidC.name || e.push;
-    if (nm && nm !== pnC.name) set.name = nm;
+    for (const [ph, nm] of Object.entries(lidC.saved_names || {})) if (nm && !pnC.saved_names?.[ph]) set[`saved_names.${ph}`] = nm;
+    if (e.saved) set[`saved_names.${ownerPhone}`] = e.saved;
+    const push = e.push || pnC.push_name || lidC.push_name;
+    if (push && push !== pnC.push_name) set.push_name = push;
+    if (!pnC.name && lidC.name) set.name = lidC.name; // a name the user gave in this app (import/edit)
     if (lidC.pinned) set.pinned = 1;
     w.update(pnC, { set, unset: { lid_only: '' }, inc: lidC.unread ? { unread: lidC.unread } : {} });
     w.remove(lidC);
-    Object.assign(pnC, set);
+    applySet(pnC, set);
     delete pnC.lid_only;
     byPhone.delete(lidC.phone);
     byLid.set(e.lid, pnC);
@@ -630,15 +687,17 @@ function reconcileContact(e, byPhone, byLid, w) {
     set.jid = e.pn;
     set.lid = e.lid;
     resolved = true;
-  } else if (lidC && !lidC.lid_only) {
-    set.lid = e.lid; // older rows stored the lid as if it were a phone number
+  } else if (lidC && !lidC.lid_only && lidC.phone === lidNum) {
+    // Only rows that stored the lid AS the phone are "number hidden". (Real bug: a push-name
+    // update keyed by @lid flagged a contact whose real number we already had.)
+    set.lid = e.lid;
     set.jid = e.lid;
     set.lid_only = 1;
   } else if (pnC && e.lid && !pnC.lid) {
     set.lid = e.lid;
   }
-  if (e.saved && target.name !== e.saved) set.name = e.saved; // address-book name wins
-  else if (!e.saved && e.push && !target.name) set.name = e.push;
+  if (e.saved && target.saved_names?.[ownerPhone] !== e.saved) set[`saved_names.${ownerPhone}`] = e.saved;
+  if (e.push && target.push_name !== e.push) set.push_name = e.push;
   if (!Object.keys(set).length) return false;
   w.update(target, { set, unset: resolved ? { lid_only: '' } : {} });
   if (resolved) {
@@ -646,7 +705,7 @@ function reconcileContact(e, byPhone, byLid, w) {
     byPhone.set(pnNum, target);
     delete target.lid_only;
   }
-  Object.assign(target, set);
+  applySet(target, set);
   return true;
 }
 
@@ -750,7 +809,7 @@ function importInlineHistory(id, notif) {
       if (pairs.length) await applyContactBatch(pairs);
       const data = processHistoryMessage(raw); // Baileys' own parser → same shape as its event
       audit('connection', `Imported your most recent chats (type=${raw.syncType}, ${res.compressed ? 'compressed' : 'plain'}): ${data.messages.length} messages, ${data.chats.length} chats${pairs.length ? `, ${pairs.length} phone numbers` : ''}`, { level: 'success' });
-      await applyContactBatch(data.contacts);
+      await applyContactBatch(data.contacts, phoneOfAccount(id));
       await ingestPoolHistory(id, data);
     });
   });
@@ -797,7 +856,7 @@ function runHistJob(id, job, fullImport) {
       if (fullImport) {
         const data = processHistoryMessage(raw); // Baileys' own parser → same shape as the event
         audit('connection', `Imported a history batch directly (type=${raw.syncType}): ${data.messages.length} messages, ${data.chats.length} chats — WhatsApp hadn't delivered it`, { level: 'info' });
-        await applyContactBatch(data.contacts);
+        await applyContactBatch(data.contacts, phoneOfAccount(id));
         await ingestPoolHistory(id, data); // idempotent: messages dedupe by WhatsApp id
         const acc = ctxOf(id);
         if (acc?.syncing) {
@@ -915,6 +974,19 @@ function ourPhones() {
   return set;
 }
 
+// Apply a $set-style map (keys may be dotted, e.g. 'saved_names.92300…') to an in-memory doc.
+function applySet(doc, set) {
+  for (const [k, v] of Object.entries(set)) {
+    const parts = k.split('.');
+    let o = doc;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (!o[parts[i]] || typeof o[parts[i]] !== 'object') o[parts[i]] = {};
+      o = o[parts[i]];
+    }
+    o[parts[parts.length - 1]] = v;
+  }
+}
+
 // ---- Contact storage, batched ----
 // Every DB call is a round trip to Atlas (~64 ms measured). Looking contacts up and writing
 // them one chat at a time made a 100-chat history batch take ~25 s before anything showed.
@@ -956,7 +1028,7 @@ function contactWriter() {
     update(doc, { set = {}, unset = {}, inc = {} }) {
       if (insertSet.has(doc)) {
         // not written yet → just change the document we're about to insert
-        Object.assign(doc, set);
+        applySet(doc, set);
         for (const f of Object.keys(unset)) delete doc[f];
         for (const [f, v] of Object.entries(inc)) doc[f] = (doc[f] || 0) + v;
         return;
@@ -1023,7 +1095,7 @@ function contactWriter() {
 // 1:1 by real number — or, when WhatsApp only gave us an @lid, by that lid (flagged lid_only
 // so the UI never shows the lid as if it were a phone number). Same rules as before; only
 // the database access is batched.
-function planChat(idx, w, { phone, jid, isGroup = false, name = '', lid = null }) {
+function planChat(idx, w, { phone, jid, isGroup = false, name = '', lid = null, savedName = '', pushName = '', ownerPhone = null }) {
   const base = {
     tags: isGroup ? 'group' : 'whatsapp',
     status: 'active',
@@ -1057,7 +1129,8 @@ function planChat(idx, w, { phone, jid, isGroup = false, name = '', lid = null }
   if (existing) {
     const set = {};
     const unset = {};
-    if (name && !existing.name) set.name = name;
+    if (savedName && ownerPhone && existing.saved_names?.[ownerPhone] !== savedName) set[`saved_names.${ownerPhone}`] = savedName;
+    if (pushName && existing.push_name !== pushName) set.push_name = pushName;
     if (lid && !existing.lid) set.lid = lid;
     if (resolved && existing.phone !== phone) {
       set.phone = phone;
@@ -1069,16 +1142,23 @@ function planChat(idx, w, { phone, jid, isGroup = false, name = '', lid = null }
     }
     if (Object.keys(set).length) {
       w.update(existing, { set, unset });
-      Object.assign(existing, set);
+      applySet(existing, set);
       if (unset.lid_only !== undefined) delete existing.lid_only;
       indexContact(idx, existing);
     }
     return existing;
   }
 
+  // `name` stays for names given in this app (imports/edits); WhatsApp names go to
+  // saved_names (per linked phone) and push_name.
+  const names = {
+    name: name || '',
+    saved_names: savedName && ownerPhone ? { [ownerPhone]: savedName } : {},
+    push_name: pushName || '',
+  };
   const doc = resolved
-    ? { _id: new ObjectId(), ...base, name: name || '', phone, jid: `${phone}@s.whatsapp.net`, is_group: 0, ...(lid ? { lid } : {}) }
-    : { _id: new ObjectId(), ...base, name: name || '', phone: lidNum, jid: lid, lid, lid_only: 1, is_group: 0 };
+    ? { _id: new ObjectId(), ...base, ...names, phone, jid: `${phone}@s.whatsapp.net`, is_group: 0, ...(lid ? { lid } : {}) }
+    : { _id: new ObjectId(), ...base, ...names, phone: lidNum, jid: lid, lid, lid_only: 1, is_group: 0 };
   if (!doc.phone) return null;
   w.insert(doc);
   indexContact(idx, doc);
@@ -1204,7 +1284,7 @@ async function ingestPool(accountId, { messages, type }) {
       }
       if (lidJid && isPn(pnJid) && !msg.key.fromMe) {
         // Remember the pair + merge any older @lid copy of this chat (don't block this message).
-        queueIdentity(() => applyContactBatch([{ id: lidJid, jid: pnJid, notify: msg.pushName || '' }]));
+        queueIdentity(() => applyContactBatch([{ id: lidJid, jid: pnJid, notify: msg.pushName || '' }], myPhone));
       }
       const phone = isPn(pnJid) ? jidToPhone(pnJid) : null;
       if (!phone && !lidJid) continue;
@@ -1212,7 +1292,7 @@ async function ingestPool(accountId, { messages, type }) {
       const isConvAcct = (ctxOf(accountId)?.role || 'warmup') === 'conversation';
       if (!isConvAcct && phone && ourPhones().has(phone)) continue;
 
-      const contact = await upsertPoolChat({ phone, lid: lidJid, name: msg.key.fromMe ? '' : msg.pushName || '' });
+      const contact = await upsertPoolChat({ phone, lid: lidJid, pushName: msg.key.fromMe ? '' : msg.pushName || '', ownerPhone: myPhone });
       if (!contact || contact.warmup === 1) continue;
 
       if (msg.key.fromMe) {
@@ -1295,6 +1375,9 @@ async function ingestPoolHistory(accountId, { messages, chats }) {
   // Real shape (diag-3): chats/contacts arrive as bare { id } — no names, and @lid chats
   // carry no phone number. So names/numbers come from lid_map (filled by the app-state
   // contact sync + live traffic) and group names from the group-metadata fetch.
+  // The linked number's own phone — tags every message (so a chat stays attached to its tab
+  // even if the number is re-added) and picks the saved names from THIS phone's address book.
+  const myPhone = ctxOf(accountId)?.me?.phone || null;
   const lids = messages.map((m) => m.key?.remoteJid).filter(isLid);
   const lidInfo = await lidLookup(lids);
   // Pairs learned this session (backup in case the lid_map write didn't persist).
@@ -1325,17 +1408,14 @@ async function ingestPoolHistory(accountId, { messages, chats }) {
     const key = phone ? `${phone}@s.whatsapp.net` : lid;
     if (!byChat.has(key)) {
       const info = lid ? lidInfo.get(lid) : null;
-      byChat.set(key, { msgs: [], isGroup: false, phone, lid, name: info?.name || info?.notify || chatName.get(raw) || '' });
+      byChat.set(key, { msgs: [], isGroup: false, phone, lid, savedName: info?.names?.[myPhone] || chatName.get(raw) || '', pushName: info?.notify || '' });
     }
     const e = byChat.get(key);
     e.msgs.push(msg);
     if (!e.lid && lid) e.lid = lid;
-    if (!e.name && msg.pushName && !msg.key?.fromMe) e.name = msg.pushName;
+    if (!e.isGroup && !e.pushName && msg.pushName && !msg.key?.fromMe) e.pushName = msg.pushName;
   }
 
-  // The linked number's own phone — tag every message with it so a chat stays attached
-  // to its tab even if the number is removed and re-added later (which changes account_id).
-  const myPhone = ctxOf(accountId)?.me?.phone || null;
 
   // 1) Every chat's contact: one lookup for the whole batch, decided in memory, one write.
   const chatsList = [...byChat];
@@ -1347,7 +1427,9 @@ async function ingestPoolHistory(accountId, { messages, chats }) {
   const w = contactWriter();
   const planned = chatsList.map(([chatJid, e]) => ({
     e,
-    contact: e.isGroup ? planChat(idx, w, { jid: chatJid, isGroup: true, name: e.name }) : planChat(idx, w, { phone: e.phone, lid: e.lid, name: e.name }),
+    contact: e.isGroup
+      ? planChat(idx, w, { jid: chatJid, isGroup: true, name: e.name })
+      : planChat(idx, w, { phone: e.phone, lid: e.lid, savedName: e.savedName, pushName: e.pushName, ownerPhone: myPhone }),
   }));
   const remap = await w.flush();
 
@@ -1408,6 +1490,7 @@ async function ingestPoolHistory(accountId, { messages, chats }) {
 
 // Reconnect every saved account on boot (after Mongo is up).
 export async function reconnectPoolAccounts() {
+  await migrateContactNames().catch((e) => audit('system', `Contact-name cleanup failed: ${e.message}`, { level: 'error' }));
   try {
     const docs = await db.warmupAccounts().find().toArray();
     for (const d of docs) startPoolAccount(String(d._id), d.label || '', d.role || 'warmup', !!d.auto_reply);

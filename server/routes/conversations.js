@@ -39,6 +39,14 @@ async function tabPhone(account) {
   return _id ? (await db.warmupAccounts().findOne({ _id }, { projection: { phone: 1 } }))?.phone || null : null;
 }
 
+// What to call a chat in a given number's tab, like WhatsApp: a group's subject; else the name
+// saved in THIS number's address book; else a name given in this app (imports/edits). People
+// not saved on this phone get no name here — the UI shows their number and "~push name".
+function chatNameFor(c, tabPhone) {
+  if (c.is_group) return c.name || '';
+  return (tabPhone && c.saved_names?.[tabPhone]) || c.name || '';
+}
+
 // Messages belonging to one tab: everything tagged with its number (account_phone), plus
 // older untagged rows from this number's own linked sessions. Untagged 'main' rows are NOT
 // included — they came from whichever number was the main number before (WhatsApp Web
@@ -208,6 +216,7 @@ conversations.get('/', async (req, res) => {
     ])
     .toArray();
 
+  const phoneOfTab = await tabPhone(account);
   const ids = summaries.map((s) => oid(s._id)).filter(Boolean);
   const cfilter = { _id: { $in: ids } };
   if (filter === 'handoff') cfilter.handoff = 1;
@@ -222,7 +231,8 @@ conversations.get('/', async (req, res) => {
     if (!c) continue;
     rows.push({
       id: String(c._id),
-      name: c.name,
+      name: chatNameFor(c, phoneOfTab),
+      push_name: c.is_group ? '' : c.push_name || '',
       phone: c.phone,
       status: c.status,
       handoff: c.handoff,
@@ -314,8 +324,10 @@ conversations.get('/:contactId', async (req, res) => {
   // "Only admins can send messages" instead of the message box.
   const { phone } = accountGroup(account);
   const read_only = !!(contact.is_group && phone && (contact.read_only_for || []).includes(phone));
-  const { read_only_for, ...shown } = contact;
-  res.json({ contact: pub({ ...shown, unread: 0, read_only }), messages: pubList(messages), has_more });
+  // Names saved on OTHER linked phones (and old mixed-up names) stay server-side.
+  const { read_only_for, saved_names, legacy_name, ...shown } = contact;
+  const named = { name: chatNameFor(contact, phone || (await tabPhone(account))), push_name: contact.is_group ? '' : contact.push_name || '' };
+  res.json({ contact: pub({ ...shown, ...named, unread: 0, read_only }), messages: pubList(messages), has_more });
 });
 
 conversations.post('/:contactId/reply', async (req, res) => {

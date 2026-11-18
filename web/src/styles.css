@@ -2209,3 +2209,7 @@ tbody tr:hover {
   cursor: pointer;
 }
 .chat-older .link-btn:hover { text-decoration: underline; }
+
+/* "~Name": the person's own WhatsApp name, shown beside the number for contacts not saved
+   on this phone (exactly how WhatsApp marks unsaved contacts) */
+.thread-push { margin-left: 6px; font-weight: 400; font-size: 12px; color: var(--text-soft); }

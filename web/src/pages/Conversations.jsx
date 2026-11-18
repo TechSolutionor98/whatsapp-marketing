@@ -7,13 +7,18 @@ import { Modal, Empty, Loading, StatusBadge, clockTime, timeAgo, initials } from
 
 // What to call a chat: its name, else its number — never an @lid (WhatsApp's id for a
 // contact whose number it hasn't shared with this device), which only looks like a number.
+// Like WhatsApp: a contact saved on THIS number shows its saved name; anyone else shows their
+// phone number, with their own WhatsApp name as a grey "~Name" (pushName()) — never as if saved.
 function chatTitle(c) {
   if (c?.name) return c.name;
   if (c?.is_group) return 'Group chat';
-  if (c?.lid_only) return 'Unknown contact';
+  if (c?.lid_only) return c?.push_name ? `~${c.push_name}` : 'Unknown contact';
   return '+' + c?.phone;
 }
-const chatInitials = (c) => initials(c?.name, c?.lid_only || c?.is_group ? '' : c?.phone);
+// The "~Name" shown beside a number for someone not saved on this phone.
+const pushName = (c) => (!c?.name && !c?.is_group && !c?.lid_only && c?.push_name ? `~${c.push_name}` : '');
+// Avatar letters only from a saved name (or the ~name when the number is hidden); unsaved → number digits.
+const chatInitials = (c) => initials(c?.name || (c?.lid_only ? c?.push_name : ''), c?.lid_only || c?.is_group ? '' : c?.phone);
 
 // WhatsApp text formatting: *bold*, _italic_, ~strike~, ```mono``` and clickable links.
 // Built as React nodes (never innerHTML), so message text can't inject markup.
@@ -427,6 +432,7 @@ export default function Conversations({ go }) {
     : threads.filter(
         (t) =>
           (t.name || '').toLowerCase().includes(q) ||
+          (t.push_name || '').toLowerCase().includes(q) ||
           (t.phone || '').includes(search.trim()) ||
           (t.last_message || '').toLowerCase().includes(q)
       );
@@ -552,6 +558,7 @@ export default function Conversations({ go }) {
                     <span className="thread-name-txt">
                       {t.is_group === 1 && <Icon.users style={{ width: 13, opacity: 0.6, verticalAlign: '-2px', marginRight: 4 }} />}
                       {chatTitle(t)}
+                      {pushName(t) ? <span className="thread-push">{pushName(t)}</span> : null}
                     </span>
                     <span className={`thread-time ${t.unread > 0 ? 'unread' : ''}`}>{timeAgo(t.last_at)}</span>
                   </div>
@@ -599,7 +606,14 @@ export default function Conversations({ go }) {
                     {thread.contact.is_group ? (
                       <><Icon.users style={{ width: 12, verticalAlign: '-2px' }} /> Group</>
                     ) : (
-                      <>{thread.contact.lid_only ? 'Number hidden by WhatsApp' : '+' + thread.contact.phone} · <StatusBadge status={thread.contact.status} /></>
+                      <>
+                        {thread.contact.lid_only
+                          ? 'Number hidden by WhatsApp'
+                          : thread.contact.name
+                            ? '+' + thread.contact.phone
+                            : pushName(thread.contact) || 'Not in your contacts'}{' '}
+                        · <StatusBadge status={thread.contact.status} />
+                      </>
                     )}
                   </div>
                 </div>
