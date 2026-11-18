@@ -5,7 +5,7 @@ import { DATA_DIR } from '../config.js';
 import { db, audit, oid, pub, pubList, nowIso, dayKey, getSetting, setSetting } from '../db/mongo.js';
 import { emit } from '../events.js';
 import { sendText, sendToJid, isConnected, getWaState } from '../whatsapp/client.js';
-import { poolState, sendJidFrom, chatJidOf, isAccountConnected, startPoolAccount, removePoolAccount, setPoolLabel, setPoolAutoReply, downloadStoredMedia, canPostInGroup } from '../whatsapp/pool.js';
+import { poolState, sendJidFrom, chatJidOf, isAccountConnected, startPoolAccount, removePoolAccount, setPoolLabel, setPoolAutoReply, downloadStoredMedia, canPostInGroup, phoneOfAccount } from '../whatsapp/pool.js';
 
 const MEDIA_DIR = path.join(DATA_DIR, 'media_cache');
 const mediaInflight = new Map(); // one download per file even if the page asks twice
@@ -29,14 +29,26 @@ function accountGroup(account) {
   return { ids: [...ids], includeLegacy, phone };
 }
 
-// Match messages belonging to one account tab ('main' also matches legacy untagged rows).
-// Primary match is by the linked phone number (account_phone) so a tab keeps its chats
-// even after the number is removed and re-added (which assigns a new account_id).
-function accountMatch(account) {
-  const { ids, includeLegacy, phone } = accountGroup(account);
-  const or = [{ account_id: { $in: ids } }];
-  if (phone) or.push({ account_phone: phone });
-  if (includeLegacy) or.push({ account_id: null }, { account_id: { $exists: false } });
+// The phone a tab belongs to — live if connected, else the last known one (so the tab
+// doesn't go blank while a number reconnects after a restart).
+async function tabPhone(account) {
+  const { phone } = accountGroup(account);
+  if (phone) return phone;
+  if (account === 'main') return getSetting('mainPhone', null) || null;
+  const _id = oid(account);
+  return _id ? (await db.warmupAccounts().findOne({ _id }, { projection: { phone: 1 } }))?.phone || null : null;
+}
+
+// Messages belonging to one tab: everything tagged with its number (account_phone), plus
+// older untagged rows from this number's own linked sessions. Untagged 'main' rows are NOT
+// included — they came from whichever number was the main number before (WhatsApp Web
+// only shows the current number's chats). No number → nothing.
+async function accountMatch(account) {
+  const phone = await tabPhone(account);
+  if (!phone) return { _id: { $exists: false } };
+  const poolIds = accountGroup(account).ids.filter((x) => x !== 'main');
+  const or = [{ account_phone: phone }];
+  if (poolIds.length) or.push({ account_id: { $in: poolIds }, account_phone: { $exists: false } });
   return { $or: or };
 }
 
@@ -55,7 +67,7 @@ conversations.get('/accounts', async (req, res) => {
     {
       id: 'main',
       label: getSetting('mainConvLabel', '') || 'Main number',
-      phone: wa.me?.phone || null,
+      phone: wa.me?.phone || getSetting('mainPhone', null) || null,
       connected: wa.status === 'connected',
       role: 'main',
       auto_reply: !!getSetting('autoReplyEnabled', false),
@@ -179,7 +191,7 @@ conversations.get('/', async (req, res) => {
   const summaries = await db
     .messages()
     .aggregate([
-      { $match: accountMatch(account) },
+      { $match: await accountMatch(account) },
       { $sort: { created_at: 1 } },
       {
         $group: {
@@ -286,7 +298,7 @@ conversations.get('/:contactId', async (req, res) => {
   if (!contact) return res.status(404).json({ error: 'Not found' });
   const account = req.query.account || 'main';
   const limit = Math.min(Math.max(Number(req.query.limit) || 150, 20), 500);
-  const q = { contact_id: String(_id), ...accountMatch(account) };
+  const q = { contact_id: String(_id), ...(await accountMatch(account)) };
   if (req.query.before) q.created_at = { $lt: String(req.query.before) };
   const page = await db
     .messages()
@@ -342,6 +354,7 @@ conversations.post('/:contactId/reply', async (req, res) => {
       contact_id: String(_id),
       campaign_id: null,
       account_id: account,
+      account_phone: phoneOfAccount(useMain ? 'main' : poolId), // keeps it in this number's tab
       direction: 'out',
       body: body.trim(),
       status: 'sent',

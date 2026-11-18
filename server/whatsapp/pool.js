@@ -66,6 +66,31 @@ const logger = pino(
 // id -> runtime { id, label, sock, status, qr, me, lastError, starting, manualLogout, reconnectTimer }
 const accounts = new Map();
 
+// The MAIN number runs through the same pipeline as linked conversation numbers (history,
+// @lid numbers, names, groups, media, reactions, permissions) — client.js registers its
+// connection here. Pipeline functions below take 'main' as an account id too.
+let mainCtx = null;
+export function registerMainNumber(ctx) {
+  mainCtx = ctx;
+}
+function ctxOf(id) {
+  return id === 'main' ? mainCtx : accounts.get(id);
+}
+// The linked phone of an account id ('main' or a pool id) — used to tag stored messages.
+export function phoneOfAccount(id) {
+  return ctxOf(id)?.me?.phone || null;
+}
+// "Syncing chats…" indicator for a number; auto-clears after a quiet gap.
+function setSyncing(id, on, quietMs) {
+  const a = ctxOf(id);
+  if (!a) return;
+  clearTimeout(a.syncTimer);
+  if (id === 'main') a.setSyncing?.(on);
+  else a.syncing = on;
+  if (on && quietMs) a.syncTimer = setTimeout(() => setSyncing(id, false), quietMs);
+  if (id !== 'main') emitPool();
+}
+
 function authDir(id) {
   return path.join(POOL_DIR, id);
 }
@@ -150,46 +175,7 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
     sock.ev.on('creds.update', saveCreds);
     attachReceipts(sock); // delivery/read receipts for campaigns sent from this number
     sock.ev.on('messages.upsert', (ev) => ingestPool(id, ev)); // capture this number's own chats
-    if (isConv) {
-      sock.ev.on('messaging-history.set', (ev) => {
-        const acc = accounts.get(id);
-        if (acc) {
-          // Stay "syncing" until WhatsApp marks the FINAL batch (isLatest). progress hits
-          // 100 on every batch, so it can't tell us the sync is actually finished.
-          acc.syncing = !ev.isLatest;
-          clearTimeout(acc.syncTimer);
-          // Fallback: if the final batch never arrives, stop the loader after a quiet gap.
-          acc.syncTimer = setTimeout(() => { const a2 = accounts.get(id); if (a2) { a2.syncing = false; emitPool(); } }, 20000);
-          emitPool();
-        }
-        audit('connection', `History received (type=${ev.syncType ?? '?'}, latest=${ev.isLatest}, progress=${ev.progress ?? '?'}): ${ev.messages?.length || 0} messages, ${ev.chats?.length || 0} chats, ${ev.contacts?.length || 0} contacts`, { level: 'info' });
-        // Names/lid pairs in this batch first (PUSH_NAME batches have contacts but no
-        // messages), then the messages — serialized with the other identity work.
-        queueIdentity(async () => {
-          await applyContactBatch(ev.contacts);
-          await ingestPoolHistory(id, ev);
-        });
-        // Baileys finished a batch — now (not in parallel with it) read that batch's number table.
-        markBaileysBatchDone(id);
-      });
-      // Saved names from the phone's address book + their @lid <-> number pairs arrive via
-      // the app-state contact sync (Baileys chat-utils contactAction → contacts.upsert).
-      sock.ev.on('contacts.upsert', (list) => {
-        queueIdentity(async () => {
-          const n = await applyContactBatch(list);
-          if (n) audit('connection', `Updated ${n} chat name${n === 1 ? '' : 's'} from your WhatsApp contacts`, { level: 'info' });
-        });
-      });
-      // Push names from incoming messages (Baileys chats.js → contacts.update).
-      sock.ev.on('contacts.update', (list) => queueIdentity(() => applyContactBatch(list)));
-      // Group names (subjects) when they're created/changed.
-      sock.ev.on('groups.upsert', (list) => applyGroupSubjects(id, list));
-      sock.ev.on('groups.update', (list) => applyGroupSubjects(id, list));
-      // Someone was made/removed as admin → our own posting rights may have changed.
-      sock.ev.on('group-participants.update', (ev) => {
-        if (ev?.action === 'promote' || ev?.action === 'demote') refreshGroupPermission(id, ev.id);
-      });
-    }
+    if (isConv) attachConversationHandlers(id, sock);
 
     sock.ev.on('connection.update', async (u) => {
       const { connection, lastDisconnect, qr } = u;
@@ -210,17 +196,8 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
           );
         } catch {}
         if ((a.role || 'warmup') === 'conversation') {
-          a.syncing = true; // expect history to start arriving
-          // Fallback: don't show the loader forever if WhatsApp sends no history.
-          clearTimeout(a.syncTimer);
-          a.syncTimer = setTimeout(() => { const x = accounts.get(id); if (x) { x.syncing = false; emitPool(); } }, 12000);
           audit('connection', `Conversation number linked: ${a.me.name || a.me.phone} — syncing history…`, { level: 'success' });
-          // Group names: fetch once the initial sync settles, then again after history has
-          // created the group chats (queries during the very first seconds can time out).
-          clearTimeout(a.groupTimer1);
-          clearTimeout(a.groupTimer2);
-          a.groupTimer1 = setTimeout(() => syncGroupNames(id), 6000);
-          a.groupTimer2 = setTimeout(() => syncGroupNames(id), 45000);
+          onConversationOpen(id);
         } else {
           audit('warmup', `Warm-up number linked: ${a.me.name || a.me.phone}`, { level: 'success' });
         }
@@ -263,6 +240,74 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
   } finally {
     a.starting = false;
   }
+}
+
+// Wire a conversation number's socket (linked numbers AND the main number) into the
+// pipeline: history batches, saved/push names + @lid pairs, group names/permissions.
+export function attachConversationHandlers(id, sock) {
+  sock.ev.on('messaging-history.set', (ev) => {
+    // Stay "syncing" until WhatsApp marks the FINAL batch (isLatest); progress hits 100 on
+    // every batch, so it can't tell us the sync is finished. Quiet-gap fallback: 20 s.
+    setSyncing(id, !ev.isLatest, 20000);
+    audit('connection', `History received${id === 'main' ? ' (main number)' : ''} (type=${ev.syncType ?? '?'}, latest=${ev.isLatest}, progress=${ev.progress ?? '?'}): ${ev.messages?.length || 0} messages, ${ev.chats?.length || 0} chats, ${ev.contacts?.length || 0} contacts`, { level: 'info' });
+    // Names/lid pairs in this batch first (PUSH_NAME batches have contacts but no
+    // messages), then the messages — serialized with the other identity work.
+    queueIdentity(async () => {
+      await applyContactBatch(ev.contacts);
+      await ingestPoolHistory(id, ev);
+    });
+    // Baileys finished a batch — now (not in parallel with it) read that batch's number table.
+    markBaileysBatchDone(id);
+  });
+  // Saved names from the phone's address book + their @lid <-> number pairs arrive via
+  // the app-state contact sync (Baileys chat-utils contactAction → contacts.upsert).
+  sock.ev.on('contacts.upsert', (list) => {
+    queueIdentity(async () => {
+      const n = await applyContactBatch(list);
+      if (n) audit('connection', `Updated ${n} chat name${n === 1 ? '' : 's'} from your WhatsApp contacts`, { level: 'info' });
+    });
+  });
+  // Push names from incoming messages (Baileys chats.js → contacts.update).
+  sock.ev.on('contacts.update', (list) => queueIdentity(() => applyContactBatch(list)));
+  // Group names (subjects) when they're created/changed.
+  sock.ev.on('groups.upsert', (list) => applyGroupSubjects(id, list));
+  sock.ev.on('groups.update', (list) => applyGroupSubjects(id, list));
+  // Someone was made/removed as admin → our own posting rights may have changed.
+  sock.ev.on('group-participants.update', (ev) => {
+    if (ev?.action === 'promote' || ev?.action === 'demote') refreshGroupPermission(id, ev.id);
+  });
+}
+
+// shouldSyncHistoryMessage hook: Baileys hands us each history notification here — read
+// WhatsApp's number table / inline recent-chats batch from it (see onHistoryNotification).
+export function historyHook(id) {
+  return (notif) => {
+    onHistoryNotification(id, notif);
+    return true;
+  };
+}
+
+// A conversation number (or the main number) just connected.
+export function onConversationOpen(id) {
+  const a = ctxOf(id);
+  if (!a) return;
+  // A different phone on the same slot (the main number re-linked to another number):
+  // drop the previous number's per-session caches.
+  if (a.cachePhone !== a.me?.phone) {
+    a.cachePhone = a.me?.phone;
+    a.histSeen = new Set();
+    a.histJobs = [];
+    a.learnedPairs = new Map();
+    a.groupSubjects = new Map();
+    a.groupRO = new Map();
+  }
+  setSyncing(id, true, 12000); // expect history; don't show the loader forever if none comes
+  // Group names: fetch once the initial sync settles, then again after history has created
+  // the group chats (queries during the very first seconds can time out).
+  clearTimeout(a.groupTimer1);
+  clearTimeout(a.groupTimer2);
+  a.groupTimer1 = setTimeout(() => syncGroupNames(id), 6000);
+  a.groupTimer2 = setTimeout(() => syncGroupNames(id), 45000);
 }
 
 export async function removePoolAccount(id) {
@@ -318,7 +363,7 @@ export async function checkOnWhatsAppVia(fromId, phone) {
 
 // Send to an exact jid (a group, an @lid contact, or a number jid) from one pool account.
 export async function sendJidFrom(fromId, jid, text) {
-  const a = accounts.get(fromId);
+  const a = ctxOf(fromId);
   if (!a?.sock || a.status !== 'connected') throw new Error('Source number not connected');
   await a.sock.sendPresenceUpdate('composing', jid).catch(() => {});
   const sent = await a.sock.sendMessage(jid, { text });
@@ -424,7 +469,7 @@ async function applyReaction(msg) {
 // (404/410), Baileys asks the linked phone to re-upload it (reuploadRequest), like WA Web.
 export async function downloadStoredMedia(doc) {
   const waMsg = JSON.parse(doc.media_raw, BufferJSON.reviver);
-  const live = [...accounts.values()].filter((a) => a.sock && a.status === 'connected');
+  const live = [...accounts.values(), mainCtx].filter((a) => a?.sock && a.status === 'connected');
   const acc = live.find((a) => doc.account_phone && a.me?.phone === doc.account_phone) || live.find((a) => a.role === 'conversation');
   return downloadMediaMessage(waMsg, 'buffer', {}, acc ? { logger, reuploadRequest: acc.sock.updateMediaMessage } : undefined);
 }
@@ -623,7 +668,7 @@ function mappingsFromHistory(data) {
 // buffer is waiting on the phone), we import that batch ourselves from the raw blob.
 const HIST_FALLBACK_MS = 60000;
 function onHistoryNotification(id, notif) {
-  const a = accounts.get(id);
+  const a = ctxOf(id);
   if (!a) return;
   // WhatsApp sends the FIRST batch (your most recent chats) inline in the notification
   // (WAProto HistorySyncNotification.initialHistBootstrapInlinePayload) — no file to download.
@@ -646,7 +691,7 @@ function onHistoryNotification(id, notif) {
   (a.histJobs ||= []).push(job);
   const arm = () => {
     job.timer = setTimeout(() => {
-      const acc = accounts.get(id);
+      const acc = ctxOf(id);
       // Baileys still delivering batches recently → it's progressing; give it more time.
       if (acc?.lastHistAt && Date.now() - acc.lastHistAt < 20000 && job.retries++ < 3) return arm();
       runHistJob(id, job, true);
@@ -676,7 +721,7 @@ async function decodeInlineHistory(bytes) {
 
 function importInlineHistory(id, notif) {
   histChain = histChain.then(async () => {
-    if (!accounts.get(id)) return;
+    if (!ctxOf(id)) return;
     let res;
     try {
       res = await decodeInlineHistory(notif.initialHistBootstrapInlinePayload);
@@ -687,7 +732,7 @@ function importInlineHistory(id, notif) {
     const raw = res.data;
     if (raw.syncType == null) raw.syncType = notif.syncType;
     const pairs = mappingsFromHistory(raw);
-    const a = accounts.get(id);
+    const a = ctxOf(id);
     if (a && pairs.length) {
       a.learnedPairs ||= new Map();
       for (const p of pairs) a.learnedPairs.set(p.id, p.jid);
@@ -703,7 +748,7 @@ function importInlineHistory(id, notif) {
 }
 
 function markBaileysBatchDone(id) {
-  const a = accounts.get(id);
+  const a = ctxOf(id);
   if (!a) return;
   a.lastHistAt = Date.now();
   // Strict arrival order (a batch our fallback already imported still counts as this one).
@@ -719,7 +764,7 @@ function runHistJob(id, job, fullImport) {
   job.started = true;
   clearTimeout(job.timer);
   histChain = histChain.then(async () => {
-    if (!accounts.get(id)) return; // number was removed meanwhile
+    if (!ctxOf(id)) return; // number was removed meanwhile
     const t0 = Date.now();
     let raw;
     try {
@@ -729,7 +774,7 @@ function runHistJob(id, job, fullImport) {
       return;
     }
     const pairs = mappingsFromHistory(raw);
-    const a = accounts.get(id);
+    const a = ctxOf(id);
     if (a && pairs.length) {
       a.learnedPairs ||= new Map(); // in-memory backup in case the lid_map write fails
       for (const p of pairs) a.learnedPairs.set(p.id, p.jid);
@@ -745,7 +790,7 @@ function runHistJob(id, job, fullImport) {
         audit('connection', `Imported a history batch directly (type=${raw.syncType}): ${data.messages.length} messages, ${data.chats.length} chats — WhatsApp hadn't delivered it`, { level: 'info' });
         await applyContactBatch(data.contacts);
         await ingestPoolHistory(id, data); // idempotent: messages dedupe by WhatsApp id
-        const acc = accounts.get(id);
+        const acc = ctxOf(id);
         if (acc?.syncing) {
           acc.syncing = false;
           emitPool();
@@ -782,7 +827,7 @@ function readOnlyOp(jid, phone, ro) {
 // Group subjects (names) + posting permission — history sync carries neither, so fetch them
 // like WhatsApp Web does.
 async function syncGroupNames(id) {
-  const a = accounts.get(id);
+  const a = ctxOf(id);
   if (!a?.sock || a.status !== 'connected') return;
   let groups;
   try {
@@ -811,7 +856,7 @@ async function syncGroupNames(id) {
 
 // One group's metadata changed (admins-only toggled, we were promoted/demoted) → re-check.
 async function refreshGroupPermission(id, jid) {
-  const a = accounts.get(id);
+  const a = ctxOf(id);
   if (!a?.sock || a.status !== 'connected' || !a.me?.phone || !jid) return;
   try {
     const g = await a.sock.groupMetadata(jid);
@@ -826,7 +871,7 @@ async function refreshGroupPermission(id, jid) {
 // group's metadata. If WhatsApp can't be asked, allow it (a rejection is still caught and
 // shown as "not sent" via the error ack).
 export async function canPostInGroup(id, jid) {
-  const a = accounts.get(id);
+  const a = ctxOf(id);
   if (!a?.sock || !jid) return true;
   if (a.groupRO?.has(jid)) return !a.groupRO.get(jid);
   try {
@@ -841,7 +886,7 @@ export async function canPostInGroup(id, jid) {
 }
 
 function applyGroupSubjects(id, list) {
-  const a = accounts.get(id);
+  const a = ctxOf(id);
   for (const g of list || []) {
     if (!g?.id) continue;
     if ('announce' in g || 'restrict' in g || 'participants' in g) refreshGroupPermission(id, g.id);
@@ -1063,6 +1108,7 @@ async function poolAutoReply(accountId, contact, phone) {
       contact_id: String(contact._id),
       campaign_id: null,
       account_id: accountId,
+      account_phone: phoneOfAccount(accountId),
       direction: 'out',
       body: reply,
       status: 'sent',
@@ -1075,8 +1121,13 @@ async function poolAutoReply(accountId, contact, phone) {
     emit('message:out', { contactId: String(contact._id) });
   } catch (err) {
     await db.contacts().updateOne({ _id: contact._id }, { $set: { handoff: 1, handoff_reason: 'reply' } });
-    audit('handoff', `AI auto-reply failed for ${phone} — handed to a human (${err.message})`, { level: 'warn' });
+    audit('handoff', `AI auto-reply failed for ${contact.name || (phone ? '+' + phone : 'a contact')} — handed to a human (${err.message})`, { level: 'warn' });
   }
+}
+
+// The main number's live messages (client.js) — same handling as linked numbers.
+export function ingestMain(ev) {
+  return ingestPool('main', ev);
 }
 
 async function ingestPool(accountId, { messages, type }) {
@@ -1085,8 +1136,8 @@ async function ingestPool(accountId, { messages, type }) {
   // 'append' lost every message that arrived during a restart/reconnect.
   if (type !== 'notify' && type !== 'append') return;
   // Warm-up numbers are isolated — they only message each other and never show in Conversations.
-  if ((accounts.get(accountId)?.role || 'warmup') !== 'conversation') return;
-  const myPhone = accounts.get(accountId)?.me?.phone || null; // tag chats by the linked number
+  if ((ctxOf(accountId)?.role || 'warmup') !== 'conversation') return;
+  const myPhone = ctxOf(accountId)?.me?.phone || null; // tag chats by the linked number
   for (const msg of messages) {
     try {
       if (!msg.message) continue;
@@ -1104,9 +1155,9 @@ async function ingestPool(accountId, { messages, type }) {
 
       // Group message: store for the thread (conversation numbers only), no lead automation.
       if (isGroup) {
-        if ((accounts.get(accountId)?.role || 'warmup') !== 'conversation') continue;
+        if ((ctxOf(accountId)?.role || 'warmup') !== 'conversation') continue;
         if (!body && !msg.key.fromMe) continue;
-        const gc = await upsertPoolChat({ jid: raw, isGroup: true, name: accounts.get(accountId)?.groupSubjects?.get(raw) || '' });
+        const gc = await upsertPoolChat({ jid: raw, isGroup: true, name: ctxOf(accountId)?.groupSubjects?.get(raw) || '' });
         if (!gc || !body) continue;
         const r = await db.messages().updateOne(
           { wa_message_id: id },
@@ -1128,7 +1179,7 @@ async function ingestPool(accountId, { messages, type }) {
       const lidJid = isLid(raw) ? raw : !msg.key.fromMe && isLid(msg.key.senderLid) ? msg.key.senderLid : null;
       if (!isPn(pnJid) && lidJid) {
         const info = (await lidLookup([lidJid])).get(lidJid);
-        const learned = accounts.get(accountId)?.learnedPairs?.get(lidJid);
+        const learned = ctxOf(accountId)?.learnedPairs?.get(lidJid);
         if (isPn(info?.pn)) pnJid = info.pn;
         else if (isPn(learned)) pnJid = learned;
       }
@@ -1139,7 +1190,7 @@ async function ingestPool(accountId, { messages, type }) {
       const phone = isPn(pnJid) ? jidToPhone(pnJid) : null;
       if (!phone && !lidJid) continue;
       // Warm-up numbers: skip chatter between our own numbers. Conversation numbers: keep everything.
-      const isConvAcct = (accounts.get(accountId)?.role || 'warmup') === 'conversation';
+      const isConvAcct = (ctxOf(accountId)?.role || 'warmup') === 'conversation';
       if (!isConvAcct && phone && ourPhones().has(phone)) continue;
 
       const contact = await upsertPoolChat({ phone, lid: lidJid, name: msg.key.fromMe ? '' : msg.pushName || '' });
@@ -1175,7 +1226,7 @@ async function ingestPool(accountId, { messages, type }) {
 
       const stop = getSetting('stopKeywords', []);
       const lc = body.toLowerCase();
-      const acctAutoReply = !!accounts.get(accountId)?.autoReply; // this number's own AI toggle
+      const acctAutoReply = !!ctxOf(accountId)?.autoReply; // this number's own AI toggle
       if (stop.some((w) => lc === w || lc.startsWith(w))) {
         await db.contacts().updateOne({ _id: contact._id }, { $set: { status: 'opted_out', handoff: 0 } });
         audit('reply', `${contact.name || (phone ? '+' + phone : 'A contact')} opted out ("${body}")`, { level: 'warn', meta: { contactId: String(contact._id) } });
@@ -1206,9 +1257,9 @@ async function ingestPoolHistory(accountId, { messages, chats }) {
   const lids = messages.map((m) => m.key?.remoteJid).filter(isLid);
   const lidInfo = await lidLookup(lids);
   // Pairs learned this session (backup in case the lid_map write didn't persist).
-  const learned = accounts.get(accountId)?.learnedPairs;
+  const learned = ctxOf(accountId)?.learnedPairs;
   if (learned) for (const lid of lids) if (!isPn(lidInfo.get(lid)?.pn) && learned.has(lid)) lidInfo.set(lid, { ...(lidInfo.get(lid) || {}), pn: learned.get(lid) });
-  const groupSubjects = accounts.get(accountId)?.groupSubjects || new Map();
+  const groupSubjects = ctxOf(accountId)?.groupSubjects || new Map();
   const chatName = new Map();
   for (const ch of chats || []) {
     const nm = ch?.name || ch?.subject || ch?.displayName || '';
@@ -1243,7 +1294,7 @@ async function ingestPoolHistory(accountId, { messages, chats }) {
 
   // The linked number's own phone — tag every message with it so a chat stays attached
   // to its tab even if the number is removed and re-added later (which changes account_id).
-  const myPhone = accounts.get(accountId)?.me?.phone || null;
+  const myPhone = ctxOf(accountId)?.me?.phone || null;
 
   // 1) Every chat's contact: one lookup for the whole batch, decided in memory, one write.
   const chatsList = [...byChat];

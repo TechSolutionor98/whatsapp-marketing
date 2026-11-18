@@ -3,7 +3,7 @@ import { emit, bus } from '../events.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { isConnected, sendText, sendTyping, sendImage, checkOnWhatsApp } from '../whatsapp/client.js';
-import { isAccountConnected, sendFromTo, sendMediaFromTo, checkOnWhatsAppVia, accountRole } from '../whatsapp/pool.js';
+import { isAccountConnected, sendFromTo, sendMediaFromTo, checkOnWhatsAppVia, accountRole, phoneOfAccount } from '../whatsapp/pool.js';
 import { aiAvailable, rewriteMessage } from '../ai.js';
 import { UPLOADS_DIR } from '../routes/uploads.js';
 import { renderTemplate, randInt, nowInTz, withinWindow } from '../utils.js';
@@ -203,6 +203,7 @@ async function sendOne(campaign, target, contact) {
       contact_id: String(contact._id),
       campaign_id: String(campaign._id),
       account_id: campaign.sender_id || 'main', // which number this went out from
+      account_phone: phoneOfAccount(campaign.sender_id || 'main'), // shows in that number's Conversations tab
       direction: 'out',
       body: text,
       media_url: template.media_url || null,
