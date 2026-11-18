@@ -238,7 +238,7 @@ function AiCard({ s, set, status }) {
             <div className="st-label">Model</div>
             <div className="st-desc">{MODEL_HINTS[s.aiProvider] || MODEL_HINTS.groq}</div>
           </div>
-          <input className="input" style={{ width: 260 }} value={s.aiModel || ''} placeholder="llama-3.3-70b-versatile" onChange={(e) => set('aiModel', e.target.value)} />
+          <input className="input" style={{ width: 260 }} value={s.aiModel || ''} placeholder="openai/gpt-oss-120b" onChange={(e) => set('aiModel', e.target.value)} />
         </div>
         <div className="setting-row">
           <div>

@@ -1178,26 +1178,42 @@ async function upsertPoolChat(spec) {
   return remap.has(String(c._id)) ? await db.contacts().findOne({ _id: remap.get(String(c._id)) }) : c;
 }
 
-async function poolAutoReply(accountId, contact, phone) {
+// AI auto-reply, like a person answering: wait the human-like delay, and if more messages
+// arrive meanwhile, restart the wait — then answer ONCE, to the latest message. (Before, every
+// message in a burst got its own AI reply.)
+const autoReplyTimers = new Map(); // `${accountId}:${contactId}` -> timeout
+function scheduleAutoReply(accountId, contact) {
+  const key = `${accountId}:${contact._id}`;
+  clearTimeout(autoReplyTimers.get(key));
+  const minS = getSetting('autoReplyMinSec', 5);
+  const maxS = getSetting('autoReplyMaxSec', 30);
+  const waitMs = randInt(Math.max(0, minS), Math.max(minS, maxS)) * 1000;
+  autoReplyTimers.set(
+    key,
+    setTimeout(() => {
+      autoReplyTimers.delete(key);
+      poolAutoReply(accountId, contact).catch(() => {});
+    }, waitMs)
+  );
+}
+
+async function poolAutoReply(accountId, contact) {
   try {
-    const history = await db
-      .messages()
-      .find({ contact_id: String(contact._id) })
-      .sort({ _id: 1 })
-      .limit(14)
-      .toArray();
-    const reply = (await conversationReply(history.map((m) => ({ direction: m.direction, body: m.body })))).trim();
-    if (!reply) throw new Error('empty reply');
-    const minS = getSetting('autoReplyMinSec', 5);
-    const maxS = getSetting('autoReplyMaxSec', 30);
-    const waitMs = randInt(Math.max(0, minS), Math.max(minS, maxS)) * 1000;
-    if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
+    // The conversation as THIS number sees it: its own messages with this person, newest
+    // last. (Real bug: it took the 14 OLDEST messages by insert order, across ALL linked
+    // numbers — so a plain "Asslamoalikum" was answered about another chat's SEO issue.)
+    const myPhone = phoneOfAccount(accountId);
+    const q = { contact_id: String(contact._id), ...(myPhone ? { account_phone: myPhone } : { account_id: accountId }) };
+    const history = (await db.messages().find(q).sort({ created_at: -1, _id: -1 }).limit(12).toArray()).reverse();
+    const reply = await conversationReply(history.map((m) => ({ direction: m.direction, body: m.body })));
+    if (reply === null) return; // "ok" / "thanks" / already answered — no reply needed
     const waId = await sendJidFrom(accountId, chatJidOf(contact), reply);
     await db.messages().insertOne({
       contact_id: String(contact._id),
       campaign_id: null,
       account_id: accountId,
-      account_phone: phoneOfAccount(accountId),
+      account_phone: myPhone,
+      chat_jid: chatJidOf(contact),
       direction: 'out',
       body: reply,
       status: 'sent',
@@ -1210,7 +1226,7 @@ async function poolAutoReply(accountId, contact, phone) {
     emit('message:out', { contactId: String(contact._id) });
   } catch (err) {
     await db.contacts().updateOne({ _id: contact._id }, { $set: { handoff: 1, handoff_reason: 'reply' } });
-    audit('handoff', `AI auto-reply failed for ${contact.name || (phone ? '+' + phone : 'a contact')} — handed to a human (${err.message})`, { level: 'warn' });
+    audit('handoff', `AI auto-reply failed for ${contact.name || contact.push_name || '+' + contact.phone} — handed to a human (${err.message})`, { level: 'warn' });
   }
 }
 
@@ -1331,7 +1347,7 @@ async function ingestPool(accountId, { messages, type }) {
         audit('reply', `${contact.name || (phone ? '+' + phone : 'A contact')} opted out ("${body}")`, { level: 'warn', meta: { contactId: String(contact._id) } });
       } else if (acctAutoReply && aiAvailable()) {
         await db.targets().updateMany({ contact_id: String(contact._id), status: 'queued' }, { $set: { status: 'replied' } });
-        await poolAutoReply(accountId, contact, phone);
+        scheduleAutoReply(accountId, contact); // one reply after the burst, not one per message
       } else if (getSetting('handoffOnReply', true)) {
         await db.contacts().updateOne({ _id: contact._id }, { $set: { handoff: 1, handoff_reason: 'reply' } });
         await db.targets().updateMany({ contact_id: String(contact._id), status: 'queued' }, { $set: { status: 'replied' } });

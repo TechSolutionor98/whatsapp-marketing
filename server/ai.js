@@ -17,7 +17,7 @@ function baseUrl() {
   return PRESETS[p] || PRESETS.groq;
 }
 export function aiModel() {
-  return getSetting('aiModel', 'llama-3.3-70b-versatile');
+  return getSetting('aiModel', 'openai/gpt-oss-20b') || 'openai/gpt-oss-20b'; // llama-3.3-70b-versatile no longer exists on Groq (404)
 }
 export function aiProviderName() {
   return provider();
@@ -123,24 +123,75 @@ Output ONLY the reply text.`;
 }
 
 // Generate a reply to an incoming conversation. `history` is oldest→newest
-// [{direction:'in'|'out', body}]. Returns a short, natural reply.
+// [{direction:'in'|'out', body}] — ONLY this number's chat with this person.
+// Returns the reply text, or null when the latest message needs no reply ("ok", "thanks").
+//
+// Built from real failures with the configured model: it answered Roman Urdu in Arabic or
+// Hindi script, replied to an older topic instead of a plain greeting, invented services
+// ("Yes, we offer SEO…") with no business info given, answered "ok"/"thanks", and sometimes
+// repeated its whole answer twice.
+export const NO_REPLY = '[NO_REPLY]';
+
+// Which language/script their latest message is in. The configured model often missed Roman
+// Urdu (Urdu typed in English letters) and answered in English, Arabic or Hindi script — so we
+// detect it here and tell the model explicitly.
+const ROMAN_URDU = new Set('hai hain ha hy hay he ho hoon hun ka ki ke ko kya kia kyun kyu kar kr karo krna karna krdo kardo nahi nai nhi theek thik bhai bhi ap aap apka apki apko mera meri mujhe mujy mujhy tum yar yaar kitne kitna kitni kaise kese kaisa acha achha ji jee abhi kal aaj wala wali sy mein raha rahi rha rhy rahy deta deeta dena lena chahiye chahye sakta sakti kab kahan ab phir fir bas jaldi shukriya salam assalam asslamoalikum assalamualaikum salamalaikum walaikum masla koi sab sath liye batao bata btao btaien prhana parhna namaz namaaz gaya gya ayega aye ay'.split(' '));
+export function languageOf(text = '') {
+  if (/[\u0600-\u06FF]/.test(text)) return 'Urdu script';
+  if (/[\u0900-\u097F]/.test(text)) return 'Hindi (Devanagari script)';
+  const words = text.toLowerCase().match(/[a-z]+/g) || [];
+  const hits = words.filter((w) => ROMAN_URDU.has(w)).length;
+  if (hits >= 2 || (hits >= 1 && words.length <= 3)) return 'Roman Urdu';
+  return 'English';
+}
 export async function conversationReply(history = [], opts = {}) {
   if (!aiAvailable()) throw new Error('AI not configured');
-  const instructions = opts.instructions ?? getSetting('autoReplyInstructions', '');
-  const system = `You are a helpful, friendly assistant replying to a customer on WhatsApp on behalf of a business.
+  const info = (opts.instructions ?? (getSetting('autoReplyInstructions', '') || getSetting('aiInstructions', ''))).trim();
+  const tone = getSetting('aiTone', 'friendly') || 'friendly';
+  const system = `You are the person managing this WhatsApp number, texting with a customer or contact. Write the next message.
+
 Rules:
-- Reply naturally in 1–3 short sentences, like a real person texting.
-- Reply in the same language the customer used.
-- Be warm and concise. Do NOT invent prices, facts, or promises you weren't given.
-- If they want to buy, need something specific, or you can't help, say a team member will follow up shortly.
-${instructions ? `Business context & guidance:\n${instructions}` : ''}
-Output ONLY the reply text.`;
+- Answer ONLY their latest message. Earlier messages are background — never bring up an older topic unless their latest message does.
+- Match their language AND writing style exactly. Roman Urdu (Urdu/Hindi typed in English letters, e.g. "kitne ka hai?", "theek hai", "Asslamoalikum") → reply in Roman Urdu with English letters. Never use Arabic/Urdu script or Hindi (Devanagari) letters unless they wrote in that script. English → English.
+- Keep it to 1–2 short sentences, like a real person texting. Tone: ${tone}. Use an emoji only if they did.
+- A salam (Asslamoalikum / Assalamualaikum / Salam) → reply "Walaikum Assalam" and ask how you can help. Any other greeting ("Hi") → greet back and ask how you can help.
+- If they're only telling you something (they're busy, going to pray, will do it later, on the way) → a brief friendly acknowledgement, e.g. "Ji zaroor, koi masla nahi." — don't promise to check anything.
+- "ok", "thanks", "theek hai", emoji-only and similar acknowledgements need no answer → output exactly ${NO_REPLY}
+- "🎤 Voice message", "📷 Photo", "🎥 Video", "📄 …", "Sticker" are attachments you can't see or hear → say you got it and ask them to type the main point briefly.
+- Only state facts written in Business info below. For prices, availability, services, timings or anything not covered there, don't guess and don't say yes or no — say you'll confirm and get back to them shortly.
+- Never claim you checked, fixed or did something. Never mention being an AI or a bot.
+
+Business info:
+${info || '(none given — do not state any facts about the business, its services or prices)'}
+
+Output only the message text, or ${NO_REPLY}.`;
   const msgs = history
     .map((m) => ({ role: m.direction === 'in' ? 'user' : 'assistant', content: (m.body || '').trim() }))
     .filter((m) => m.content)
     .slice(-12);
-  if (!msgs.length || msgs[msgs.length - 1].role !== 'user') return '';
-  return chatMessages(system, msgs, { temperature: 0.7, maxTokens: 400 });
+  if (!msgs.length || msgs[msgs.length - 1].role !== 'user') return null; // nothing new from them
+  const lang = languageOf(msgs[msgs.length - 1].content);
+  const langLine = lang === 'Roman Urdu'
+    ? 'Their latest message is in Roman Urdu → reply in Roman Urdu, using English letters only.'
+    : `Their latest message is in ${lang} → reply in ${lang}.`;
+  // Reasoning models (Groq gpt-oss) spend part of max_tokens thinking — leave room for the answer.
+  let out = await chatMessages(`${system}\n\n${langLine}`, msgs, { temperature: 0.6, maxTokens: 900 });
+  out = cleanReply(out);
+  if (!out) throw new Error('empty reply from the AI');
+  if (out.includes(NO_REPLY)) return null;
+  return out;
+}
+
+// Tidy a model reply: drop wrapping quotes, and collapse an answer the model wrote twice in a
+// row ("Hum check karte hain.Hum check karte hain." — seen with the configured model).
+function cleanReply(text) {
+  let t = String(text || '').trim().replace(/^["“](.*)["”]$/s, '$1').trim();
+  for (let len = Math.floor(t.length / 2); len >= 8; len--) {
+    const a = t.slice(0, len).trim();
+    const b = t.slice(len).trim();
+    if (a && a === b) return a;
+  }
+  return t;
 }
 
 // Draft a brand-new message from a plain-language description (template builder).
