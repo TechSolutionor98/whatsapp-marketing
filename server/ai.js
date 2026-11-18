@@ -50,14 +50,21 @@ async function chatMessages(system, msgs, { maxTokens = 1024, temperature = 1 } 
   // the token budget goes to the actual answer (otherwise content can come back empty).
   if (provider() === 'groq') body.reasoning_effort = 'low';
 
-  const resp = await fetch(`${base}/chat/completions`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-  });
+  // Busy minute on the provider (Groq free tier: 8,000 tokens a minute) → wait what it asks
+  // (retry-after / "try again in 7.5s", at most 25 s) and try again, instead of failing the reply.
+  let resp;
+  for (let attempt = 0; ; attempt++) {
+    resp = await fetch(`${base}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) });
+    if (resp.status !== 429 || attempt >= 3) break;
+    const t = await resp.text().catch(() => '');
+    const m = t.match(/try again in (?:(\d+)m)?([\d.]+)(ms|s)/i);
+    const asked = m ? (Number(m[1] || 0) * 60 + Number(m[2]) / (m[3] === 'ms' ? 1000 : 1)) * 1000 : Number(resp.headers.get('retry-after')) * 1000;
+    const wait = Math.min(25000, Math.max(1000, (Number.isFinite(asked) && asked > 0 ? asked : 8000) + 300));
+    await new Promise((r) => setTimeout(r, wait));
+  }
   if (!resp.ok) {
     const t = await resp.text().catch(() => '');
-    throw new Error(`AI error ${resp.status}: ${t.slice(0, 200)}`);
+    throw new Error(`AI error ${resp.status}: ${t.slice(0, 300)}`);
   }
   const data = await resp.json();
   return (data.choices?.[0]?.message?.content || '').trim();
@@ -124,20 +131,29 @@ Output ONLY the reply text.`;
 
 // Generate a reply to an incoming conversation. `history` is oldest→newest
 // [{direction:'in'|'out', body}] — ONLY this number's chat with this person.
-// Returns the reply text, or null when the latest message needs no reply ("ok", "thanks").
+// Returns { text, handoff } — handoff: the AI couldn't answer from the facts it has, so a
+// person must reply (the chat is flagged "Needs human") — or null when no reply is needed.
 //
 // Built from real failures with the configured model: it answered Roman Urdu in Arabic or
 // Hindi script, replied to an older topic instead of a plain greeting, invented services
 // ("Yes, we offer SEO…") with no business info given, answered "ok"/"thanks", and sometimes
-// repeated its whole answer twice.
+// repeated its whole answer twice. And it promised "I'll check and get back to you shortly" —
+// which nothing ever does — so it now answers from the catalog or hands the chat to a person.
 export const NO_REPLY = '[NO_REPLY]';
+export const HANDOFF = '[HANDOFF]';
+// A reply that says someone will come back ("our team will get back to you", "I'll check",
+// "check kar ke batata hoon") is a promise only a person can keep — the chat is flagged for a
+// person even when the model forgot the [HANDOFF] marker (seen with gpt-oss-20b).
+const PROMISE_RX = /\b(get back to you|i'?ll (check|confirm|find out|look into|ask|forward|let you know)|let me (check|confirm|find out|ask)|(will|'ll) (get back|reply|respond|contact you|reach out|call you|update you|let you know|forward)|forward(ed)? (your|this|it) to|(check|confirm|pata) (kar|kr) ?(ke|k|kay|kai)|bata (deta|dete|doon|dun|denge|dain ge|dengy)|rabta (karenge|karen ge|krenge))\b/i;
+const PROMISE_AR = /(سنعود|سنرد|سيرد|سيتواصل|سنتواصل|سيتولى|سوف نرد|سوف يرد)/;
 
 // Which language/script their latest message is in. The configured model often missed Roman
 // Urdu (Urdu typed in English letters) and answered in English, Arabic or Hindi script — so we
 // detect it here and tell the model explicitly.
-const ROMAN_URDU = new Set('hai hain ha hy hay he ho hoon hun ka ki ke ko kya kia kyun kyu kar kr karo krna karna krdo kardo nahi nai nhi theek thik bhai bhi ap aap apka apki apko mera meri mujhe mujy mujhy tum yar yaar kitne kitna kitni kaise kese kaisa acha achha ji jee abhi kal aaj wala wali sy mein raha rahi rha rhy rahy deta deeta dena lena chahiye chahye sakta sakti kab kahan ab phir fir bas jaldi shukriya salam assalam asslamoalikum assalamualaikum salamalaikum walaikum masla koi sab sath liye batao bata btao btaien prhana parhna namaz namaaz gaya gya ayega aye ay'.split(' '));
+const ROMAN_URDU = new Set('hai hain ha hy hay he ho hoon hun ka ki ke ko kya kia kyun kyu kar kr karo krna karna krdo kardo nahi nai nhi theek thik bhai bhi ap aap apka apki apko mera meri mujhe mujy mujhy tum yar yaar kitne kitna kitni kaise kese kaisa acha achha ji jee abhi kal aaj wala wali sy mein raha rahi rha rhy rahy deta deeta dena lena chahiye chahye sakta sakti kab kahan ab phir fir bas jaldi shukriya salam assalam asslamoalikum assalamualaikum salamalaikum walaikum masla koi sab sath liye batao bata btao btaien prhana parhna namaz namaaz gaya gya ayega aye ay tak tk mil milega milegi milay jayega jayegi jaega jaegi jaye jae hoga hogi chahie kam zyada ziada sasta sasti bohat bahut boht zaroor haan han lekin magar sirf aur ya wo woh ye yeh apke apne hamare humare hum hamein kuch dena lena bhejo bhej bhejain karwa mangwana mangwa dikhao dikhaen chahte chahta chahti raha rahe'.split(' '));
 export function languageOf(text = '') {
-  if (/[\u0600-\u06FF]/.test(text)) return 'Urdu script';
+  if (/[\u0679\u0688\u0691\u06BA\u06BE\u06C1\u06D2]/.test(text)) return 'Urdu script'; // ٹ ڈ ڑ ں ھ ہ ے
+  if (/[\u0600-\u06FF]/.test(text)) return 'Arabic';
   if (/[\u0900-\u097F]/.test(text)) return 'Hindi (Devanagari script)';
   const words = text.toLowerCase().match(/[a-z]+/g) || [];
   const hits = words.filter((w) => ROMAN_URDU.has(w)).length;
@@ -152,21 +168,25 @@ export async function conversationReply(history = [], opts = {}) {
 
 Rules:
 - Answer ONLY their latest message. Earlier messages are background — never bring up an older topic unless their latest message does.
-- Match their language AND writing style exactly. Roman Urdu (Urdu/Hindi typed in English letters, e.g. "kitne ka hai?", "theek hai", "Asslamoalikum") → reply in Roman Urdu with English letters. Never use Arabic/Urdu script or Hindi (Devanagari) letters unless they wrote in that script. English → English.
-- Keep it to 1–2 short sentences, like a real person texting. Tone: ${tone}. Use an emoji only if they did.
+- Match their language AND writing style exactly. Roman Urdu (Urdu/Hindi typed in English letters, e.g. "kitne ka hai?", "theek hai", "Asslamoalikum") → reply in Roman Urdu with English letters. Never use Arabic/Urdu script or Hindi (Devanagari) letters unless they wrote in that script. English → English. Arabic → Arabic.
+- Keep it short, like a real person texting: 1–2 sentences, or a short list (at most 3 lines) when giving product options. Tone: ${tone}. Use an emoji only if they did.
 - A salam (Asslamoalikum / Assalamualaikum / Salam) → reply "Walaikum Assalam" and ask how you can help. Any other greeting ("Hi") → greet back and ask how you can help.
-- If they're only telling you something (they're busy, going to pray, will do it later, on the way) → a brief friendly acknowledgement, e.g. "Ji zaroor, koi masla nahi." — don't promise to check anything.
+- If they're only telling you something (they're busy, going to pray, will do it later, on the way) → a brief friendly acknowledgement, e.g. "Ji zaroor, koi masla nahi."
 - "ok", "thanks", "theek hai", emoji-only and similar acknowledgements need no answer → output exactly ${NO_REPLY}
 - "🎤 Voice message", "📷 Photo", "🎥 Video", "📄 …", "Sticker" are attachments you can't see or hear → say you got it and ask them to type the main point briefly.
-- If they ask for help but don't say with what exactly (e.g. "I need help with the POS"), ask ONE short question to find out what they need — don't just say you'll get back to them.
-- Only state facts written below (Business info and Products). When the Products list has what they're asking about, answer directly with the product name, price and link, and say if it's out of stock; if several fit, give up to 3 short options or ask which one they mean. Never invent products, prices, specs or stock.
-- For anything not covered below, don't guess and don't say yes or no — say you'll confirm and get back to them shortly.
+- If they ask for help but don't say with what (e.g. "I need help with the POS"), ask ONE short question to find out what they need.
+- Only state facts written below (Business info and Products). Never invent products, prices, specs, stock, links or policies.
+- Products: when the list below has what they ask about, answer right away from it — name, price, and the link if there is one. If they ask what's available or for options, list up to 3 (in stock first) with prices — don't ask them to pick a model first. Say clearly when something is out of stock and offer an in-stock option from the list instead. If they gave a budget and nothing they asked for fits it, say so honestly and offer the nearest options listed, with prices.
+- There is no "later" for you: you can't check anything, look anything up, or message them again on your own. Never say you'll check, confirm, look into it, find out, or get back to them.
+- If the facts below don't answer their question — or they want something only a person can do (place or change an order, payment, delivery date, a complaint, a discount) — say honestly that you don't have that detail here and someone from the team will reply in this chat, and put ${HANDOFF} at the very end of your message. When you DID answer from the facts, don't add ${HANDOFF} and don't mention the team.
+- Products marked "doesn't match: …" are NOT what they asked for (e.g. "doesn't match: gaming" = not a gaming laptop) — say so if you mention them.
+- WhatsApp formatting only: *bold* with single asterisks, plain links (no [text](link)), no headings or tables.
 - Never claim you checked, fixed or did something. Never mention being an AI or a bot.
 
 Business info:
 ${info || '(none given — do not state any facts about the business, its services or prices)'}
 ${opts.products == null ? '' : `
-Products from the store catalog that match their message (facts you may use):
+Products from the store catalog for their message (facts you may use):
 ${opts.products || '(no product in the catalog matched their message)'}
 `}
 Output only the message text, or ${NO_REPLY}.`;
@@ -184,13 +204,22 @@ Output only the message text, or ${NO_REPLY}.`;
   out = cleanReply(out);
   if (!out) throw new Error('empty reply from the AI');
   if (out.includes(NO_REPLY)) return null;
-  return out;
+  const text = cleanReply(out.replace(/\[\s*HANDOFF\s*\]/gi, ' ').replace(/[ \t]+\n/g, '\n').replace(/[ \t]{2,}/g, ' '));
+  const handoff = /\[\s*HANDOFF\s*\]/i.test(out) || PROMISE_RX.test(text) || PROMISE_AR.test(text);
+  return { text, handoff };
 }
 
-// Tidy a model reply: drop wrapping quotes, and collapse an answer the model wrote twice in a
-// row ("Hum check karte hain.Hum check karte hain." — seen with the configured model).
+// Tidy a model reply: drop wrapping quotes, turn Markdown into WhatsApp formatting (**bold** →
+// *bold*, [text](link) → text: link, no # headings), and collapse an answer the model wrote twice
+// in a row ("Hum check karte hain.Hum check karte hain." — seen with the configured model).
 function cleanReply(text) {
-  let t = String(text || '').trim().replace(/^["“](.*)["”]$/s, '$1').trim();
+  let t = String(text || '')
+    .trim()
+    .replace(/^["“](.*)["”]$/s, '$1')
+    .replace(/\*\*(.+?)\*\*/g, '*$1*')
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, (_, label, url) => (label.trim() === url ? url : `${label}: ${url}`))
+    .replace(/^#{1,6}\s+/gm, '')
+    .trim();
   for (let len = Math.floor(t.length / 2); len >= 8; len--) {
     const a = t.slice(0, len).trim();
     const b = t.slice(len).trim();

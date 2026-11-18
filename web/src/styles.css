@@ -2219,3 +2219,15 @@ tbody tr:hover {
 .cat-main, .prod-main { flex: 1; min-width: 0; }
 .cat-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .prod-list { max-height: 340px; overflow-y: auto; }
+
+.probe-out {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--surface-2);
+  border-radius: 8px;
+  color: inherit;
+}

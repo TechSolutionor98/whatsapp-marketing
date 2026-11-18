@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { ObjectId } from 'mongodb';
 import { db, audit, nowIso, setSetting, getSetting } from '../db/mongo.js';
-import { syncCatalog, findProducts, manualProduct } from '../catalog.js';
+import { syncCatalog, searchCatalog, productContext, manualProduct } from '../catalog.js';
 
 // Product catalogs for AI replies: API catalogs (a product URL, synced) and manual catalogs
 // (products typed in Settings). Each WhatsApp number picks one in Conversations → AI settings.
@@ -13,12 +13,40 @@ const idOf = (v) => {
     return null;
   }
 };
-const pub = (c, count) => ({ id: String(c._id), name: c.name, type: c.type, url: c.url || '', header: c.header || '', currency: c.currency || '', status: c.status || {}, count });
+const pub = (c, count, noLink = 0) => ({ id: String(c._id), name: c.name, type: c.type, url: c.url || '', header: c.header || '', link: c.link || '', currency: c.currency || '', status: c.status || {}, live: c.live || null, count, no_link: noLink });
+
+// Product page link for an API that sends no links: a pattern (https://shop.com/product/{slug}),
+// or the link of any one product page — we find which product it is and turn it into the pattern.
+async function linkPattern(input, catalogId) {
+  const v = String(input || '').trim();
+  if (!v) return '';
+  let u;
+  try {
+    u = new URL(v);
+  } catch {
+    throw new Error('Product page link must be a web address (https://…)');
+  }
+  if (/\{(slug|id|sku|handle)\}/.test(v)) return v;
+  const segs = u.pathname.split('/').filter(Boolean).map((x) => decodeURIComponent(x));
+  for (let i = segs.length - 1; i >= 0; i--) {
+    const seg = segs[i];
+    const p = await db.products().findOne({ catalog_id: String(catalogId), $or: [{ slug: seg }, { ext_id: seg }, { sku: seg }] }, { projection: { slug: 1, ext_id: 1, sku: 1 } });
+    if (!p) continue;
+    const key = p.slug === seg ? 'slug' : p.ext_id === seg ? 'id' : 'sku';
+    segs[i] = `{${key}}`;
+    return `${u.origin}/${segs.join('/')}`;
+  }
+  throw new Error("Couldn't match that link to one of the synced products — open any product on your site and paste its link (or a pattern like https://your-shop.com/product/{slug})");
+}
 
 catalogs.get('/', async (_req, res) => {
   const list = await db.catalogs().find().sort({ created_at: 1 }).toArray();
-  const counts = new Map((await db.products().aggregate([{ $group: { _id: '$catalog_id', n: { $sum: 1 } } }]).toArray()).map((r) => [r._id, r.n]));
-  res.json(list.map((c) => pub(c, counts.get(String(c._id)) || 0)));
+  const rows = await db
+    .products()
+    .aggregate([{ $group: { _id: '$catalog_id', n: { $sum: 1 }, noLink: { $sum: { $cond: [{ $in: [{ $ifNull: ['$url', ''] }, ['']] }, 1, 0] } } } }])
+    .toArray();
+  const counts = new Map(rows.map((r) => [r._id, r]));
+  res.json(list.map((c) => pub(c, counts.get(String(c._id))?.n || 0, counts.get(String(c._id))?.noLink || 0)));
 });
 
 catalogs.post('/', async (req, res) => {
@@ -30,8 +58,20 @@ catalogs.post('/', async (req, res) => {
   const r = await db.catalogs().insertOne(doc);
   audit('system', `Product catalog "${name}" added (${type})`);
   let sync = null;
-  if (type === 'api') sync = await syncCatalog(r.insertedId, 'added');
-  res.json({ id: String(r.insertedId), sync });
+  let linkError = null;
+  if (type === 'api') {
+    sync = await syncCatalog(r.insertedId, 'added');
+    // a product page link can only be matched once the products are in
+    if (String(b.link || '').trim() && !sync.error) {
+      try {
+        await db.catalogs().updateOne({ _id: r.insertedId }, { $set: { link: await linkPattern(b.link, r.insertedId) } });
+        sync = await syncCatalog(r.insertedId, 'added');
+      } catch (e) {
+        linkError = e.message;
+      }
+    }
+  }
+  res.json({ id: String(r.insertedId), sync, linkError });
 });
 
 catalogs.put('/:id', async (req, res) => {
@@ -43,12 +83,20 @@ catalogs.put('/:id', async (req, res) => {
   if (b.name !== undefined) set.name = String(b.name).trim() || cat.name;
   if (b.currency !== undefined) set.currency = String(b.currency).trim().toUpperCase();
   if (cat.type === 'api') {
-    if (b.url !== undefined) set.url = String(b.url).trim();
-    if (b.header !== undefined) set.header = String(b.header).trim();
+    if (b.url !== undefined && String(b.url).trim() !== (cat.url || '')) set.url = String(b.url).trim();
+    if (b.header !== undefined && String(b.header).trim() !== (cat.header || '')) set.header = String(b.header).trim();
+    if (b.link !== undefined && String(b.link).trim() !== (cat.link || '')) {
+      try {
+        set.link = await linkPattern(b.link, _id);
+      } catch (e) {
+        return res.status(400).json({ error: e.message });
+      }
+    }
   }
   await db.catalogs().updateOne({ _id }, { $set: set });
-  const sync = cat.type === 'api' && (set.url !== undefined || set.header !== undefined) ? await syncCatalog(_id, 'updated') : null;
-  res.json({ ok: true, sync });
+  const changed = set.url !== undefined || set.header !== undefined || set.link !== undefined;
+  const sync = cat.type === 'api' && changed ? await syncCatalog(_id, 'updated') : null;
+  res.json({ ok: true, sync, link: set.link });
 });
 
 catalogs.delete('/:id', async (req, res) => {
@@ -111,7 +159,10 @@ catalogs.delete('/:id/products/:pid', async (req, res) => {
   res.json({ ok: true });
 });
 
-// Try what the AI would find for a message in a catalog.
+// Try what the AI would find for a message in a catalog — the same text the AI is given.
 catalogs.get('/:id/search', async (req, res) => {
-  res.json(await findProducts(String(req.query.q || ''), 5, [String(req.params.id)]));
+  const q = String(req.query.q || '');
+  const ids = [String(req.params.id)];
+  const r = await searchCatalog({ latest: q, catalogIds: ids });
+  res.json({ products: r.items, budget: r.budget, context: await productContext({ latest: q, catalogIds: ids }) });
 });

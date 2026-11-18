@@ -74,9 +74,15 @@ async function ensureIndexes() {
   // version's global unique index if it exists.
   await col('products').dropIndex('ext_id_1').catch(() => {});
   await col('products').createIndex({ catalog_id: 1, ext_id: 1 }, { unique: true });
+  // Word search over name/sku/brand/category + tags/Arabic name (keywords). The first version had
+  // no keywords — replace that index when its fields differ (only one text index is allowed).
+  const productWeights = { brand: 5, category: 4, description: 1, keywords: 2, keywords_ar: 2, name: 10, sku: 8 };
+  const oldSearch = (await col('products').indexes().catch(() => [])).find((i) => i.name === 'product_search');
+  const sameWeights = (w = {}) => JSON.stringify(Object.keys(w).sort().map((k) => [k, w[k]])) === JSON.stringify(Object.entries(productWeights));
+  if (oldSearch && !sameWeights(oldSearch.weights)) await col('products').dropIndex('product_search').catch(() => {});
   await col('products').createIndex(
-    { name: 'text', brand: 'text', category: 'text', sku: 'text', description: 'text' },
-    { name: 'product_search', weights: { name: 10, sku: 8, brand: 5, category: 3, description: 1 }, default_language: 'none' }
+    { name: 'text', brand: 'text', category: 'text', sku: 'text', keywords: 'text', keywords_ar: 'text', description: 'text' },
+    { name: 'product_search', weights: productWeights, default_language: 'none' }
   );
   await col('audit_logs').createIndex({ created_at: -1 });
   await col('warmup_log').createIndex({ day_key: 1 });

@@ -204,8 +204,14 @@ function ProductCatalogs() {
                   {c.count} product{c.count === 1 ? '' : 's'}
                   {c.currency ? ` · ${c.currency}` : ''}
                   {c.type === 'api' && c.status?.at && !c.status?.error ? ` · synced ${new Date(c.status.at).toLocaleString()}` : ''}
+                  {c.type === 'api' && c.live?.ok ? ' · price & stock checked live before each reply' : ''}
                   {c.status?.error ? <span style={{ color: '#e5484d' }}> · last sync failed: {c.status.error}</span> : null}
                 </div>
+                {c.type === 'api' && c.count > 0 && (!c.currency || c.no_link === c.count) && (
+                  <div className="st-desc" style={{ color: '#b7791f' }}>
+                    {[!c.currency && 'no currency set', c.no_link === c.count && 'no product links'].filter(Boolean).join(' · ')} — click Edit to add {!c.currency && c.no_link === c.count ? 'them' : 'it'} so the AI can quote prices and send links
+                  </div>
+                )}
               </div>
               <div className="cat-actions">
                 <button className="btn sm" onClick={() => setOpenCat(c)}>Products</button>
@@ -219,7 +225,7 @@ function ProductCatalogs() {
               </div>
             </div>
           ))}
-          <button className="btn sm" style={{ marginTop: 8 }} onClick={() => setEdit({ name: '', type: 'manual', url: '', header: '', currency: '' })}>
+          <button className="btn sm" style={{ marginTop: 8 }} onClick={() => setEdit({ name: '', type: 'manual', url: '', header: '', link: '', currency: '' })}>
             <Icon.plus /> Add catalog
           </button>
         </>
@@ -240,6 +246,7 @@ function CatalogModal({ cat, onClose, onSaved }) {
     try {
       const r = isNew ? await api.post('/catalogs', c) : await api.put(`/catalogs/${cat.id}`, c);
       if (r.sync?.error) toast(`Saved, but the sync failed: ${r.sync.error}`, 'error');
+      else if (r.linkError) toast(`Saved, but the product link: ${r.linkError}`, 'error');
       else toast(r.sync ? `Saved — ${r.sync.count} products synced` : 'Catalog saved', 'success');
       onSaved();
     } catch (e) {
@@ -271,11 +278,19 @@ function CatalogModal({ cat, onClose, onSaved }) {
           <div className="field">
             <label>Product API URL</label>
             <input className="input" value={c.url} onChange={(e) => setC({ ...c, url: e.target.value })} placeholder="https://your-store.com/api/products" />
-            <div className="hint">Shopify <code>/products.json</code>, WooCommerce <code>/wp-json/wc/store/v1/products</code>, or any JSON product list. Synced now and every 6 hours.</div>
+            <div className="hint">Shopify <code>/products.json</code>, WooCommerce <code>/wp-json/wc/store/v1/products</code>, or any JSON product list. Synced now and every 30 minutes; price and stock are also checked live before the AI quotes a product (when your API gives one product at <code>…/products/&lt;id&gt;</code>).</div>
           </div>
           <div className="field">
             <label>API key header (optional)</label>
             <input className="input" value={c.header} onChange={(e) => setC({ ...c, header: e.target.value })} placeholder="Authorization: Bearer abc123" />
+          </div>
+          <div className="field">
+            <label>Product page link (if your API doesn't send links)</label>
+            <input className="input" value={c.link || ''} onChange={(e) => setC({ ...c, link: e.target.value })} placeholder="Paste the link of any one product on your website" />
+            <div className="hint">
+              Open any product on your site and paste its address — we work out the link for every product from it, so the
+              AI can send customers the right page. Or type a pattern like <code>https://your-store.com/product/{'{slug}'}</code>.
+            </div>
           </div>
         </>
       )}
@@ -295,7 +310,7 @@ function ProductsModal({ cat, onClose }) {
   const [q, setQ] = useState('');
   const [form, setForm] = useState(null); // product being added/edited
   const [probe, setProbe] = useState('');
-  const [probeHits, setProbeHits] = useState(null);
+  const [probeHits, setProbeHits] = useState(null); // { products, context }
   const manual = cat.type === 'manual';
   const load = () => api.get(`/catalogs/${cat.id}/products?q=${encodeURIComponent(q)}`).then(setItems).catch((e) => toast(e.message, 'error'));
   useEffect(() => {
@@ -374,7 +389,14 @@ function ProductsModal({ cat, onClose }) {
             </div>
             {probeHits && (
               <div className="hint" style={{ marginTop: 6 }}>
-                {probeHits.length ? `AI would see: ${probeHits.map((p) => `${p.name} (${price(p)})`).join(', ')}` : 'No product matched — the AI would say it will confirm and get back.'}
+                {probeHits.context ? (
+                  <>
+                    AI would see:
+                    <pre className="probe-out">{probeHits.context}</pre>
+                  </>
+                ) : (
+                  "No product matched — the AI would say it doesn't have that here and flag the chat for you (Conversations → Needs human)."
+                )}
               </div>
             )}
           </div>

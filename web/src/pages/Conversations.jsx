@@ -586,7 +586,11 @@ export default function Conversations({ go }) {
                       >
                         <PinIcon />
                       </button>
-                      {t.handoff === 1 && <span className="badge amber" style={{ padding: '0 6px' }}>handoff</span>}
+                      {t.handoff === 1 && (
+                        <span className="badge amber" style={{ padding: '0 6px' }} title={t.handoff_reason === 'ai' ? "The AI couldn't answer this — reply yourself, then Resolve" : 'Waiting for your reply'}>
+                          {t.handoff_reason === 'ai' ? 'needs you' : 'handoff'}
+                        </span>
+                      )}
                       {t.unread > 0 && <span className="unread-badge">{t.unread}</span>}
                     </span>
                   </div>
@@ -776,7 +780,7 @@ function AiReplySettings({ account, accountInfo, onClose, onSaved }) {
               </option>
               {catalogs.map((c) => (
                 <option key={c.id} value={c.id}>
-                  {c.name} ({c.type === 'api' ? 'API' : 'manual'}, {c.count} products)
+                  {c.name} ({c.type === 'api' ? 'API' : 'manual'}, {c.count} product{c.count === 1 ? '' : 's'})
                 </option>
               ))}
               <option value="none">Don't use products for this number</option>
