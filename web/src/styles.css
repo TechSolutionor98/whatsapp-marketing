@@ -2198,3 +2198,14 @@ tbody tr:hover {
   padding: 18px;
 }
 .msg-failed { color: #e5484d; font-weight: 700; font-size: 10.5px; }
+
+/* "Load older messages from your phone" — a quiet link inside the pill */
+.chat-older .link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #027eb5;
+  font: inherit;
+  cursor: pointer;
+}
+.chat-older .link-btn:hover { text-decoration: underline; }

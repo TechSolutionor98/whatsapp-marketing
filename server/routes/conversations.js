@@ -5,7 +5,7 @@ import { DATA_DIR } from '../config.js';
 import { db, audit, oid, pub, pubList, nowIso, dayKey, getSetting, setSetting } from '../db/mongo.js';
 import { emit } from '../events.js';
 import { sendText, sendToJid, isConnected, getWaState } from '../whatsapp/client.js';
-import { poolState, sendJidFrom, chatJidOf, isAccountConnected, startPoolAccount, removePoolAccount, setPoolLabel, setPoolAutoReply, downloadStoredMedia, canPostInGroup, phoneOfAccount } from '../whatsapp/pool.js';
+import { poolState, sendJidFrom, chatJidOf, isAccountConnected, startPoolAccount, removePoolAccount, setPoolLabel, setPoolAutoReply, downloadStoredMedia, canPostInGroup, phoneOfAccount, requestOlderMessages } from '../whatsapp/pool.js';
 
 const MEDIA_DIR = path.join(DATA_DIR, 'media_cache');
 const mediaInflight = new Map(); // one download per file even if the page asks twice
@@ -366,6 +366,45 @@ conversations.post('/:contactId/reply', async (req, res) => {
     audit('reply', `Human replied to ${contact.name || contact.phone}`);
     emit('message:out', { contactId: String(_id) });
     res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// "Load older messages from your phone" (like WhatsApp Web): ask this number's phone for
+// messages before the oldest one we have in this chat. They arrive as an ON_DEMAND history
+// batch and are stored by the normal import; the UI then loads them as an older page.
+conversations.post('/:contactId/older', async (req, res) => {
+  const _id = oid(req.params.contactId);
+  if (!_id) return res.status(400).json({ error: 'Bad id' });
+  const account = req.body?.account || 'main';
+  const contact = await db.contacts().findOne({ _id });
+  if (!contact) return res.status(404).json({ error: 'Not found' });
+  const oldest = (
+    await db
+      .messages()
+      .find({ contact_id: String(_id), wa_message_id: { $nin: [null, ''] }, ...(await accountMatch(account)) })
+      .sort({ created_at: 1, _id: 1 })
+      .limit(1)
+      .toArray()
+  )[0];
+  if (!oldest) return res.status(400).json({ error: 'No messages in this chat to load before yet' });
+  const { ids } = accountGroup(account);
+  const useMain = ids.includes('main') && isConnected();
+  const poolId = ids.find((id) => id !== 'main' && isAccountConnected(id));
+  if (!useMain && !poolId) return res.status(400).json({ error: 'That number is not connected' });
+  // The chat id exactly as WhatsApp knows it (stored per message since this update; older
+  // rows fall back to the contact's @lid / number / group jid).
+  const chatJid = oldest.chat_jid || (contact.is_group ? contact.jid : contact.lid || contact.jid || `${contact.phone}@s.whatsapp.net`);
+  try {
+    await requestOlderMessages(useMain ? 'main' : poolId, {
+      chatJid,
+      msgId: oldest.wa_message_id,
+      fromMe: oldest.direction === 'out',
+      tsMs: Date.parse(oldest.created_at),
+      count: 50,
+    });
+    res.json({ ok: true, before: oldest.created_at });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

@@ -210,6 +210,11 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
         const loggedOut = code === DisconnectReason.loggedOut || a.manualLogout;
         a.sock = null;
         a.starting = false;
+        // Why it dropped (real data: Suppo dropped at 07:02:38 and the reason was never logged).
+        console.log(`  [linked ${a.me?.phone || id}] connection closed (code ${code ?? '?'})`);
+        if (code !== DisconnectReason.restartRequired && !a.manualLogout && (a.role || 'warmup') === 'conversation') {
+          audit('connection', `Linked number ${a.me?.phone ? '+' + a.me.phone : ''} disconnected (code ${code ?? '?'})${loggedOut ? ' — logged out on the phone, scan again' : ' — reconnecting'}`, { level: 'warn' });
+        }
         if (loggedOut) {
           try {
             fs.rmSync(authDir(id), { recursive: true, force: true });
@@ -248,7 +253,8 @@ export function attachConversationHandlers(id, sock) {
   sock.ev.on('messaging-history.set', (ev) => {
     // Stay "syncing" until WhatsApp marks the FINAL batch (isLatest); progress hits 100 on
     // every batch, so it can't tell us the sync is finished. Quiet-gap fallback: 20 s.
-    setSyncing(id, !ev.isLatest, 20000);
+    const onDemand = ev.syncType === proto.HistorySync.HistorySyncType.ON_DEMAND;
+    if (!onDemand) setSyncing(id, !ev.isLatest, 20000);
     audit('connection', `History received${id === 'main' ? ' (main number)' : ''} (type=${ev.syncType ?? '?'}, latest=${ev.isLatest}, progress=${ev.progress ?? '?'}): ${ev.messages?.length || 0} messages, ${ev.chats?.length || 0} chats, ${ev.contacts?.length || 0} contacts`, { level: 'info' });
     // Names/lid pairs in this batch first (PUSH_NAME batches have contacts but no
     // messages), then the messages — serialized with the other identity work.
@@ -675,6 +681,9 @@ function onHistoryNotification(id, notif) {
   // Baileys 6.7 never reads that field and tries to download it, failing with
   // "Cannot derive from empty media key", so those chats were lost. Import it ourselves.
   const inline = notif?.initialHistBootstrapInlinePayload;
+  // Type 1 (INITIAL_STATUS_V3) is the Status-updates feed, not chats — real data showed it
+  // failing to decode ("missing required 'id'"); skip it rather than log noise.
+  if (inline?.length && notif.syncType === proto.HistorySync.HistorySyncType.INITIAL_STATUS_V3) return;
   if (inline?.length) {
     a.histSeen ||= new Set();
     const key = `inline:${notif.syncType}:${notif.chunkOrder ?? ''}:${inline.length}`;
@@ -1125,6 +1134,16 @@ async function poolAutoReply(accountId, contact, phone) {
   }
 }
 
+// Ask the phone for messages older than the oldest one we have in a chat — WhatsApp Web's
+// "Click here to get older messages from your phone" (Baileys fetchMessageHistory →
+// HISTORY_SYNC_ON_DEMAND). The phone answers with an ON_DEMAND history batch, which the
+// normal history import stores; the UI then loads them like any older page.
+export async function requestOlderMessages(id, { chatJid, msgId, fromMe, tsMs, count = 50 }) {
+  const a = ctxOf(id);
+  if (!a?.sock || a.status !== 'connected') throw new Error('That number is not connected');
+  await a.sock.fetchMessageHistory(count, { remoteJid: chatJid, fromMe: !!fromMe, id: msgId }, tsMs);
+}
+
 // The main number's live messages (client.js) — same handling as linked numbers.
 export function ingestMain(ev) {
   return ingestPool('main', ev);
@@ -1161,7 +1180,7 @@ async function ingestPool(accountId, { messages, type }) {
         if (!gc || !body) continue;
         const r = await db.messages().updateOne(
           { wa_message_id: id },
-          { $set: { account_phone: myPhone, ...mediaFieldsOf(msg) }, $setOnInsert: { contact_id: String(gc._id), campaign_id: null, account_id: accountId, direction: msg.key.fromMe ? 'out' : 'in', body, sender: msg.key.fromMe ? '' : msg.pushName || '', status: msg.key.fromMe ? 'sent' : 'read', wa_message_id: id, synced: 1, created_at: msgTime(msg), day_key: dayKey() } },
+          { $set: { account_phone: myPhone, chat_jid: msg.key?.remoteJid || null, ...mediaFieldsOf(msg) }, $setOnInsert: { contact_id: String(gc._id), campaign_id: null, account_id: accountId, direction: msg.key.fromMe ? 'out' : 'in', body, sender: msg.key.fromMe ? '' : msg.pushName || '', status: msg.key.fromMe ? 'sent' : 'read', wa_message_id: id, synced: 1, created_at: msgTime(msg), day_key: dayKey() } },
           { upsert: true }
         );
         if (r.upsertedCount) {
@@ -1200,7 +1219,7 @@ async function ingestPool(accountId, { messages, type }) {
         if (!body) continue;
         const r = await db.messages().updateOne(
           { wa_message_id: id },
-          { $set: { account_phone: myPhone, ...mediaFieldsOf(msg) }, $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'out', body, status: 'sent', wa_message_id: id, created_at: msgTime(msg), day_key: dayKey() } },
+          { $set: { account_phone: myPhone, chat_jid: msg.key?.remoteJid || null, ...mediaFieldsOf(msg) }, $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'out', body, status: 'sent', wa_message_id: id, created_at: msgTime(msg), day_key: dayKey() } },
           { upsert: true }
         );
         if (r.upsertedCount) {
@@ -1213,7 +1232,7 @@ async function ingestPool(accountId, { messages, type }) {
       if (!body) continue;
       const r = await db.messages().updateOne(
         { wa_message_id: id },
-        { $set: { account_phone: myPhone, ...mediaFieldsOf(msg) }, $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'in', body, status: 'read', wa_message_id: id, created_at: msgTime(msg), day_key: dayKey() } },
+        { $set: { account_phone: myPhone, chat_jid: msg.key?.remoteJid || null, ...mediaFieldsOf(msg) }, $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'in', body, status: 'read', wa_message_id: id, created_at: msgTime(msg), day_key: dayKey() } },
         { upsert: true }
       );
       if (!r.upsertedCount) continue; // already stored
@@ -1247,6 +1266,28 @@ async function ingestPool(accountId, { messages, type }) {
 }
 
 // Import a conversation number's existing chat history (1:1 + groups, excluding our own numbers).
+// bulkWrite in chunks with one retry per chunk. Returns how many upserts were saved and the
+// last error (if any chunk still failed) — never silently drops a whole batch.
+async function writeChunked(collection, ops, ordered, size = 500) {
+  let saved = 0;
+  let error = null;
+  for (let i = 0; i < ops.length; i += size) {
+    const chunk = ops.slice(i, i + size);
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        saved += (await collection.bulkWrite(chunk, { ordered })).upsertedCount || 0;
+        break;
+      } catch (err) {
+        if (attempt === 2) {
+          saved += err?.result?.upsertedCount || 0;
+          error = err;
+        } else await new Promise((r) => setTimeout(r, 800));
+      }
+    }
+  }
+  return { saved, error };
+}
+
 async function ingestPoolHistory(accountId, { messages, chats }) {
   if (!messages?.length) return;
   // Note: the batch's contacts were already applied (names + lid pairs) by the caller.
@@ -1334,7 +1375,7 @@ async function ingestPoolHistory(accountId, { messages, chats }) {
         updateOne: {
           filter: { wa_message_id: id },
           update: {
-            $set: { account_phone: myPhone, ...mediaFieldsOf(msg) },
+            $set: { account_phone: myPhone, chat_jid: msg.key?.remoteJid || null, ...mediaFieldsOf(msg) },
             $setOnInsert: { contact_id: contactId, campaign_id: null, account_id: accountId, direction: dir, body, sender, status: dir === 'out' ? 'sent' : 'read', wa_message_id: id, synced: 1, created_at: ts, day_key: ts.slice(0, 10) },
           },
           upsert: true,
@@ -1342,13 +1383,11 @@ async function ingestPoolHistory(accountId, { messages, chats }) {
       });
     }
   }
-  let imported = 0;
-  if (ops.length) {
-    try {
-      imported = (await db.messages().bulkWrite(ops, { ordered: false })).upsertedCount || 0;
-    } catch (err) {
-      imported = err?.result?.upsertedCount || err?.result?.nUpserted || 0; // keep the ones that did save
-    }
+  // Write in chunks (a 4,550-message batch once saved nothing, silently), retrying a failed
+  // chunk once — safe because every op is an upsert keyed by the WhatsApp message id.
+  const { saved: imported, error: writeErr } = await writeChunked(db.messages(), ops, false);
+  if (writeErr) {
+    audit('connection', `Saving history messages failed for ${ops.length - imported} of ${ops.length}: ${writeErr.message}${writeErr.code ? ` (code ${writeErr.code})` : ''}`, { level: 'error' });
   }
   // 3) Reactions, in order, after their target messages exist (one write).
   if (reactions.length) {
@@ -1357,7 +1396,8 @@ async function ingestPoolHistory(accountId, { messages, chats }) {
       rops.push({ updateOne: { filter: { wa_message_id: r.target }, update: { $pull: { reactions: { from: r.from } } } } });
       if (r.emoji) rops.push({ updateOne: { filter: { wa_message_id: r.target }, update: { $push: { reactions: { emoji: r.emoji, from: r.from } } } } });
     }
-    await db.messages().bulkWrite(rops, { ordered: true }).catch(() => {});
+    const { error: rErr } = await writeChunked(db.messages(), rops, true);
+    if (rErr) audit('connection', `Saving reactions failed: ${rErr.message}`, { level: 'warn' });
   }
   if (imported) {
     audit('connection', `Synced ${imported} messages for a conversation number`, { level: 'success' });

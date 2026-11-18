@@ -174,6 +174,7 @@ export default function Conversations({ go }) {
   const stickRef = useRef(true); // keep the chat pinned to its newest message while at the bottom
   const restoreRef = useRef(null); // scroll position to restore after prepending older messages
   const olderBusy = useRef(false);
+  const [phoneOlder, setPhoneOlder] = useState(''); // '' | 'loading' | 'none'
 
   const loadAccounts = async () => {
     try {
@@ -279,6 +280,43 @@ export default function Conversations({ go }) {
     }
   };
 
+  // Everything stored is shown → ask the phone for older messages (WhatsApp Web's "get older
+  // messages from your phone"), then wait for them to land and add them on top.
+  const loadFromPhone = async () => {
+    if (!thread?.messages.length || phoneOlder === 'loading') return;
+    const cid = thread.contact.id;
+    const before = thread.messages[0].created_at;
+    setPhoneOlder('loading');
+    try {
+      await api.post(`/conversations/${cid}/older`, { account });
+    } catch (e) {
+      setPhoneOlder('');
+      toast(e.message, 'error');
+      return;
+    }
+    for (let i = 0; i < 14; i++) {
+      await new Promise((r) => setTimeout(r, 1500));
+      let t;
+      try {
+        t = await api.get(`/conversations/${cid}?account=${account}&before=${encodeURIComponent(before)}`);
+      } catch {
+        continue;
+      }
+      if (t.messages.length) {
+        const el = msgsRef.current;
+        if (el) restoreRef.current = { h: el.scrollHeight, top: el.scrollTop };
+        setThread((p) => {
+          if (!p || p.contact.id !== cid) return p;
+          const ids = new Set(p.messages.map((m) => m.id));
+          return { ...p, messages: [...t.messages.filter((m) => !ids.has(m.id)), ...p.messages], has_more: t.has_more };
+        });
+        setPhoneOlder('');
+        return;
+      }
+    }
+    setPhoneOlder('none');
+  };
+
   const onMsgsScroll = (e) => {
     const el = e.currentTarget;
     stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; // at the bottom?
@@ -290,15 +328,23 @@ export default function Conversations({ go }) {
     if (el && stickRef.current) el.scrollTop = el.scrollHeight;
   };
 
+  // After every update: keep the view where the reader is. Older messages added above (scroll
+  // up, "from your phone", or a live refresh that brought them in) must not make it jump.
+  const lastLayoutRef = useRef({ first: null, h: 0 });
   useLayoutEffect(() => {
     const el = msgsRef.current;
     if (!el || !thread) return;
+    const first = thread.messages[0]?.id || null;
+    const prev = lastLayoutRef.current;
     if (restoreRef.current) {
       el.scrollTop = el.scrollHeight - restoreRef.current.h + restoreRef.current.top; // older page prepended
       restoreRef.current = null;
     } else if (stickRef.current) {
       el.scrollTop = el.scrollHeight;
+    } else if (prev.first && first !== prev.first && thread.messages.some((m) => m.id === prev.first)) {
+      el.scrollTop += el.scrollHeight - prev.h; // messages appeared above → shift by their height
     }
+    lastLayoutRef.current = { first, h: el.scrollHeight };
   }, [thread]);
 
   useEffect(() => {
@@ -310,6 +356,7 @@ export default function Conversations({ go }) {
     setThread(null);
   }, [account]);
   useEffect(() => {
+    setPhoneOlder('');
     loadThread(active, { reset: true });
   }, [active]);
 
@@ -563,6 +610,19 @@ export default function Conversations({ go }) {
 
               <div className="chat-msgs" ref={msgsRef} onScroll={onMsgsScroll}>
                 {thread.has_more ? <div className="chat-older"><span className="wa-spin" /> Loading older messages…</div> : null}
+                {!thread.has_more && thread.messages.length > 0 ? (
+                  <div className="chat-older">
+                    {phoneOlder === 'loading' ? (
+                      <><span className="wa-spin" /> Getting older messages from your phone…</>
+                    ) : (
+                      <button className="link-btn" onClick={loadFromPhone}>
+                        {phoneOlder === 'none'
+                          ? 'Nothing older came from the phone — keep WhatsApp open on it and try again'
+                          : 'Load older messages from your phone'}
+                      </button>
+                    )}
+                  </div>
+                ) : null}
                 {thread.messages.map((m, i) => {
                   const prev = thread.messages[i - 1];
                   const showDay = !prev || !sameDay(asDate(prev.created_at), asDate(m.created_at));
