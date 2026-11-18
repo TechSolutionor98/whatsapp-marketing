@@ -73,9 +73,14 @@ export async function connectWhatsApp() {
   setStatus('connecting', { qr: null, lastError: null });
 
   try {
+    // Step log (server console / pm2 logs) — shows exactly where a stuck connection stops.
+    const step = (m) => console.log(`  [main WhatsApp] ${m}`);
+    step('connecting…');
     fs.mkdirSync(WA_AUTH_DIR, { recursive: true });
     const { state: authState, saveCreds } = await useMultiFileAuthState(WA_AUTH_DIR);
-    const version = await getWaVersion(); // cached — no HTTP fetch before every QR
+    step(`login data loaded (${authState.creds?.me?.id ? 'existing session' : 'new — QR next'})`);
+    const version = await getWaVersion(); // cached, with a hard timeout — never blocks
+    step(`WhatsApp version ${version ? version.join('.') : '(Baileys default)'}`);
 
     sock = makeWASocket({
       version,
@@ -108,6 +113,7 @@ export async function connectWhatsApp() {
 
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
+      if (connection || qr) step(`connection: ${connection || 'qr'}${lastDisconnect?.error ? ` (code ${lastDisconnect.error?.output?.statusCode ?? '?'})` : ''}`);
 
       if (qr) {
         state.qr = await QRCode.toDataURL(qr, { margin: 1, width: 300 });
