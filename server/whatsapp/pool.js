@@ -15,6 +15,7 @@ import makeWASocket, {
   jidNormalizedUser,
   proto,
 } from 'baileys';
+import { ObjectId } from 'mongodb';
 import { inflate } from 'node:zlib';
 import { promisify } from 'node:util';
 
@@ -26,6 +27,7 @@ import { emit } from '../events.js';
 import { attachReceipts } from '../receipts.js';
 import { aiAvailable, conversationReply } from '../ai.js';
 import { getWaState } from './client.js';
+import { getWaVersion } from './version.js';
 import { jidToPhone, normalizePhone, randInt } from '../utils.js';
 
 const POOL_DIR = path.join(DATA_DIR, 'wa_pool');
@@ -113,13 +115,16 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
   try {
     fs.mkdirSync(authDir(id), { recursive: true });
     const { state, saveCreds } = await useMultiFileAuthState(authDir(id));
-    const { version } = await fetchLatestBaileysVersion();
+    const version = await getWaVersion(); // cached — no HTTP fetch before every QR
     const isConv = (a.role || role) === 'conversation';
     const sock = makeWASocket({
       version,
       auth: state,
       logger,
-      browser: Browsers.appropriate('Desktop'),
+      // Pinned (not Browsers.appropriate, which names the host OS): with syncFullHistory on,
+      // WhatsApp now closes the connection with 428 before sending a QR when the client says
+      // 'Mac OS' or 'Windows' (measured); 'Ubuntu' — what the Linux VPS already sends — works.
+      browser: Browsers.ubuntu('Desktop'),
       printQRInTerminal: false,
       markOnlineOnConnect: false,
       // Conversation numbers need their real chat history (WhatsApp only pushes it on a
@@ -240,7 +245,11 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
           emitPool();
           // Preserve role + auto-reply on reconnect (otherwise a conversation number
           // silently reverts to a warm-up number and vanishes from Conversations).
-          a.reconnectTimer = setTimeout(() => startPoolAccount(id, a.label, a.role, a.autoReply), 3000);
+          // 515 = WhatsApp's "restart required", sent right after a QR is scanned: reconnect
+          // almost immediately instead of making every new link wait 3 s (250 ms lets the
+          // just-saved login finish writing to disk first).
+          const wait = code === DisconnectReason.restartRequired ? 250 : 3000;
+          a.reconnectTimer = setTimeout(() => startPoolAccount(id, a.label, a.role, a.autoReply), wait);
         }
       }
     });
@@ -525,17 +534,20 @@ async function applyContactBatch(list) {
   if (!existing.length) return 0;
   const byPhone = new Map(existing.map((x) => [x.phone, x]));
   const byLid = new Map(existing.filter((x) => x.lid).map((x) => [x.lid, x]));
+  const w = contactWriter();
   let fixed = 0;
   for (const e of entries) {
-    try {
-      if (await reconcileContact(e, byPhone, byLid)) fixed++;
-    } catch {}
+    if (reconcileContact(e, byPhone, byLid, w)) fixed++;
   }
-  if (fixed) emit('message:in', {});
+  if (fixed) {
+    await w.flush(); // one round of writes for the whole batch
+    emit('message:in', {});
+  }
   return fixed;
 }
 
-async function reconcileContact(e, byPhone, byLid) {
+// Decides in memory what to change for one contact entry; writes go through `w` (batched).
+function reconcileContact(e, byPhone, byLid, w) {
   const lidNum = e.lid ? jidToPhone(e.lid) : null;
   const pnNum = e.pn ? jidToPhone(e.pn) : null;
   let lidC = e.lid ? byLid.get(e.lid) || byPhone.get(lidNum) || null : null;
@@ -544,16 +556,15 @@ async function reconcileContact(e, byPhone, byLid) {
 
   // Same person stored twice (once by @lid, once by real number) → merge into the number.
   if (lidC && pnC) {
-    await db.messages().updateMany({ contact_id: String(lidC._id) }, { $set: { contact_id: String(pnC._id) } });
+    w.moveMessages(lidC._id, pnC._id);
     const set = { lid: e.lid };
     const nm = e.saved || pnC.name || lidC.name || e.push;
     if (nm && nm !== pnC.name) set.name = nm;
     if (lidC.pinned) set.pinned = 1;
-    const upd = { $set: set, $unset: { lid_only: '' } };
-    if (lidC.unread) upd.$inc = { unread: lidC.unread };
-    await db.contacts().updateOne({ _id: pnC._id }, upd);
-    await db.contacts().deleteOne({ _id: lidC._id });
+    w.update(pnC, { set, unset: { lid_only: '' }, inc: lidC.unread ? { unread: lidC.unread } : {} });
+    w.remove(lidC);
     Object.assign(pnC, set);
+    delete pnC.lid_only;
     byPhone.delete(lidC.phone);
     byLid.set(e.lid, pnC);
     return true;
@@ -578,12 +589,11 @@ async function reconcileContact(e, byPhone, byLid) {
   if (e.saved && target.name !== e.saved) set.name = e.saved; // address-book name wins
   else if (!e.saved && e.push && !target.name) set.name = e.push;
   if (!Object.keys(set).length) return false;
-  const upd = { $set: set };
-  if (resolved) upd.$unset = { lid_only: '' };
-  await db.contacts().updateOne({ _id: target._id }, upd);
+  w.update(target, { set, unset: resolved ? { lid_only: '' } : {} });
   if (resolved) {
     byPhone.delete(lidC.phone);
     byPhone.set(pnNum, target);
+    delete target.lid_only;
   }
   Object.assign(target, set);
   return true;
@@ -851,10 +861,115 @@ function ourPhones() {
   return set;
 }
 
-// Find/create a contact for a pool chat. Groups by jid. 1:1 by real number — or, when
-// WhatsApp only gave us an @lid, by that lid (flagged lid_only so the UI never shows the
-// lid as if it were a phone number).
-async function upsertPoolChat({ phone, jid, isGroup = false, name = '', lid = null }) {
+// ---- Contact storage, batched ----
+// Every DB call is a round trip to Atlas (~64 ms measured). Looking contacts up and writing
+// them one chat at a time made a 100-chat history batch take ~25 s before anything showed.
+// So: one lookup for a whole batch, decide everything in memory, then one write.
+
+// Index of stored contacts relevant to a batch (by number, by @lid, by jid).
+async function loadContactIndex({ phones = [], lids = [], jids = [] }) {
+  const or = [];
+  const p = [...new Set(phones.filter(Boolean))];
+  const l = [...new Set(lids.filter(Boolean))];
+  const j = [...new Set(jids.filter(Boolean))];
+  if (p.length) or.push({ phone: { $in: p } });
+  if (l.length) or.push({ lid: { $in: l } });
+  if (j.length) or.push({ jid: { $in: j } });
+  const docs = or.length ? await db.contacts().find({ $or: or }).toArray() : [];
+  const idx = { byPhone: new Map(), byLid: new Map(), byJid: new Map() };
+  for (const d of docs) indexContact(idx, d);
+  return idx;
+}
+function indexContact(idx, d) {
+  if (d.phone) idx.byPhone.set(d.phone, d);
+  if (d.lid) idx.byLid.set(d.lid, d);
+  if (d.jid) idx.byJid.set(d.jid, d);
+}
+
+// Collects contact inserts/updates/deletes/merges for a batch and writes them in one go.
+// Updates to the same contact are folded into a single operation.
+function contactWriter() {
+  const inserts = [];
+  const insertSet = new Set();
+  const updates = new Map(); // id -> { _id, set, unset, inc }
+  const deletes = new Map(); // id -> _id
+  const moves = []; // [fromContactId, toContactId] — messages of a merged duplicate
+  return {
+    insert(doc) {
+      inserts.push(doc);
+      insertSet.add(doc);
+    },
+    update(doc, { set = {}, unset = {}, inc = {} }) {
+      if (insertSet.has(doc)) {
+        // not written yet → just change the document we're about to insert
+        Object.assign(doc, set);
+        for (const f of Object.keys(unset)) delete doc[f];
+        for (const [f, v] of Object.entries(inc)) doc[f] = (doc[f] || 0) + v;
+        return;
+      }
+      const k = String(doc._id);
+      const u = updates.get(k) || { _id: doc._id, set: {}, unset: {}, inc: {} };
+      for (const [f, v] of Object.entries(set)) {
+        u.set[f] = v;
+        delete u.unset[f];
+      }
+      for (const f of Object.keys(unset)) {
+        u.unset[f] = '';
+        delete u.set[f];
+      }
+      for (const [f, v] of Object.entries(inc)) u.inc[f] = (u.inc[f] || 0) + v;
+      updates.set(k, u);
+    },
+    remove(doc) {
+      deletes.set(String(doc._id), doc._id);
+      updates.delete(String(doc._id));
+    },
+    moveMessages(fromId, toId) {
+      moves.push([String(fromId), String(toId)]);
+    },
+    // Returns a map of planned-new-contact id → real id, for the rare case where another
+    // writer (e.g. a live message) created the same number between our lookup and insert.
+    async flush() {
+      const remap = new Map();
+      if (inserts.length) {
+        try {
+          await db.contacts().insertMany(inserts, { ordered: false });
+        } catch (e) {
+          const errs = [].concat(e?.writeErrors || []);
+          if (!errs.length || errs.some((w) => (w.code ?? w.err?.code) !== 11000)) throw e;
+          const lost = errs.map((w) => inserts[w.index]).filter(Boolean);
+          const found = await db.contacts().find({ $or: [{ phone: { $in: lost.map((d) => d.phone) } }, { jid: { $in: lost.map((d) => d.jid).filter(Boolean) } }] }).toArray();
+          for (const d of lost) {
+            const real = found.find((f) => f.phone === d.phone || (d.is_group && f.jid === d.jid));
+            if (real) remap.set(String(d._id), real._id);
+          }
+        }
+      }
+      if (moves.length) {
+        await db.messages().bulkWrite(moves.map(([from, to]) => ({ updateMany: { filter: { contact_id: from }, update: { $set: { contact_id: to } } } })), { ordered: true });
+      }
+      const ops = [];
+      for (const u of updates.values()) {
+        if (deletes.has(String(u._id))) continue;
+        const upd = {};
+        if (Object.keys(u.set).length) upd.$set = u.set;
+        if (Object.keys(u.unset).length) upd.$unset = u.unset;
+        if (Object.keys(u.inc).length) upd.$inc = u.inc;
+        if (Object.keys(upd).length) ops.push({ updateOne: { filter: { _id: u._id }, update: upd } });
+      }
+      for (const _id of deletes.values()) ops.push({ deleteOne: { filter: { _id } } });
+      // A number change can hit the unique index if another row already has it — skip just that one.
+      if (ops.length) await db.contacts().bulkWrite(ops, { ordered: false }).catch(() => {});
+      return remap;
+    },
+  };
+}
+
+// Decide (in memory) which stored contact a chat belongs to, or create one. Groups by jid.
+// 1:1 by real number — or, when WhatsApp only gave us an @lid, by that lid (flagged lid_only
+// so the UI never shows the lid as if it were a phone number). Same rules as before; only
+// the database access is batched.
+function planChat(idx, w, { phone, jid, isGroup = false, name = '', lid = null }) {
   const base = {
     tags: isGroup ? 'group' : 'whatsapp',
     status: 'active',
@@ -867,63 +982,66 @@ async function upsertPoolChat({ phone, jid, isGroup = false, name = '', lid = nu
   };
 
   if (isGroup) {
-    const existing = await db.contacts().findOne({ jid });
+    const existing = idx.byJid.get(jid);
     if (existing) {
       if (name && existing.name !== name) {
-        await db.contacts().updateOne({ _id: existing._id }, { $set: { name } });
+        w.update(existing, { set: { name } });
         existing.name = name;
       }
       return existing;
     }
-    const doc = { ...base, name: name || '', phone: jid.split('@')[0], jid, is_group: 1 };
-    try {
-      const r = await db.contacts().insertOne(doc);
-      return { _id: r.insertedId, ...doc };
-    } catch {
-      return await db.contacts().findOne({ jid });
-    }
+    const doc = { _id: new ObjectId(), ...base, name: name || '', phone: jid.split('@')[0], jid, is_group: 1 };
+    w.insert(doc);
+    indexContact(idx, doc);
+    return doc;
   }
 
   const lidNum = lid ? jidToPhone(lid) : null;
   const resolved = !!phone && phone !== lidNum; // we know the real number
-  let existing = null;
-  if (resolved) existing = await db.contacts().findOne({ phone });
-  if (!existing && lid) existing = await db.contacts().findOne({ lid });
-  if (!existing && lidNum) existing = await db.contacts().findOne({ phone: lidNum }); // older rows
+  const existing = (resolved && idx.byPhone.get(phone)) || (lid && idx.byLid.get(lid)) || (lidNum && idx.byPhone.get(lidNum)) || null;
 
   if (existing) {
     const set = {};
-    const upd = {};
+    const unset = {};
     if (name && !existing.name) set.name = name;
     if (lid && !existing.lid) set.lid = lid;
     if (resolved && existing.phone !== phone) {
       set.phone = phone;
       set.jid = `${phone}@s.whatsapp.net`;
-      upd.$unset = { lid_only: '' };
+      unset.lid_only = '';
     } else if (!resolved && lid && !existing.lid_only && existing.phone === lidNum) {
       set.lid_only = 1;
       set.jid = lid;
     }
     if (Object.keys(set).length) {
-      upd.$set = set;
-      try {
-        await db.contacts().updateOne({ _id: existing._id }, upd);
-        Object.assign(existing, set);
-      } catch {}
+      w.update(existing, { set, unset });
+      Object.assign(existing, set);
+      if (unset.lid_only !== undefined) delete existing.lid_only;
+      indexContact(idx, existing);
     }
     return existing;
   }
 
   const doc = resolved
-    ? { ...base, name: name || '', phone, jid: `${phone}@s.whatsapp.net`, is_group: 0, ...(lid ? { lid } : {}) }
-    : { ...base, name: name || '', phone: lidNum, jid: lid, lid, lid_only: 1, is_group: 0 };
+    ? { _id: new ObjectId(), ...base, name: name || '', phone, jid: `${phone}@s.whatsapp.net`, is_group: 0, ...(lid ? { lid } : {}) }
+    : { _id: new ObjectId(), ...base, name: name || '', phone: lidNum, jid: lid, lid, lid_only: 1, is_group: 0 };
   if (!doc.phone) return null;
-  try {
-    const r = await db.contacts().insertOne(doc);
-    return { _id: r.insertedId, ...doc };
-  } catch {
-    return await db.contacts().findOne({ phone: doc.phone });
-  }
+  w.insert(doc);
+  indexContact(idx, doc);
+  return doc;
+}
+
+// Find/create one chat's contact (live messages): one lookup + at most one write.
+async function upsertPoolChat(spec) {
+  const lid = spec.lid || null;
+  const idx = await loadContactIndex(
+    spec.isGroup ? { jids: [spec.jid] } : { phones: [spec.phone, lid && jidToPhone(lid)], lids: [lid] }
+  );
+  const w = contactWriter();
+  const c = planChat(idx, w, spec);
+  if (!c) return null;
+  const remap = await w.flush();
+  return remap.has(String(c._id)) ? await db.contacts().findOne({ _id: remap.get(String(c._id)) }) : c;
 }
 
 async function poolAutoReply(accountId, contact, phone) {
@@ -1127,40 +1245,68 @@ async function ingestPoolHistory(accountId, { messages, chats }) {
   // to its tab even if the number is removed and re-added later (which changes account_id).
   const myPhone = accounts.get(accountId)?.me?.phone || null;
 
-  let imported = 0;
-  for (const [chatJid, { msgs, isGroup, phone, lid, name }] of byChat) {
-    const contact = isGroup
-      ? await upsertPoolChat({ jid: chatJid, isGroup: true, name })
-      : await upsertPoolChat({ phone, lid, name });
-    if (!contact || contact.warmup === 1) continue;
+  // 1) Every chat's contact: one lookup for the whole batch, decided in memory, one write.
+  const chatsList = [...byChat];
+  const idx = await loadContactIndex({
+    jids: chatsList.filter(([, e]) => e.isGroup).map(([k]) => k),
+    phones: chatsList.flatMap(([, e]) => (e.isGroup ? [] : [e.phone, e.lid && jidToPhone(e.lid)])),
+    lids: chatsList.map(([, e]) => e.lid),
+  });
+  const w = contactWriter();
+  const planned = chatsList.map(([chatJid, e]) => ({
+    e,
+    contact: e.isGroup ? planChat(idx, w, { jid: chatJid, isGroup: true, name: e.name }) : planChat(idx, w, { phone: e.phone, lid: e.lid, name: e.name }),
+  }));
+  const remap = await w.flush();
 
-    const ops = [];
-    for (const msg of msgs) {
+  // 2) All messages of the batch in one write (dedupe by WhatsApp id → safe to repeat).
+  const ops = [];
+  const reactions = [];
+  for (const { e, contact } of planned) {
+    if (!contact || contact.warmup === 1) continue;
+    const contactId = String(remap.get(String(contact._id)) || contact._id);
+    for (const msg of e.msgs) {
       const id = msg.key?.id;
       if (!id) continue;
+      const r = normalizeMessageContent(msg.message)?.reactionMessage;
+      if (r?.key?.id) {
+        reactions.push({ target: r.key.id, emoji: r.text || '', from: msg.key.fromMe ? 'me' : msg.key.participant || msg.key.remoteJid || '' });
+        continue;
+      }
       const body = textOf(msg).trim();
       if (!body) continue;
       const tsNum = Number(msg.messageTimestamp) || 0;
       const ts = tsNum ? new Date(tsNum * 1000).toISOString() : nowIso();
       const dir = msg.key.fromMe ? 'out' : 'in';
-      const sender = isGroup && !msg.key.fromMe ? msg.pushName || '' : '';
+      const sender = e.isGroup && !msg.key.fromMe ? msg.pushName || '' : '';
       ops.push({
         updateOne: {
           filter: { wa_message_id: id },
           update: {
             $set: { account_phone: myPhone, ...mediaFieldsOf(msg) },
-            $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: dir, body, sender, status: dir === 'out' ? 'sent' : 'read', wa_message_id: id, synced: 1, created_at: ts, day_key: ts.slice(0, 10) },
+            $setOnInsert: { contact_id: contactId, campaign_id: null, account_id: accountId, direction: dir, body, sender, status: dir === 'out' ? 'sent' : 'read', wa_message_id: id, synced: 1, created_at: ts, day_key: ts.slice(0, 10) },
           },
           upsert: true,
         },
       });
     }
-    if (ops.length) {
-      const r = await db.messages().bulkWrite(ops, { ordered: false }).catch(() => null);
-      if (r) imported += r.upsertedCount || 0;
+  }
+  let imported = 0;
+  if (ops.length) {
+    try {
+      imported = (await db.messages().bulkWrite(ops, { ordered: false })).upsertedCount || 0;
+    } catch (err) {
+      imported = err?.result?.upsertedCount || err?.result?.nUpserted || 0; // keep the ones that did save
     }
-    // Reactions in this chat's history (after their target messages are stored).
-    for (const msg of msgs) await applyReaction(msg).catch(() => {});
+  }
+  // 3) Reactions, in order, after their target messages exist (one write).
+  if (reactions.length) {
+    const rops = [];
+    for (const r of reactions) {
+      rops.push({ updateOne: { filter: { wa_message_id: r.target }, update: { $pull: { reactions: { from: r.from } } } } });
+      if (r.emoji) rops.push({ updateOne: { filter: { wa_message_id: r.target }, update: { $push: { reactions: { emoji: r.emoji, from: r.from } } } } });
+    }
+    await db.messages().bulkWrite(rops, { ordered: true }).catch(() => {});
   }
   if (imported) {
     audit('connection', `Synced ${imported} messages for a conversation number`, { level: 'success' });

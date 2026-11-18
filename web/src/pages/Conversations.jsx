@@ -714,26 +714,39 @@ function AiReplySettings({ onClose, onSaved }) {
 
 // Link a conversation-only WhatsApp number (not used for campaigns or warm-up).
 function AddAccountModal({ onClose, onLinked }) {
-  const { toast } = useApp();
+  const { toast, onBus } = useApp();
   const [label, setLabel] = useState('');
   const [id, setId] = useState(null);
   const [qr, setQr] = useState(null);
   const [status, setStatus] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState('');
+  const startedRef = useRef(false);
+  const linkedRef = useRef(false);
+  const sawQrRef = useRef(false); // a QR was shown → a later 'connecting' means it was scanned
 
-  async function start() {
-    setBusy(true);
-    try {
-      const r = await api.post('/conversations/accounts', { label: label.trim() });
-      setId(r.id);
-      setStatus('connecting');
-    } catch (e) {
-      toast(e.message, 'error');
-    }
-    setBusy(false);
-  }
+  // Start the WhatsApp session as soon as the window opens, so the QR is ready by the time
+  // you look at it (≈1 s). The label is optional and can be typed while the QR shows.
+  useEffect(() => {
+    if (startedRef.current) return; // guard against a double mount creating two numbers
+    startedRef.current = true;
+    api
+      .post('/conversations/accounts', { label: '' })
+      .then((r) => {
+        setId(r.id);
+        setStatus('connecting');
+      })
+      .catch((e) => setFailed(e.message));
+  }, []);
 
-  // Poll for the QR + connection once a slot is created.
+  // Save the label as it's typed (debounced) — uses the normal rename endpoint.
+  useEffect(() => {
+    if (!id) return;
+    const t = setTimeout(() => api.put(`/conversations/accounts/${id}/label`, { label: label.trim() }).catch(() => {}), 500);
+    return () => clearTimeout(t);
+  }, [label, id]);
+
+  // QR + link status: refresh the moment the server says something changed (live event),
+  // with a short poll as a fallback if the live connection drops.
   useEffect(() => {
     if (!id) return;
     let stop = false;
@@ -741,23 +754,33 @@ function AddAccountModal({ onClose, onLinked }) {
       try {
         const s = await api.get(`/conversations/accounts/${id}/qr`);
         if (stop) return;
+        if (s.qr) sawQrRef.current = true;
         setQr(s.qr);
         setStatus(s.status);
-        if (s.status === 'connected') {
-          toast('Number linked ✓', 'success');
+        if (s.status === 'connected' && !linkedRef.current) {
+          linkedRef.current = true;
+          toast('Number linked ✓ — loading chats', 'success');
           onLinked(id);
         }
       } catch {}
     };
     tick();
-    const t = setInterval(tick, 2000);
-    return () => { stop = true; clearInterval(t); };
+    const off = onBus((ev) => {
+      if (ev === 'pool:update') tick();
+    });
+    const t = setInterval(tick, 1500);
+    return () => {
+      stop = true;
+      clearInterval(t);
+      off?.();
+    };
   }, [id]);
 
   async function cancel() {
     // Only discard if it was never scanned (still showing a QR). If it's linking or
     // linked, keep it — its tab appears on its own once connected.
-    if (id && (status === 'qr' || status === '')) {
+    const scanned = sawQrRef.current && status === 'connecting'; // linking in progress — keep it
+    if (id && !linkedRef.current && !scanned) {
       try { await api.del(`/conversations/accounts/${id}`); } catch {}
     }
     onClose();
@@ -767,35 +790,30 @@ function AddAccountModal({ onClose, onLinked }) {
     <Modal
       title="Add a WhatsApp number"
       onClose={cancel}
-      footer={<button className="btn" onClick={cancel}>Close</button>}
+      footer={<button className="btn" onClick={cancel}>{status === 'connected' ? 'Done' : 'Close'}</button>}
     >
-      {!id ? (
-        <>
-          <div className="field">
-            <label>Label (optional)</label>
-            <input className="input" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. Support line" />
-            <div className="hint">This number is only for Conversations + AI replies — it won't be used for campaigns or warm-up.</div>
-          </div>
-          <button className="btn primary" onClick={start} disabled={busy}>
-            <Icon.gateway /> {busy ? 'Starting…' : 'Generate QR'}
-          </button>
-        </>
-      ) : (
-        <div style={{ textAlign: 'center' }}>
-          {status === 'connected' ? (
-            <div className="auth-note">Linked! You can close this.</div>
-          ) : qr ? (
-            <>
-              <img src={qr} alt="WhatsApp QR" style={{ width: 260, height: 260, borderRadius: 12 }} />
-              <div className="hint" style={{ marginTop: 10 }}>
-                On the phone for this number: <strong>WhatsApp → Linked Devices → Link a device</strong>, then scan this code.
-              </div>
-            </>
-          ) : (
-            <Loading label="Preparing QR…" minHeight={200} />
-          )}
-        </div>
-      )}
+      <div className="field">
+        <label>Label (optional)</label>
+        <input className="input" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. Support line" />
+        <div className="hint">This number is only for Conversations + AI replies — it won't be used for campaigns or warm-up.</div>
+      </div>
+      <div style={{ textAlign: 'center' }}>
+        {failed ? (
+          <div className="auth-error">{failed}</div>
+        ) : status === 'connected' ? (
+          <div className="auth-note">Linked! Your chats are loading in its tab — you can close this.</div>
+        ) : qr ? (
+          <>
+            <img src={qr} alt="WhatsApp QR" style={{ width: 260, height: 260, borderRadius: 12 }} />
+            <div className="hint" style={{ marginTop: 10 }}>
+              On the phone for this number: <strong>WhatsApp → Linked Devices → Link a device</strong>, then scan this code.
+              Keep WhatsApp open on the phone until the chats appear.
+            </div>
+          </>
+        ) : (
+          <Loading label={sawQrRef.current ? 'Scanned — linking…' : 'Preparing QR…'} minHeight={260} />
+        )}
+      </div>
     </Modal>
   );
 }

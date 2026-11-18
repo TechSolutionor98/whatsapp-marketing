@@ -7,6 +7,7 @@ import makeWASocket, {
   DisconnectReason,
   Browsers,
 } from 'baileys';
+import { getWaVersion } from './version.js';
 
 import { WA_AUTH_DIR } from '../config.js';
 import { db, audit, getSetting, isMongoUp, nowIso, dayKey } from '../db/mongo.js';
@@ -51,7 +52,7 @@ export async function connectWhatsApp() {
   try {
     fs.mkdirSync(WA_AUTH_DIR, { recursive: true });
     const { state: authState, saveCreds } = await useMultiFileAuthState(WA_AUTH_DIR);
-    const { version } = await fetchLatestBaileysVersion();
+    const version = await getWaVersion(); // cached — no HTTP fetch before every QR
 
     sock = makeWASocket({
       version,
@@ -121,7 +122,8 @@ export async function connectWhatsApp() {
           audit('connection', `Connection dropped (code ${code ?? '?'}) — reconnecting`, {
             level: 'warn',
           });
-          reconnectTimer = setTimeout(() => connectWhatsApp(), 3000);
+          // 515 = restart required right after a QR scan → reconnect immediately.
+          reconnectTimer = setTimeout(() => connectWhatsApp(), code === DisconnectReason.restartRequired ? 250 : 3000);
         }
       }
     });
