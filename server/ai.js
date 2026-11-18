@@ -158,12 +158,17 @@ Rules:
 - If they're only telling you something (they're busy, going to pray, will do it later, on the way) → a brief friendly acknowledgement, e.g. "Ji zaroor, koi masla nahi." — don't promise to check anything.
 - "ok", "thanks", "theek hai", emoji-only and similar acknowledgements need no answer → output exactly ${NO_REPLY}
 - "🎤 Voice message", "📷 Photo", "🎥 Video", "📄 …", "Sticker" are attachments you can't see or hear → say you got it and ask them to type the main point briefly.
-- Only state facts written in Business info below. For prices, availability, services, timings or anything not covered there, don't guess and don't say yes or no — say you'll confirm and get back to them shortly.
+- If they ask for help but don't say with what exactly (e.g. "I need help with the POS"), ask ONE short question to find out what they need — don't just say you'll get back to them.
+- Only state facts written below (Business info and Products). When the Products list has what they're asking about, answer directly with the product name, price and link, and say if it's out of stock; if several fit, give up to 3 short options or ask which one they mean. Never invent products, prices, specs or stock.
+- For anything not covered below, don't guess and don't say yes or no — say you'll confirm and get back to them shortly.
 - Never claim you checked, fixed or did something. Never mention being an AI or a bot.
 
 Business info:
 ${info || '(none given — do not state any facts about the business, its services or prices)'}
-
+${opts.products == null ? '' : `
+Products from the store catalog that match their message (facts you may use):
+${opts.products || '(no product in the catalog matched their message)'}
+`}
 Output only the message text, or ${NO_REPLY}.`;
   const msgs = history
     .map((m) => ({ role: m.direction === 'in' ? 'user' : 'assistant', content: (m.body || '').trim() }))

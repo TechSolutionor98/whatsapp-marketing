@@ -69,6 +69,12 @@ async function ensureIndexes() {
   // WhatsApp @lid identities: contacts keep their lid, and lid_map remembers lid -> real number/name.
   await col('contacts').createIndex({ lid: 1 }, { sparse: true });
   await col('contacts').createIndex({ jid: 1 }, { sparse: true });
+  // Product catalog (AI replies look products up by name/brand/category/sku).
+  await col('products').createIndex({ ext_id: 1 }, { unique: true });
+  await col('products').createIndex(
+    { name: 'text', brand: 'text', category: 'text', sku: 'text', description: 'text' },
+    { name: 'product_search', weights: { name: 10, sku: 8, brand: 5, category: 3, description: 1 }, default_language: 'none' }
+  );
   await col('audit_logs').createIndex({ created_at: -1 });
   await col('warmup_log').createIndex({ day_key: 1 });
   await col('warmup_log').createIndex({ created_at: -1 });
@@ -116,7 +122,8 @@ export const db = {
   users: () => col('users'),
   warmupAccounts: () => col('warmup_accounts'),
   warmupLog: () => col('warmup_log'),
-  lidMap: () => col('lid_map'), // { _id: '<lid>@lid', pn: '<phone>@s.whatsapp.net', name, notify }
+  lidMap: () => col('lid_map'), // { _id: '<lid>@lid', pn: '<phone>@s.whatsapp.net', names, notify }
+  products: () => col('products'), // synced product catalog for AI replies (catalog.js)
 };
 
 // Kept for routes/auth.js which imports `users`.

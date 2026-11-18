@@ -153,6 +153,78 @@ export default function Settings() {
   );
 }
 
+// Product catalog the AI answers from: paste your store's product API / feed URL; it's synced
+// and searched when customers ask about products (server/catalog.js).
+function ProductCatalog({ s, set }) {
+  const { toast } = useApp();
+  const [info, setInfo] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const load = () => api.get('/ai/catalog').then(setInfo).catch(() => {});
+  useEffect(() => {
+    load();
+  }, []);
+  async function syncNow() {
+    setBusy(true);
+    try {
+      await api.put('/settings', s); // save the URL/key first
+      const r = await api.post('/ai/catalog/sync');
+      toast(`Synced ${r.count} products`, 'success');
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+    await load();
+    setBusy(false);
+  }
+  const when = info?.at ? new Date(info.at).toLocaleString() : '';
+  return (
+    <div className="setting-row" style={{ display: 'block' }}>
+      <div className="st-label" style={{ marginBottom: 4 }}>Product catalog for AI answers</div>
+      <div className="st-desc" style={{ marginBottom: 10 }}>
+        Paste your store's product API or feed URL (Shopify <code>/products.json</code>, WooCommerce
+        <code> /wp-json/wc/store/v1/products</code>, or any JSON product list). The AI looks up matching
+        products and answers with real names, prices, stock and links. Synced every 6 hours.
+      </div>
+      <input
+        className="input"
+        placeholder="https://your-store.com/api/products"
+        value={s.productFeedUrl || ''}
+        onChange={(e) => set('productFeedUrl', e.target.value)}
+      />
+      <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+        <input
+          className="input"
+          style={{ flex: 2, minWidth: 220 }}
+          placeholder="API key header (optional) — e.g. Authorization: Bearer abc123"
+          value={s.productFeedHeader || ''}
+          onChange={(e) => set('productFeedHeader', e.target.value)}
+        />
+        <input
+          className="input"
+          style={{ width: 120 }}
+          placeholder="Currency (e.g. AED)"
+          value={s.productCurrency || ''}
+          onChange={(e) => set('productCurrency', e.target.value.toUpperCase())}
+        />
+        <button className="btn sm" onClick={syncNow} disabled={busy || !s.productFeedUrl}>
+          <Icon.refresh /> {busy ? 'Syncing…' : 'Save & sync now'}
+        </button>
+      </div>
+      {info && (info.count || info.error) ? (
+        <div className="st-desc" style={{ marginTop: 8 }}>
+          {info.error ? (
+            <span style={{ color: '#e5484d' }}>Last sync failed: {info.error}</span>
+          ) : (
+            <>
+              <strong>{info.count}</strong> products synced{when ? ` · ${when}` : ''}
+              {info.sample?.length ? ` — e.g. ${info.sample.map((p) => p.name).join(', ')}` : ''}
+            </>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function AiCard({ s, set, status }) {
   const { toast } = useApp();
   const [sample, setSample] = useState('');
@@ -287,6 +359,7 @@ function AiCard({ s, set, status }) {
                 />
               </div>
             )}
+            {s.autoReplyEnabled && <ProductCatalog s={s} set={set} />}
           </>
         )}
         {configured && (

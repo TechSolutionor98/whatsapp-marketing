@@ -83,6 +83,10 @@ export const DEFAULTS = {
   // --- AI auto-reply: let AI answer incoming replies automatically ---
   autoReplyEnabled: false,
   autoReplyInstructions: '', // business context: who you are, what to say/not say
+  productFeedUrl: '', // product API / feed URL the AI looks products up in (catalog.js)
+  productFeedHeader: '', // optional auth header for it, e.g. "Authorization: Bearer …"
+  productCurrency: '', // currency to show when the feed doesn't say (e.g. AED)
+  productFeedStatus: null, // { count, at, error } of the last sync
   autoReplyMinSec: 5, // wait at least this long before AI replies (feels human)
   autoReplyMaxSec: 30, // and at most this long
 };

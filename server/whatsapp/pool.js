@@ -26,6 +26,7 @@ import { db, audit, oid, getSetting, setSetting, nowIso, dayKey } from '../db/mo
 import { emit } from '../events.js';
 import { attachReceipts } from '../receipts.js';
 import { aiAvailable, conversationReply } from '../ai.js';
+import { findProducts, productLines } from '../catalog.js';
 import { getWaState } from './client.js';
 import { getWaVersion } from './version.js';
 import { jidToPhone, normalizePhone, randInt } from '../utils.js';
@@ -1205,7 +1206,15 @@ async function poolAutoReply(accountId, contact) {
     const myPhone = phoneOfAccount(accountId);
     const q = { contact_id: String(contact._id), ...(myPhone ? { account_phone: myPhone } : { account_id: accountId }) };
     const history = (await db.messages().find(q).sort({ created_at: -1, _id: -1 }).limit(12).toArray()).reverse();
-    const reply = await conversationReply(history.map((m) => ({ direction: m.direction, body: m.body })));
+    // Product catalog (if connected): look up what they're asking about — their last two
+    // messages plus our last reply (so "kitne ka hai?" after we named a product still matches).
+    let products = null;
+    if (getSetting('productFeedUrl', '')) {
+      const ins = history.filter((m) => m.direction === 'in').slice(-2).map((m) => m.body);
+      const lastOut = history.filter((m) => m.direction === 'out').slice(-1).map((m) => m.body);
+      products = productLines(await findProducts([...ins, ...lastOut].join(' ')), getSetting('productCurrency', ''));
+    }
+    const reply = await conversationReply(history.map((m) => ({ direction: m.direction, body: m.body })), { products });
     if (reply === null) return; // "ok" / "thanks" / already answered — no reply needed
     const waId = await sendJidFrom(accountId, chatJidOf(contact), reply);
     await db.messages().insertOne({

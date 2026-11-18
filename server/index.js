@@ -19,6 +19,7 @@ import { warmup } from './routes/warmup.js';
 import { uploads } from './routes/uploads.js';
 import { system } from './routes/system.js';
 import { connectWhatsApp } from './whatsapp/client.js';
+import { startCatalogSync } from './catalog.js';
 import { startWorker } from './worker/sender.js';
 import { startWarmupWorker } from './worker/warmup.js';
 
@@ -63,6 +64,7 @@ app.listen(PORT, () => {
   connectMongo(); // auth store (self-retries if not up yet)
   startWorker();
   startWarmupWorker();
+  startCatalogSync(); // product catalog for AI replies (if a product URL is set)
   // Auto-reconnect if a linked WhatsApp session already exists on disk.
   if (fs.existsSync(WA_AUTH_DIR) && fs.readdirSync(WA_AUTH_DIR).length > 0) {
     console.log('  Existing WhatsApp session found — reconnecting…');
