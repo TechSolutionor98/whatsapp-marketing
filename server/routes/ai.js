@@ -2,28 +2,7 @@ import { Router } from 'express';
 import { getSetting, audit } from '../db/mongo.js';
 import { aiAvailable, aiModel, aiProviderName, draftMessage, rewriteMessage } from '../ai.js';
 
-import { syncCatalog, findProducts } from '../catalog.js';
-import { db } from '../db/mongo.js';
-
 export const ai = Router();
-
-// Product catalog the AI answers from: status, a few sample products, sync now, test search.
-ai.get('/catalog', async (_req, res) => {
-  const status = getSetting('productFeedStatus', null) || {};
-  let sample = [];
-  try {
-    sample = await db.products().find({}, { projection: { name: 1, price: 1, currency: 1, in_stock: 1 } }).limit(3).toArray();
-  } catch {}
-  res.json({ url: getSetting('productFeedUrl', ''), ...status, sample });
-});
-ai.post('/catalog/sync', async (_req, res) => {
-  const r = await syncCatalog('manual');
-  if (r.error) return res.status(400).json({ error: r.error });
-  res.json({ ok: true, count: r.count });
-});
-ai.get('/catalog/search', async (req, res) => {
-  res.json(await findProducts(String(req.query.q || ''), 5));
-});
 
 ai.get('/status', (_req, res) => {
   res.json({

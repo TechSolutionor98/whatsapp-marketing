@@ -11,6 +11,7 @@
 //  - WooCommerce REST   …/wp-json/wc/v3/products    (same paging; needs an API key header)
 //  - any JSON list of products: [..] or {products|items|data|results|docs: [..]} (also nested),
 //    following next/next_page_url/links.next/pagination.next links when present.
+import { ObjectId } from 'mongodb';
 import { db, getSetting, setSetting, audit, nowIso, isMongoUp } from './db/mongo.js';
 
 const MAX_PRODUCTS = 5000;
@@ -180,42 +181,103 @@ export async function fetchCatalog(feedUrl, headerSetting = '') {
   return [...out.values()].slice(0, MAX_PRODUCTS);
 }
 
-// ---------- sync into the database ----------
-let syncing = null;
-export function syncCatalog(reason = 'manual') {
-  syncing ||= (async () => {
-    const url = String(getSetting('productFeedUrl', '') || '').trim();
-    if (!url) {
-      await setSetting('productFeedStatus', { count: 0, at: nowIso(), error: null });
-      return { count: 0 };
-    }
+// ---------- catalogs: API (synced) or manual (typed in Settings) ----------
+// catalogs: { _id, name, type: 'api'|'manual', url, header, currency, status: {count, at, error} }
+// products: { catalog_id, ext_id, name, price, currency, url, sku, brand, category, in_stock, description }
+const inflight = new Map(); // catalogId -> sync promise
+export function syncCatalog(catalogId, reason = 'manual') {
+  const key = String(catalogId);
+  if (inflight.has(key)) return inflight.get(key);
+  const job = (async () => {
+    const cat = await db.catalogs().findOne({ _id: new ObjectId(key) });
+    if (!cat) return { error: 'Catalog not found' };
+    if (cat.type !== 'api') return { count: await db.products().countDocuments({ catalog_id: key }) };
     try {
-      const products = await fetchCatalog(url, getSetting('productFeedHeader', ''));
+      const products = await fetchCatalog(cat.url, cat.header || '');
       const at = nowIso();
-      const ops = products.map((p) => ({ updateOne: { filter: { ext_id: p.ext_id }, update: { $set: { ...p, synced_at: at } }, upsert: true } }));
+      const ops = products.map((p) => ({
+        updateOne: { filter: { catalog_id: key, ext_id: p.ext_id }, update: { $set: { ...p, catalog_id: key, synced_at: at } }, upsert: true },
+      }));
       for (let i = 0; i < ops.length; i += 500) await db.products().bulkWrite(ops.slice(i, i + 500), { ordered: false });
-      await db.products().deleteMany({ synced_at: { $ne: at } }); // removed from the store
-      await setSetting('productFeedStatus', { count: products.length, at, error: null });
-      audit('system', `Product catalog synced (${reason}): ${products.length} products`, { level: 'success' });
+      await db.products().deleteMany({ catalog_id: key, synced_at: { $ne: at } }); // removed from the store
+      await db.catalogs().updateOne({ _id: cat._id }, { $set: { status: { count: products.length, at, error: null } } });
+      audit('system', `Product catalog "${cat.name}" synced (${reason}): ${products.length} products`, { level: 'success' });
       return { count: products.length };
     } catch (e) {
-      await setSetting('productFeedStatus', { ...(getSetting('productFeedStatus', {}) || {}), error: e.message, at: nowIso() });
-      audit('system', `Product catalog sync failed: ${e.message}`, { level: 'warn' });
+      await db.catalogs().updateOne({ _id: cat._id }, { $set: { 'status.error': e.message, 'status.at': nowIso() } });
+      audit('system', `Product catalog "${cat.name}" sync failed: ${e.message}`, { level: 'warn' });
       return { error: e.message };
     }
-  })().finally(() => {
-    syncing = null;
+  })().finally(() => inflight.delete(key));
+  inflight.set(key, job);
+  return job;
+}
+
+export async function syncAllCatalogs(reason = 'scheduled') {
+  for (const c of await db.catalogs().find({ type: 'api' }).toArray()) await syncCatalog(c._id, reason);
+}
+
+// One-time: the first version had a single feed URL in Settings — turn it into a catalog.
+export async function migrateLegacyFeed() {
+  const url = String(getSetting('productFeedUrl', '') || '').trim();
+  if (!url || (await db.catalogs().countDocuments())) return;
+  const r = await db.catalogs().insertOne({
+    name: 'Store catalog',
+    type: 'api',
+    url,
+    header: getSetting('productFeedHeader', '') || '',
+    currency: getSetting('productCurrency', '') || '',
+    status: getSetting('productFeedStatus', null) || {},
+    created_at: nowIso(),
   });
-  return syncing;
+  await db.products().updateMany({ catalog_id: { $exists: false } }, { $set: { catalog_id: String(r.insertedId) } });
+  await setSetting('productFeedUrl', '');
 }
 
 export function startCatalogSync() {
-  const tick = () => {
+  const tick = async () => {
     if (!isMongoUp()) return setTimeout(tick, 5000);
-    if (getSetting('productFeedUrl', '')) syncCatalog('scheduled').catch(() => {});
+    try {
+      await migrateLegacyFeed();
+      await syncAllCatalogs('scheduled');
+    } catch {}
   };
   setTimeout(tick, 15000);
   setInterval(tick, SYNC_EVERY_MS);
+}
+
+// Which catalogs a WhatsApp number's AI uses. Set per number in Conversations → AI settings:
+// a catalog id, or 'none'. Not chosen yet → the only catalog if there's exactly one.
+export async function catalogIdsForAccount(accountId) {
+  let chosen = null;
+  if (accountId === 'main') chosen = getSetting('mainCatalogId', null);
+  else {
+    try {
+      chosen = (await db.warmupAccounts().findOne({ _id: new ObjectId(String(accountId)) }, { projection: { catalog_id: 1 } }))?.catalog_id ?? null;
+    } catch {}
+  }
+  if (chosen === 'none') return [];
+  if (chosen) return [String(chosen)];
+  const all = await db.catalogs().find({}, { projection: { _id: 1 } }).limit(2).toArray();
+  return all.length === 1 ? [String(all[0]._id)] : [];
+}
+
+// A product typed in by hand (Settings → catalog → Add product).
+export function manualProduct(b = {}) {
+  const name = text(b.name, 200);
+  if (!name) throw new Error('Product title is required');
+  const price = b.price === '' || b.price == null ? null : toNum(b.price);
+  return {
+    name,
+    price,
+    currency: text(b.currency, 8).toUpperCase(),
+    url: text(b.url, 500),
+    sku: text(b.sku, 80),
+    brand: text(b.brand, 80),
+    category: text(b.category, 120),
+    in_stock: b.in_stock === undefined || b.in_stock === null ? null : !!b.in_stock,
+    description: text(b.description, 600),
+  };
 }
 
 // ---------- finding products for a customer's message ----------
@@ -242,23 +304,25 @@ export function searchTerms(text) {
   return [...new Set(terms)].slice(0, 8);
 }
 
-export async function findProducts(text, limit = 5) {
+export async function findProducts(text, limit = 5, catalogIds = null) {
   if (!isMongoUp()) return [];
   const terms = searchTerms(text);
   if (!terms.length) return [];
-  if (!(await db.products().estimatedDocumentCount())) return [];
-  const proj = { name: 1, price: 1, currency: 1, url: 1, in_stock: 1, brand: 1, category: 1, sku: 1, description: 1 };
+  if (Array.isArray(catalogIds) && !catalogIds.length) return [];
+  const scope = Array.isArray(catalogIds) ? { catalog_id: { $in: catalogIds.map(String) } } : {};
+  if (!(await db.products().countDocuments(scope, { limit: 1 }))) return [];
+  const proj = { name: 1, price: 1, currency: 1, url: 1, in_stock: 1, brand: 1, category: 1, sku: 1, description: 1, catalog_id: 1 };
   let found = await db
     .products()
-    .find({ $text: { $search: terms.join(' ') } }, { projection: { ...proj, score: { $meta: 'textScore' } } })
+    .find({ ...scope, $text: { $search: terms.join(' ') } }, { projection: { ...proj, score: { $meta: 'textScore' } } })
     .sort({ score: { $meta: 'textScore' } })
     .limit(limit)
     .toArray()
     .catch(() => []);
   if (!found.length) {
-    // partial words ("hikvi", "camra" won't match; "4mp", "pos" inside names will)
+    // partial words ("4mp", "pos" inside names) when the word index finds nothing
     const rx = terms.map((t) => new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
-    found = await db.products().find({ $or: rx.flatMap((r) => [{ name: r }, { sku: r }, { brand: r }]) }, { projection: proj }).limit(limit).toArray();
+    found = await db.products().find({ ...scope, $or: rx.flatMap((r) => [{ name: r }, { sku: r }, { brand: r }]) }, { projection: proj }).limit(limit).toArray();
   }
   return found;
 }

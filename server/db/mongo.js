@@ -70,7 +70,10 @@ async function ensureIndexes() {
   await col('contacts').createIndex({ lid: 1 }, { sparse: true });
   await col('contacts').createIndex({ jid: 1 }, { sparse: true });
   // Product catalog (AI replies look products up by name/brand/category/sku).
-  await col('products').createIndex({ ext_id: 1 }, { unique: true });
+  // Products are unique per catalog (several catalogs can share ids). Drop the first
+  // version's global unique index if it exists.
+  await col('products').dropIndex('ext_id_1').catch(() => {});
+  await col('products').createIndex({ catalog_id: 1, ext_id: 1 }, { unique: true });
   await col('products').createIndex(
     { name: 'text', brand: 'text', category: 'text', sku: 'text', description: 'text' },
     { name: 'product_search', weights: { name: 10, sku: 8, brand: 5, category: 3, description: 1 }, default_language: 'none' }
@@ -123,7 +126,8 @@ export const db = {
   warmupAccounts: () => col('warmup_accounts'),
   warmupLog: () => col('warmup_log'),
   lidMap: () => col('lid_map'), // { _id: '<lid>@lid', pn: '<phone>@s.whatsapp.net', names, notify }
-  products: () => col('products'), // synced product catalog for AI replies (catalog.js)
+  products: () => col('products'), // catalog products for AI replies (catalog.js)
+  catalogs: () => col('catalogs'), // product catalogs: API-synced or manual
 };
 
 // Kept for routes/auth.js which imports `users`.

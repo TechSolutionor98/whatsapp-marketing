@@ -2213,3 +2213,9 @@ tbody tr:hover {
 /* "~Name": the person's own WhatsApp name, shown beside the number for contacts not saved
    on this phone (exactly how WhatsApp marks unsaved contacts) */
 .thread-push { margin-left: 6px; font-weight: 400; font-size: 12px; color: var(--text-soft); }
+
+/* Settings → AI → Product catalogs */
+.cat-row, .prod-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px; background: var(--surface); }
+.cat-main, .prod-main { flex: 1; min-width: 0; }
+.cat-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.prod-list { max-height: 340px; overflow-y: auto; }

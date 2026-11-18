@@ -26,7 +26,7 @@ import { db, audit, oid, getSetting, setSetting, nowIso, dayKey } from '../db/mo
 import { emit } from '../events.js';
 import { attachReceipts } from '../receipts.js';
 import { aiAvailable, conversationReply } from '../ai.js';
-import { findProducts, productLines } from '../catalog.js';
+import { findProducts, productLines, catalogIdsForAccount } from '../catalog.js';
 import { getWaState } from './client.js';
 import { getWaVersion } from './version.js';
 import { jidToPhone, normalizePhone, randInt } from '../utils.js';
@@ -1182,20 +1182,26 @@ async function upsertPoolChat(spec) {
 // AI auto-reply, like a person answering: wait the human-like delay, and if more messages
 // arrive meanwhile, restart the wait — then answer ONCE, to the latest message. (Before, every
 // message in a burst got its own AI reply.)
-const autoReplyTimers = new Map(); // `${accountId}:${contactId}` -> timeout
+// The wait never stretches past max seconds after their FIRST unanswered message (+ a short
+// quiet gap, ≤3 s, if they're still typing) — measured replies were coming 12–31 s, up to ~1 min in bursts.
+const autoReplyTimers = new Map(); // `${accountId}:${contactId}` -> { timer, firstAt, due }
 function scheduleAutoReply(accountId, contact) {
   const key = `${accountId}:${contact._id}`;
-  clearTimeout(autoReplyTimers.get(key));
-  const minS = getSetting('autoReplyMinSec', 5);
-  const maxS = getSetting('autoReplyMaxSec', 30);
-  const waitMs = randInt(Math.max(0, minS), Math.max(minS, maxS)) * 1000;
-  autoReplyTimers.set(
-    key,
-    setTimeout(() => {
-      autoReplyTimers.delete(key);
-      poolAutoReply(accountId, contact).catch(() => {});
-    }, waitMs)
-  );
+  const minS = Math.max(0, Number(getSetting('autoReplyMinSec', 3)) || 0);
+  const maxS = Math.max(minS, Number(getSetting('autoReplyMaxSec', 10)) || minS);
+  const now = Date.now();
+  const prev = autoReplyTimers.get(key);
+  clearTimeout(prev?.timer);
+  const firstAt = prev?.firstAt ?? now;
+  const quiet = Math.min(3000, Math.max(1000, maxS * 1000)); // "still typing" gap, never longer than the max
+  const due = prev
+    ? Math.min(Math.max(prev.due, now + quiet), firstAt + maxS * 1000 + quiet) // short quiet gap, capped
+    : now + randInt(minS, maxS) * 1000;
+  const timer = setTimeout(() => {
+    autoReplyTimers.delete(key);
+    poolAutoReply(accountId, contact).catch(() => {});
+  }, Math.max(0, due - now));
+  autoReplyTimers.set(key, { timer, firstAt, due });
 }
 
 async function poolAutoReply(accountId, contact) {
@@ -1208,11 +1214,16 @@ async function poolAutoReply(accountId, contact) {
     const history = (await db.messages().find(q).sort({ created_at: -1, _id: -1 }).limit(12).toArray()).reverse();
     // Product catalog (if connected): look up what they're asking about — their last two
     // messages plus our last reply (so "kitne ka hai?" after we named a product still matches).
+    // Only the catalog chosen for THIS number (Conversations → AI settings).
     let products = null;
-    if (getSetting('productFeedUrl', '')) {
+    const catalogIds = await catalogIdsForAccount(accountId);
+    if (catalogIds.length) {
       const ins = history.filter((m) => m.direction === 'in').slice(-2).map((m) => m.body);
       const lastOut = history.filter((m) => m.direction === 'out').slice(-1).map((m) => m.body);
-      products = productLines(await findProducts([...ins, ...lastOut].join(' ')), getSetting('productCurrency', ''));
+      const found = await findProducts([...ins, ...lastOut].join(' '), 5, catalogIds);
+      const cur = new Map((await db.catalogs().find({}, { projection: { currency: 1 } }).toArray()).map((c) => [String(c._id), c.currency || '']));
+      for (const p of found) if (!p.currency) p.currency = cur.get(p.catalog_id) || '';
+      products = productLines(found);
     }
     const reply = await conversationReply(history.map((m) => ({ direction: m.direction, body: m.body })), { products });
     if (reply === null) return; // "ok" / "thanks" / already answered — no reply needed

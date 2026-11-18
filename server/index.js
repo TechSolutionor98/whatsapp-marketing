@@ -20,6 +20,7 @@ import { uploads } from './routes/uploads.js';
 import { system } from './routes/system.js';
 import { connectWhatsApp } from './whatsapp/client.js';
 import { startCatalogSync } from './catalog.js';
+import { catalogs } from './routes/catalogs.js';
 import { startWorker } from './worker/sender.js';
 import { startWarmupWorker } from './worker/warmup.js';
 
@@ -42,6 +43,7 @@ app.use('/api/templates', templates);
 app.use('/api/campaigns', campaigns);
 app.use('/api/conversations', conversations);
 app.use('/api/ai', ai);
+app.use('/api/catalogs', catalogs);
 app.use('/api/warmup', warmup);
 app.use('/api/uploads', uploads);
 app.use('/api', system);

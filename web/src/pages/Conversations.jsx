@@ -468,7 +468,15 @@ export default function Conversations({ go }) {
     <>
       {headerSlot ? createPortal(controls, headerSlot) : null}
       {showAiSettings && (
-        <AiReplySettings onClose={() => setShowAiSettings(false)} onSaved={() => setShowAiSettings(false)} />
+        <AiReplySettings
+          account={account}
+          accountInfo={accounts.find((a) => a.id === account)}
+          onClose={() => setShowAiSettings(false)}
+          onSaved={() => {
+            setShowAiSettings(false);
+            loadAccounts();
+          }}
+        />
       )}
 
       <div className="wa-tabs">
@@ -707,10 +715,15 @@ export default function Conversations({ go }) {
 }
 
 // AI auto-reply settings — toggle, human-like delay window, and business context.
-function AiReplySettings({ onClose, onSaved }) {
+function AiReplySettings({ account, accountInfo, onClose, onSaved }) {
   const { toast } = useApp();
   const [s, setS] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [catalogs, setCatalogs] = useState([]);
+  const [catalogSel, setCatalogSel] = useState(accountInfo?.catalog_id || '');
+  useEffect(() => {
+    api.get('/catalogs').then(setCatalogs).catch(() => {});
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -718,8 +731,8 @@ function AiReplySettings({ onClose, onSaved }) {
         const r = await api.get('/settings');
         setS({
           autoReplyEnabled: !!r.autoReplyEnabled,
-          autoReplyMinSec: r.autoReplyMinSec ?? 5,
-          autoReplyMaxSec: r.autoReplyMaxSec ?? 30,
+          autoReplyMinSec: r.autoReplyMinSec ?? 3,
+          autoReplyMaxSec: r.autoReplyMaxSec ?? 10,
           autoReplyInstructions: r.autoReplyInstructions || '',
         });
       } catch (e) {
@@ -734,6 +747,7 @@ function AiReplySettings({ onClose, onSaved }) {
     setBusy(true);
     try {
       await api.put('/settings', { autoReplyMinSec: min, autoReplyMaxSec: max, autoReplyInstructions: s.autoReplyInstructions });
+      await api.put(`/conversations/accounts/${account}/catalog`, { catalog_id: catalogSel || null });
       toast('AI reply settings saved', 'success');
       onSaved();
     } catch (e) {
@@ -752,8 +766,27 @@ function AiReplySettings({ onClose, onSaved }) {
         <Loading label="Loading…" minHeight={160} />
       ) : (
         <>
+          <div className="field" style={{ marginBottom: 14 }}>
+            <label>
+              Product catalog for this number{accountInfo ? ` (${accountInfo.label || 'number'}${accountInfo.phone ? ' · +' + accountInfo.phone : ''})` : ''}
+            </label>
+            <select className="select" value={catalogSel} onChange={(e) => setCatalogSel(e.target.value)}>
+              <option value="">
+                {catalogs.length === 1 ? `Automatic — ${catalogs[0].name}` : catalogs.length ? 'Not chosen (no products)' : 'No catalogs yet'}
+              </option>
+              {catalogs.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name} ({c.type === 'api' ? 'API' : 'manual'}, {c.count} products)
+                </option>
+              ))}
+              <option value="none">Don't use products for this number</option>
+            </select>
+            <div className="hint">
+              The AI answers product questions from this catalog. Add or edit catalogs in <strong>Settings → AI → Product catalogs</strong>.
+            </div>
+          </div>
           <div className="hint" style={{ marginBottom: 12 }}>
-            Turn AI auto-reply <strong>on or off per number</strong> using the toggle on each tab. These timing &amp; context settings apply to all numbers.
+            Turn AI auto-reply <strong>on or off per number</strong> using the toggle on each tab. The timing &amp; context settings below apply to all numbers.
           </div>
           <div className="row">
             <div className="field" style={{ margin: 0 }}>

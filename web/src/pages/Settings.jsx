@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
-import { Loading } from '../ui.jsx';
+import { Loading, Modal } from '../ui.jsx';
 
 const MODEL_HINTS = {
   groq: 'e.g. openai/gpt-oss-20b (fast) or openai/gpt-oss-120b (best). See console.groq.com for your models.',
@@ -153,75 +153,281 @@ export default function Settings() {
   );
 }
 
-// Product catalog the AI answers from: paste your store's product API / feed URL; it's synced
-// and searched when customers ask about products (server/catalog.js).
-function ProductCatalog({ s, set }) {
+// ---- Product catalogs for AI answers ----
+// Manual catalogs: products typed in here. API catalogs: synced from a product URL.
+// Each WhatsApp number picks its catalog in Conversations → ⚙️ AI settings.
+function ProductCatalogs() {
   const { toast } = useApp();
-  const [info, setInfo] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const load = () => api.get('/ai/catalog').then(setInfo).catch(() => {});
+  const [list, setList] = useState(null);
+  const [edit, setEdit] = useState(null); // catalog being added/edited
+  const [openCat, setOpenCat] = useState(null); // catalog whose products are open
+  const [busy, setBusy] = useState('');
+  const load = () => api.get('/catalogs').then(setList).catch((e) => toast(e.message, 'error'));
   useEffect(() => {
     load();
   }, []);
-  async function syncNow() {
-    setBusy(true);
+  async function sync(c) {
+    setBusy(c.id);
     try {
-      await api.put('/settings', s); // save the URL/key first
-      const r = await api.post('/ai/catalog/sync');
-      toast(`Synced ${r.count} products`, 'success');
+      const r = await api.post(`/catalogs/${c.id}/sync`);
+      toast(`"${c.name}": ${r.count} products synced`, 'success');
     } catch (e) {
       toast(e.message, 'error');
     }
-    await load();
-    setBusy(false);
+    setBusy('');
+    load();
   }
-  const when = info?.at ? new Date(info.at).toLocaleString() : '';
+  async function remove(c) {
+    if (!confirm(`Delete the catalog "${c.name}" and its ${c.count} products? Numbers using it will stop using it.`)) return;
+    await api.del(`/catalogs/${c.id}`).catch((e) => toast(e.message, 'error'));
+    load();
+  }
   return (
     <div className="setting-row" style={{ display: 'block' }}>
-      <div className="st-label" style={{ marginBottom: 4 }}>Product catalog for AI answers</div>
+      <div className="st-label" style={{ marginBottom: 4 }}>Product catalogs for AI answers</div>
       <div className="st-desc" style={{ marginBottom: 10 }}>
-        Paste your store's product API or feed URL (Shopify <code>/products.json</code>, WooCommerce
-        <code> /wp-json/wc/store/v1/products</code>, or any JSON product list). The AI looks up matching
-        products and answers with real names, prices, stock and links. Synced every 6 hours.
+        Add your products by hand, or connect your store's product API. The AI looks up the products a customer asks
+        about and answers with the real title, price, stock and link. Choose which catalog each WhatsApp number uses in
+        <strong> Conversations → ⚙️ AI settings</strong>.
       </div>
-      <input
-        className="input"
-        placeholder="https://your-store.com/api/products"
-        value={s.productFeedUrl || ''}
-        onChange={(e) => set('productFeedUrl', e.target.value)}
-      />
-      <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-        <input
-          className="input"
-          style={{ flex: 2, minWidth: 220 }}
-          placeholder="API key header (optional) — e.g. Authorization: Bearer abc123"
-          value={s.productFeedHeader || ''}
-          onChange={(e) => set('productFeedHeader', e.target.value)}
-        />
-        <input
-          className="input"
-          style={{ width: 120 }}
-          placeholder="Currency (e.g. AED)"
-          value={s.productCurrency || ''}
-          onChange={(e) => set('productCurrency', e.target.value.toUpperCase())}
-        />
-        <button className="btn sm" onClick={syncNow} disabled={busy || !s.productFeedUrl}>
-          <Icon.refresh /> {busy ? 'Syncing…' : 'Save & sync now'}
-        </button>
-      </div>
-      {info && (info.count || info.error) ? (
-        <div className="st-desc" style={{ marginTop: 8 }}>
-          {info.error ? (
-            <span style={{ color: '#e5484d' }}>Last sync failed: {info.error}</span>
-          ) : (
-            <>
-              <strong>{info.count}</strong> products synced{when ? ` · ${when}` : ''}
-              {info.sample?.length ? ` — e.g. ${info.sample.map((p) => p.name).join(', ')}` : ''}
-            </>
-          )}
-        </div>
-      ) : null}
+      {!list ? (
+        <Loading label="Loading catalogs…" minHeight={60} />
+      ) : (
+        <>
+          {list.map((c) => (
+            <div key={c.id} className="cat-row">
+              <div className="cat-main">
+                <div>
+                  <strong>{c.name}</strong> <span className="chip">{c.type === 'api' ? 'API' : 'Manual'}</span>
+                </div>
+                <div className="st-desc">
+                  {c.count} product{c.count === 1 ? '' : 's'}
+                  {c.currency ? ` · ${c.currency}` : ''}
+                  {c.type === 'api' && c.status?.at && !c.status?.error ? ` · synced ${new Date(c.status.at).toLocaleString()}` : ''}
+                  {c.status?.error ? <span style={{ color: '#e5484d' }}> · last sync failed: {c.status.error}</span> : null}
+                </div>
+              </div>
+              <div className="cat-actions">
+                <button className="btn sm" onClick={() => setOpenCat(c)}>Products</button>
+                {c.type === 'api' && (
+                  <button className="btn sm" onClick={() => sync(c)} disabled={busy === c.id}>
+                    <Icon.refresh /> {busy === c.id ? 'Syncing…' : 'Sync'}
+                  </button>
+                )}
+                <button className="btn sm" onClick={() => setEdit(c)}>Edit</button>
+                <button className="btn sm" onClick={() => remove(c)} title="Delete catalog"><Icon.trash /></button>
+              </div>
+            </div>
+          ))}
+          <button className="btn sm" style={{ marginTop: 8 }} onClick={() => setEdit({ name: '', type: 'manual', url: '', header: '', currency: '' })}>
+            <Icon.plus /> Add catalog
+          </button>
+        </>
+      )}
+      {edit && <CatalogModal cat={edit} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />}
+      {openCat && <ProductsModal cat={openCat} onClose={() => { setOpenCat(null); load(); }} />}
     </div>
+  );
+}
+
+function CatalogModal({ cat, onClose, onSaved }) {
+  const { toast } = useApp();
+  const [c, setC] = useState(cat);
+  const [busy, setBusy] = useState(false);
+  const isNew = !cat.id;
+  async function save() {
+    setBusy(true);
+    try {
+      const r = isNew ? await api.post('/catalogs', c) : await api.put(`/catalogs/${cat.id}`, c);
+      if (r.sync?.error) toast(`Saved, but the sync failed: ${r.sync.error}`, 'error');
+      else toast(r.sync ? `Saved — ${r.sync.count} products synced` : 'Catalog saved', 'success');
+      onSaved();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+    setBusy(false);
+  }
+  return (
+    <Modal
+      title={isNew ? 'Add a product catalog' : `Edit "${cat.name}"`}
+      onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save} disabled={busy}><Icon.check /> {busy ? 'Saving…' : 'Save'}</button></>}
+    >
+      <div className="field">
+        <label>Name</label>
+        <input className="input" value={c.name} onChange={(e) => setC({ ...c, name: e.target.value })} placeholder="e.g. Grabatoz UAE products" />
+      </div>
+      {isNew && (
+        <div className="field">
+          <label>Products come from</label>
+          <select className="select" value={c.type} onChange={(e) => setC({ ...c, type: e.target.value })}>
+            <option value="manual">I'll add them here (title, price, description…)</option>
+            <option value="api">My store's product API / feed URL</option>
+          </select>
+        </div>
+      )}
+      {c.type === 'api' && (
+        <>
+          <div className="field">
+            <label>Product API URL</label>
+            <input className="input" value={c.url} onChange={(e) => setC({ ...c, url: e.target.value })} placeholder="https://your-store.com/api/products" />
+            <div className="hint">Shopify <code>/products.json</code>, WooCommerce <code>/wp-json/wc/store/v1/products</code>, or any JSON product list. Synced now and every 6 hours.</div>
+          </div>
+          <div className="field">
+            <label>API key header (optional)</label>
+            <input className="input" value={c.header} onChange={(e) => setC({ ...c, header: e.target.value })} placeholder="Authorization: Bearer abc123" />
+          </div>
+        </>
+      )}
+      <div className="field">
+        <label>Currency (used when a product doesn't say)</label>
+        <input className="input" style={{ width: 140 }} value={c.currency} onChange={(e) => setC({ ...c, currency: e.target.value.toUpperCase() })} placeholder="AED" />
+      </div>
+    </Modal>
+  );
+}
+
+const EMPTY_PRODUCT = { name: '', price: '', currency: '', in_stock: true, url: '', sku: '', brand: '', category: '', description: '' };
+
+function ProductsModal({ cat, onClose }) {
+  const { toast } = useApp();
+  const [items, setItems] = useState(null);
+  const [q, setQ] = useState('');
+  const [form, setForm] = useState(null); // product being added/edited
+  const [probe, setProbe] = useState('');
+  const [probeHits, setProbeHits] = useState(null);
+  const manual = cat.type === 'manual';
+  const load = () => api.get(`/catalogs/${cat.id}/products?q=${encodeURIComponent(q)}`).then(setItems).catch((e) => toast(e.message, 'error'));
+  useEffect(() => {
+    const t = setTimeout(load, 250);
+    return () => clearTimeout(t);
+  }, [q]);
+  async function saveProduct() {
+    try {
+      if (form.id) await api.put(`/catalogs/${cat.id}/products/${form.id}`, form);
+      else await api.post(`/catalogs/${cat.id}/products`, form);
+      toast('Product saved', 'success');
+      setForm(null);
+      load();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+  async function delProduct(p) {
+    if (!confirm(`Delete "${p.name}"?`)) return;
+    await api.del(`/catalogs/${cat.id}/products/${p.id}`).catch((e) => toast(e.message, 'error'));
+    load();
+  }
+  async function runProbe() {
+    try {
+      setProbeHits(await api.get(`/catalogs/${cat.id}/search?q=${encodeURIComponent(probe)}`));
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+  const price = (p) => (p.price != null ? `${p.currency || cat.currency || ''} ${Number(p.price).toLocaleString()}`.trim() : 'no price');
+  return (
+    <Modal wide title={`${cat.name} — products`} onClose={onClose} footer={<button className="btn" onClick={onClose}>Close</button>}>
+      {form ? (
+        <ProductForm p={form} setP={setForm} currency={cat.currency} onSave={saveProduct} onCancel={() => setForm(null)} />
+      ) : (
+        <>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+            <input className="input" placeholder="Search products…" value={q} onChange={(e) => setQ(e.target.value)} />
+            {manual && (
+              <button className="btn primary sm" onClick={() => setForm({ ...EMPTY_PRODUCT, currency: cat.currency || '' })}>
+                <Icon.plus /> Add product
+              </button>
+            )}
+          </div>
+          {!manual && <div className="hint" style={{ marginBottom: 8 }}>Synced from the store's API — edit products in the store itself.</div>}
+          <div className="prod-list">
+            {!items ? (
+              <Loading label="Loading…" minHeight={80} />
+            ) : !items.length ? (
+              <div className="st-desc" style={{ padding: 12 }}>{q ? 'No product matches.' : manual ? 'No products yet — add your first one.' : 'No products synced yet.'}</div>
+            ) : (
+              items.map((p) => (
+                <div key={p.id} className="prod-row">
+                  <div className="prod-main">
+                    <strong>{p.name}</strong>
+                    <div className="st-desc">
+                      {price(p)} · {p.in_stock === false ? 'out of stock' : p.in_stock === true ? 'in stock' : 'stock unknown'}
+                      {[p.brand, p.category, p.sku].filter(Boolean).length ? ` · ${[p.brand, p.category, p.sku].filter(Boolean).join(' · ')}` : ''}
+                    </div>
+                  </div>
+                  {manual && (
+                    <div className="cat-actions">
+                      <button className="btn sm" onClick={() => setForm({ ...EMPTY_PRODUCT, ...p, price: p.price ?? '' })}>Edit</button>
+                      <button className="btn sm" onClick={() => delProduct(p)}><Icon.trash /></button>
+                    </div>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+          <div className="field" style={{ marginTop: 14 }}>
+            <label>Test: what would the AI find for a customer message?</label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input className="input" value={probe} onChange={(e) => setProbe(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && runProbe()} placeholder="e.g. muja pos ka bara ma batao" />
+              <button className="btn sm" onClick={runProbe} disabled={!probe.trim()}>Test</button>
+            </div>
+            {probeHits && (
+              <div className="hint" style={{ marginTop: 6 }}>
+                {probeHits.length ? `AI would see: ${probeHits.map((p) => `${p.name} (${price(p)})`).join(', ')}` : 'No product matched — the AI would say it will confirm and get back.'}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </Modal>
+  );
+}
+
+function ProductForm({ p, setP, currency, onSave, onCancel }) {
+  const f = (k) => ({ value: p[k] ?? '', onChange: (e) => setP({ ...p, [k]: e.target.value }) });
+  return (
+    <>
+      <div className="field">
+        <label>Product title *</label>
+        <input className="input" {...f('name')} placeholder="e.g. Sunmi T2 POS Terminal" />
+      </div>
+      <div className="row">
+        <div className="field" style={{ margin: 0 }}>
+          <label>Price</label>
+          <input className="input" type="number" min="0" step="0.01" {...f('price')} placeholder="2499" />
+        </div>
+        <div className="field" style={{ margin: 0 }}>
+          <label>Currency</label>
+          <input className="input" value={p.currency || ''} onChange={(e) => setP({ ...p, currency: e.target.value.toUpperCase() })} placeholder={currency || 'AED'} />
+        </div>
+        <div className="field" style={{ margin: 0 }}>
+          <label>Stock</label>
+          <select className="select" value={p.in_stock === true ? 'yes' : p.in_stock === false ? 'no' : 'unknown'} onChange={(e) => setP({ ...p, in_stock: e.target.value === 'yes' ? true : e.target.value === 'no' ? false : null })}>
+            <option value="yes">In stock</option>
+            <option value="no">Out of stock</option>
+            <option value="unknown">Don't say</option>
+          </select>
+        </div>
+      </div>
+      <div className="field" style={{ marginTop: 12 }}>
+        <label>Description</label>
+        <textarea className="textarea" style={{ minHeight: 70 }} {...f('description')} placeholder="Key features the AI can mention" />
+      </div>
+      <div className="row">
+        <div className="field" style={{ margin: 0 }}><label>Brand</label><input className="input" {...f('brand')} /></div>
+        <div className="field" style={{ margin: 0 }}><label>Category</label><input className="input" {...f('category')} /></div>
+        <div className="field" style={{ margin: 0 }}><label>SKU / model</label><input className="input" {...f('sku')} /></div>
+      </div>
+      <div className="field" style={{ marginTop: 12 }}>
+        <label>Product link</label>
+        <input className="input" {...f('url')} placeholder="https://your-store.com/p/sunmi-t2" />
+      </div>
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <button className="btn" onClick={onCancel}>Back</button>
+        <button className="btn primary" onClick={onSave} disabled={!String(p.name || '').trim()}><Icon.check /> Save product</button>
+      </div>
+    </>
   );
 }
 
@@ -359,9 +565,10 @@ function AiCard({ s, set, status }) {
                 />
               </div>
             )}
-            {s.autoReplyEnabled && <ProductCatalog s={s} set={set} />}
+
           </>
         )}
+        {configured && <ProductCatalogs />}
         {configured && (
           <div style={{ marginTop: 14 }}>
             <button className="btn sm" onClick={preview} disabled={testing}>

@@ -87,6 +87,7 @@ export const DEFAULTS = {
   productFeedHeader: '', // optional auth header for it, e.g. "Authorization: Bearer …"
   productCurrency: '', // currency to show when the feed doesn't say (e.g. AED)
   productFeedStatus: null, // { count, at, error } of the last sync
-  autoReplyMinSec: 5, // wait at least this long before AI replies (feels human)
-  autoReplyMaxSec: 30, // and at most this long
+  autoReplyMinSec: 3, // wait at least this long before AI replies (feels human)
+  autoReplyMaxSec: 10, // and at most this long — replies within ~10 s
+  mainCatalogId: null, // product catalog the main number's AI uses ('none' = off)
 };

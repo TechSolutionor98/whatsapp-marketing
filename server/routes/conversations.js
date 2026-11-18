@@ -79,6 +79,7 @@ conversations.get('/accounts', async (req, res) => {
       connected: wa.status === 'connected',
       role: 'main',
       auto_reply: !!getSetting('autoReplyEnabled', false),
+      catalog_id: getSetting('mainCatalogId', null),
       syncing: !!wa.syncing,
     },
   ];
@@ -96,6 +97,7 @@ conversations.get('/accounts', async (req, res) => {
       connected: a?.status === 'connected',
       role,
       auto_reply: a ? !!a.auto_reply : !!d.auto_reply,
+      catalog_id: d.catalog_id ?? null,
       syncing: !!a?.syncing,
     });
   }
@@ -136,6 +138,22 @@ conversations.post('/accounts/:id/autoreply', async (req, res) => {
     }
   }
   res.json({ ok: true, enabled });
+});
+
+// Which product catalog this number's AI answers from: a catalog id, 'none', or null (= the
+// only catalog when there's exactly one). Applies to every link of that phone.
+conversations.put('/accounts/:id/catalog', async (req, res) => {
+  const v = req.body?.catalog_id;
+  const value = v === 'none' ? 'none' : v ? String(v) : null;
+  const { ids } = accountGroup(req.params.id);
+  for (const id of ids) {
+    if (id === 'main') await setSetting('mainCatalogId', value);
+    else {
+      const _id = oid(id);
+      if (_id) await db.warmupAccounts().updateOne({ _id }, value === null ? { $unset: { catalog_id: '' } } : { $set: { catalog_id: value } });
+    }
+  }
+  res.json({ ok: true, catalog_id: value });
 });
 
 // Add a conversation-only number (not used for warm-up or campaigns). Scan its QR.
