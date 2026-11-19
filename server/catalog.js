@@ -377,6 +377,7 @@ const STOP = new Set(
     'to of in on at for from with about regarding and or but if so not no yes please pls plz can could would should will shall may might ' +
     'what which who whom whose when where why how any some much many more most need want help know tell show give send get price prices cost ' +
     'rate available avail availability stock hi hello hey hlo salam assalam asslamoalikum assalamualaikum thanks thank ok okay sir bhai bro ' +
+    'check its it im iam yours mine their theirs us ' + // "check its available ?" (real chat) asks about the product before
     'u ur model models sure interested looking like also there here anything something one ones other options option ' +
     // what they want ABOUT a product, not the product (real chat: "send the link of ugreen one"
     // marked every product "doesn't match: link"). Not photo/image/web — photo paper, webcam.
@@ -488,7 +489,27 @@ export function parseBudget(text) {
 }
 
 const stockRank = (p) => (p.in_stock === true ? 2 : p.in_stock == null ? 1 : 0);
-const has = (words, base) => words.some((w) => w.startsWith(base));
+// Words the store writes differently from customers: "BT" in a product name is Bluetooth (real
+// catalog: "Amazon Echo Dot … BT/Wi-Fi" never matched "bluetooth speaker").
+const SAME = { bluetooth: ['bt'], wifi: ['wi'], wireless: ['bt', 'wi'] };
+const has = (words, base) => words.some((w) => w.startsWith(base) || (SAME[base] || []).includes(w));
+// The word index only matches whole words: "speaker" never found the "Speakers" category, so
+// search each word as typed AND in its other number (speaker ↔ speakers, battery ↔ batteries).
+function bothNumbers(terms) {
+  const out = new Set();
+  for (const t of terms) {
+    out.add(t);
+    if (!/^[a-z]{3,}$/.test(t)) continue;
+    if (t.endsWith('ies')) out.add(t.slice(0, -3) + 'y');
+    else if (/(ses|xes|zes|ches|shes)$/.test(t)) out.add(t.slice(0, -2));
+    else if (t.endsWith('s') && !/(ss|us|is)$/.test(t)) out.add(t.slice(0, -1));
+    else if (/[^aeiou]y$/.test(t)) out.add(t.slice(0, -1) + 'ies');
+    else if (/(s|x|z|ch|sh)$/.test(t)) out.add(t + 'es');
+    else out.add(t + 's');
+    for (const s of SAME[t] || []) out.add(s);
+  }
+  return [...out];
+}
 // What a product IS, from its category: the last word of each part ("Computers › Laptop ›
 // Gaming Laptops" → computer, laptop; "Accessories › Bags & Sleeves" → accessorie, bag, sleeve).
 // Real catalog: "Redragon Travel Laptop Backpack" (Bags & Sleeves), "Laptop Memory" and a
@@ -534,7 +555,7 @@ export async function searchCatalog({ latest = '', earlier = '', ours = '', cata
   const proj = { ext_id: 1, slug: 1, name: 1, price: 1, regular_price: 1, currency: 1, url: 1, in_stock: 1, brand: 1, category: 1, sku: 1, description: 1, keywords: 1, catalog_id: 1 };
   let cands = await db
     .products()
-    .find({ ...scope, $text: { $search: terms.join(' ') } }, { projection: { ...proj, score: { $meta: 'textScore' } } })
+    .find({ ...scope, $text: { $search: bothNumbers(terms).join(' ') } }, { projection: { ...proj, score: { $meta: 'textScore' } } })
     .sort({ score: { $meta: 'textScore' } })
     .limit(400)
     .toArray()
