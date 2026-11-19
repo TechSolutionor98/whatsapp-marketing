@@ -4,9 +4,12 @@ import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
 import { Modal, Empty, Loading, timeAgo, initials } from '../ui.jsx';
 
-export default function Authentication() {
+export const roleName = (role) => (role === 'owner' ? 'Super admin' : role === 'admin' ? 'Admin' : 'Member');
+
+export default function Authentication({ go }) {
   const { user, logout, toast } = useApp();
-  const isAdmin = user?.role === 'owner' || user?.role === 'admin';
+  const isOwner = user?.role === 'owner';
+  const isAdmin = user?.role === 'admin'; // admins manage members; the super admin manages everyone (Super Admin page)
   const [users, setUsers] = useState([]);
   const [usersLoaded, setUsersLoaded] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
@@ -31,7 +34,7 @@ export default function Authentication() {
     setSavingPw(true);
     try {
       await api.post('/auth/change-password', pw);
-      toast('Password updated', 'success');
+      toast('Password updated — other devices were signed out', 'success');
       setPw({ currentPassword: '', newPassword: '', confirm: '' });
     } catch (e) {
       toast(e.message, 'error');
@@ -73,7 +76,7 @@ export default function Authentication() {
               <div style={{ fontWeight: 700, fontSize: 15 }}>{user?.name}</div>
               <div className="muted">{user?.email}</div>
               <div style={{ marginTop: 4 }}>
-                <span className={`badge ${roleBadge(user?.role)}`}>{user?.role}</span>
+                <span className={`badge ${roleBadge(user?.role)}`}>{roleName(user?.role)}</span>
               </div>
             </div>
           </div>
@@ -109,12 +112,25 @@ export default function Authentication() {
         </div>
       </div>
 
-      {/* Team (admins only) */}
+      {/* The super admin manages the team on the Super Admin page */}
+      {isOwner && (
+        <div className="card" style={{ marginBottom: 18 }}>
+          <div className="card-head">
+            <Icon.crown style={{ width: 18, color: 'var(--brand-700)' }} />
+            <div><h3>You're the super admin</h3><div className="sub">Add people, choose what each one can open, suspend or sign them out, and control the whole app.</div></div>
+            <button className="btn primary sm" style={{ marginLeft: 'auto' }} onClick={() => go?.('superadmin')}>
+              Open Super Admin
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Team (admins: members only) */}
       {isAdmin && (
         <div className="card" style={{ marginBottom: 18 }}>
           <div className="card-head">
             <Icon.users style={{ width: 18, color: 'var(--brand-700)' }} />
-            <div><h3>Team members</h3><div className="sub">Who can access this studio</div></div>
+            <div><h3>Team members</h3><div className="sub">You can add and remove members. Admins are managed by the super admin.</div></div>
             <button className="btn sm" style={{ marginLeft: 'auto' }} onClick={() => setShowAdd(true)}>
               <Icon.plus /> Add member
             </button>
@@ -136,10 +152,10 @@ export default function Authentication() {
                         {u.name} {u.id === user.id && <span className="chip">you</span>}
                       </td>
                       <td className="cell-muted">{u.email}</td>
-                      <td><span className={`badge ${roleBadge(u.role)}`}>{u.role}</span></td>
+                      <td><span className={`badge ${roleBadge(u.role)}`}>{roleName(u.role)}</span></td>
                       <td className="cell-muted">{u.lastLoginAt ? timeAgo(u.lastLoginAt) : 'never'}</td>
                       <td>
-                        {u.role !== 'owner' && u.id !== user.id && (
+                        {u.role === 'member' && u.id !== user.id && (
                           <button className="btn ghost sm" onClick={() => removeUser(u)} style={{ float: 'right' }}>
                             <Icon.trash />
                           </button>
@@ -175,6 +191,7 @@ export default function Authentication() {
 
 function AddUser({ onClose, onSaved }) {
   const { toast } = useApp();
+  // Admins add members; the page each member can open is set by the super admin.
   const [f, setF] = useState({ name: '', email: '', password: '', role: 'member' });
   async function save() {
     try {
@@ -194,13 +211,6 @@ function AddUser({ onClose, onSaved }) {
       <div className="field"><label>Name</label><input className="input" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></div>
       <div className="field"><label>Email</label><input className="input" type="email" value={f.email} onChange={(e) => setF({ ...f, email: e.target.value })} /></div>
       <div className="field"><label>Temporary password</label><input className="input" type="text" value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} placeholder="At least 6 characters" /><div className="hint">Share it with them; they can change it after signing in.</div></div>
-      <div className="field">
-        <label>Role</label>
-        <select className="select" value={f.role} onChange={(e) => setF({ ...f, role: e.target.value })}>
-          <option value="member">Member</option>
-          <option value="admin">Admin (can manage team)</option>
-        </select>
-      </div>
     </Modal>
   );
 }

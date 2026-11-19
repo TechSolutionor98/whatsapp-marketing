@@ -14,6 +14,7 @@ import Gateway from './pages/Gateway.jsx';
 import Audit from './pages/Audit.jsx';
 import Settings from './pages/Settings.jsx';
 import Authentication from './pages/Authentication.jsx';
+import SuperAdmin from './pages/SuperAdmin.jsx';
 
 const NAV = [
   { id: 'overview', label: 'Overview', icon: 'grid', group: 'Operations' },
@@ -26,6 +27,7 @@ const NAV = [
   { id: 'audit', label: 'Audit Logs', icon: 'logs', group: 'System' },
   { id: 'settings', label: 'Settings', icon: 'settings', group: 'System' },
   { id: 'auth', label: 'Authentication', icon: 'shield', group: 'System' },
+  { id: 'superadmin', label: 'Super Admin', icon: 'crown', group: 'System' },
 ];
 
 const PAGES = {
@@ -39,6 +41,7 @@ const PAGES = {
   audit: Audit,
   settings: Settings,
   auth: Authentication,
+  superadmin: SuperAdmin,
 };
 
 const TITLES = {
@@ -52,6 +55,7 @@ const TITLES = {
   audit: ['Audit Logs', 'Every action, send and reply'],
   settings: ['Settings', 'Pacing, limits and safety controls'],
   auth: ['Authentication', 'Workspace access'],
+  superadmin: ['Super Admin', 'Control the team, their access and everything the app does'],
 };
 
 function connLabel(status) {
@@ -62,9 +66,10 @@ function connLabel(status) {
 }
 
 function Sidebar({ page, go }) {
-  const { wa, stats, user, logout } = useApp();
+  const { wa, stats, user, logout, can } = useApp();
   const conn = connLabel(wa.status);
-  const groups = [...new Set(NAV.map((n) => n.group))];
+  const nav = NAV.filter((n) => can(n.id)); // only the pages this user may open
+  const groups = [...new Set(nav.map((n) => n.group))];
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -80,7 +85,7 @@ function Sidebar({ page, go }) {
       {groups.map((g) => (
         <div key={g}>
           <div className="nav-section">{g}</div>
-          {NAV.filter((n) => n.group === g).map((n) => {
+          {nav.filter((n) => n.group === g).map((n) => {
             const I = Icon[n.icon];
             const active = page === n.id;
             return (
@@ -126,7 +131,7 @@ function Sidebar({ page, go }) {
 }
 
 function Topbar({ page, go }) {
-  const { wa, refreshStats, refreshWa, toast } = useApp();
+  const { wa, refreshStats, refreshWa, toast, can } = useApp();
   const [busy, setBusy] = useState(false);
   const conn = connLabel(wa.status);
   const [title, sub] = TITLES[page] || ['', ''];
@@ -136,6 +141,7 @@ function Topbar({ page, go }) {
     try {
       const r = await api.post('/worker/cycle');
       if (r.sent) toast('Message sent this cycle', 'success');
+      else if (r.paused) toast('Sending is paused (Super Admin → Campaign sending)', 'info');
       else if (r.reason === 'not_connected') toast('Link WhatsApp first', 'error');
       else if (r.info?.reason === 'global_cap') toast('Daily safety cap reached', 'info');
       else toast('Nothing eligible to send right now', 'info');
@@ -157,7 +163,7 @@ function Topbar({ page, go }) {
         <span id="topbar-slot" className="topbar-slot" />
         <button
           className="conn-pill"
-          onClick={() => go('gateway')}
+          onClick={() => can('gateway') && go('gateway')}
           title="WhatsApp connection"
         >
           <span className={`dot ${conn.cls}`} />
@@ -166,9 +172,11 @@ function Topbar({ page, go }) {
         <button className="btn" onClick={() => { refreshStats(); refreshWa(); toast('Refreshed'); }}>
           <Icon.refresh /> Refresh
         </button>
-        <button className="btn primary" onClick={runCycle} disabled={busy}>
-          <Icon.bolt /> {busy ? 'Running…' : 'Run Worker Cycle'}
-        </button>
+        {can('campaigns') && (
+          <button className="btn primary" onClick={runCycle} disabled={busy}>
+            <Icon.bolt /> {busy ? 'Running…' : 'Run Worker Cycle'}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -188,14 +196,21 @@ function Shell() {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
-  const Page = PAGES[page] || Overview;
+  // A page this user may not open (or an unknown one) → their first allowed page.
+  const { can } = useApp();
+  const allowed = !!PAGES[page] && can(page);
+  useEffect(() => {
+    if (!allowed) go(NAV.find((n) => can(n.id))?.id || 'auth');
+  }, [allowed]);
+
+  const Page = allowed ? PAGES[page] : null;
   return (
     <div className="app">
       <Sidebar page={page} go={go} />
       <div className="main">
         <Topbar page={page} go={go} />
         <div className="content">
-          <Page go={go} />
+          {Page && <Page go={go} />}
         </div>
       </div>
     </div>

@@ -32,7 +32,7 @@ system.post('/worker/cycle', async (_req, res) => {
 });
 system.post('/worker/pause', (req, res) => {
   setPaused(!!req.body.paused);
-  audit('system', req.body.paused ? 'Worker paused globally' : 'Worker resumed');
+  audit('system', `${req.body.paused ? 'Worker paused globally' : 'Worker resumed'} by ${req.user?.email || 'unknown'}`);
   res.json({ paused: isPaused() });
 });
 
@@ -94,15 +94,21 @@ system.get('/audit', async (req, res) => {
 });
 
 // ---- Settings ----
-system.get('/settings', (_req, res) => {
-  res.json(getAllSettings());
+// The product feed's login header is only for people who can open Settings.
+function settingsFor(req) {
+  const all = getAllSettings();
+  if (req.user?.role !== 'owner' && !req.user?.pages?.includes('settings')) delete all.productFeedHeader;
+  return all;
+}
+system.get('/settings', (req, res) => {
+  res.json(settingsFor(req));
 });
 system.put('/settings', async (req, res) => {
   const body = req.body || {};
   // Values the server keeps for itself — the Settings page sends back everything it loaded,
   // so a stale tab must not overwrite them.
-  const SERVER_MANAGED = new Set(['productFeedStatus', 'mainPhone', 'addressBookV2', 'namesV2', 'defaultConvPhone', 'mainConvLabel', 'mainCatalogId']);
+  const SERVER_MANAGED = new Set(['productFeedStatus', 'mainPhone', 'addressBookV2', 'namesV2', 'defaultConvPhone', 'mainConvLabel', 'mainCatalogId', 'sendingPaused', 'teamLocked']);
   for (const [k, v] of Object.entries(body)) if (!SERVER_MANAGED.has(k)) await setSetting(k, v);
-  audit('system', 'Settings updated');
-  res.json(getAllSettings());
+  audit('system', `Settings updated by ${req.user?.email || 'unknown'}`);
+  res.json(settingsFor(req));
 });

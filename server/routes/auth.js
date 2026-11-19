@@ -9,16 +9,21 @@ import {
   clearAuthCookie,
   requireAuth,
   requireAdmin,
+  blockedReason,
 } from '../auth.js';
+import { pagesOf, cleanPages, forgetUser } from '../access.js';
 
 export const auth = Router();
 
 const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const publicUser = (u) => ({
+export const publicUser = (u) => ({
   id: String(u._id),
   email: u.email,
   name: u.name,
   role: u.role,
+  pages: pagesOf(u), // pages this user may open (the super admin: all)
+  allPages: u.role === 'owner' || !Array.isArray(u.pages),
+  suspended: !!u.suspended,
   createdAt: u.createdAt,
   lastLoginAt: u.lastLoginAt || null,
 });
@@ -36,8 +41,9 @@ auth.get('/status', async (_req, res) => {
   }
 });
 
-// Create an account. Admin/owner only — there is no public signup.
-// The superadmin (owner) is seeded on startup from SUPERADMIN_* env vars.
+// Create an account — there is no public signup. The super admin (owner, seeded on startup
+// from SUPERADMIN_* env vars) can add admins and members and choose their pages; an admin
+// can only add members.
 auth.post('/register', requireAdmin, async (req, res) => {
   if (!isMongoUp()) return res.status(503).json({ error: 'Database unavailable — start MongoDB' });
   const { name = '', email = '', password = '' } = req.body || {};
@@ -46,6 +52,8 @@ auth.post('/register', requireAdmin, async (req, res) => {
     return res.status(400).json({ error: 'Password must be at least 6 characters' });
 
   try {
+    const byOwner = req.user.role === 'owner';
+    if (!byOwner && req.body.role === 'admin') return res.status(403).json({ error: 'Only the super admin can add admins' });
     const role = req.body.role === 'admin' ? 'admin' : 'member';
     const doc = {
       name: name.trim() || email.split('@')[0],
@@ -55,6 +63,8 @@ auth.post('/register', requireAdmin, async (req, res) => {
       createdAt: new Date().toISOString(),
       lastLoginAt: null,
     };
+    const pages = byOwner ? cleanPages(req.body.pages) : null;
+    if (pages) doc.pages = pages;
     const r = await users().insertOne(doc);
     doc._id = r.insertedId;
     audit('system', `Account created by ${req.user.email}: ${doc.email} (${role})`, {
@@ -76,6 +86,8 @@ auth.post('/login', async (req, res) => {
     if (!u || !(await verifyPassword(password, u.passwordHash))) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
+    const blocked = blockedReason(u);
+    if (blocked) return res.status(403).json({ error: blocked });
     await users().updateOne({ _id: u._id }, { $set: { lastLoginAt: new Date().toISOString() } });
     setAuthCookie(res, signToken(u));
     audit('system', `Signed in: ${u.email}`);
@@ -114,10 +126,14 @@ auth.post('/change-password', requireAuth, async (req, res) => {
     if (!u || !(await verifyPassword(currentPassword, u.passwordHash))) {
       return res.status(400).json({ error: 'Current password is incorrect' });
     }
+    // New password → every other device is signed out; this one gets a fresh session.
+    const tokenVersion = (u.tokenVersion || 0) + 1;
     await users().updateOne(
       { _id: u._id },
-      { $set: { passwordHash: await hashPassword(newPassword) } }
+      { $set: { passwordHash: await hashPassword(newPassword), tokenVersion } }
     );
+    forgetUser(u._id);
+    setAuthCookie(res, signToken({ ...u, tokenVersion }));
     audit('system', `Password changed: ${u.email}`);
     res.json({ ok: true });
   } catch (e) {
@@ -125,7 +141,7 @@ auth.post('/change-password', requireAuth, async (req, res) => {
   }
 });
 
-// ---- User management (admin/owner) ----
+// ---- User management (admin/owner; the full controls are on the Super Admin page) ----
 auth.get('/users', requireAdmin, async (_req, res) => {
   const list = await users().find({}, { sort: { createdAt: 1 } }).toArray();
   res.json(list.map(publicUser));
@@ -138,9 +154,12 @@ auth.delete('/users/:id', requireAdmin, async (req, res) => {
     if (String(target._id) === req.user.uid)
       return res.status(400).json({ error: "You can't delete your own account" });
     if (target.role === 'owner')
-      return res.status(400).json({ error: 'The owner account cannot be removed' });
+      return res.status(400).json({ error: 'The super admin account cannot be removed' });
+    if (req.user.role !== 'owner' && target.role !== 'member')
+      return res.status(403).json({ error: 'Only the super admin can remove an admin' });
     await users().deleteOne({ _id: target._id });
-    audit('system', `Account removed: ${target.email}`, { level: 'warn' });
+    forgetUser(target._id);
+    audit('system', `Account removed by ${req.user.email}: ${target.email}`, { level: 'warn' });
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });

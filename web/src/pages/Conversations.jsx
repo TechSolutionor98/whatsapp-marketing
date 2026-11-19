@@ -160,7 +160,7 @@ function dayDivider(iso) {
 }
 
 export default function Conversations({ go }) {
-  const { toast, onBus, wa } = useApp();
+  const { toast, onBus, wa, can } = useApp();
   const [threads, setThreads] = useState([]);
   const [threadsLoaded, setThreadsLoaded] = useState(false);
   const [filter, setFilter] = useState('');
@@ -503,13 +503,13 @@ export default function Conversations({ go }) {
             {a.syncing && <span className="wa-spin" title="Syncing chats…" />}
           </button>
         ))}
-        <button
+        {can('gateway') && <button
           className="wa-tabs-manage"
           onClick={() => go?.('gateway')}
           title="Link or unlink numbers and choose the default on the WhatsApp Gateway page"
         >
           <Icon.gateway /> Manage numbers
-        </button>
+        </button>}
       </div>
 
       <div className="chat-layout">

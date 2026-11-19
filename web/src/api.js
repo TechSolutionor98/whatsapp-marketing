@@ -18,6 +18,8 @@ async function req(method, path, body) {
   if (res.status === 401 && !path.startsWith('/auth/')) {
     window.dispatchEvent(new Event('auth:expired'));
   }
+  // 403 "no access" → the super admin changed this user's pages; re-read them.
+  if (res.status === 403 && data.noAccess) window.dispatchEvent(new Event('auth:changed'));
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
   return data;
 }

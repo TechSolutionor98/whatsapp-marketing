@@ -7,8 +7,10 @@ import cookieParser from 'cookie-parser';
 import { PORT, ROOT, WA_AUTH_DIR } from './config.js';
 import { connectMongo } from './db/mongo.js';
 import { sseHandler } from './events.js';
-import { requireAuth } from './auth.js';
+import { requireAuth, requireOwner } from './auth.js';
+import { checkAccess } from './access.js';
 import { auth } from './routes/auth.js';
+import { admin } from './routes/admin.js';
 import { contacts } from './routes/contacts.js';
 import { lists } from './routes/lists.js';
 import { templates } from './routes/templates.js';
@@ -33,8 +35,9 @@ app.use(cookieParser());
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 app.use('/api/auth', auth);
 
-// ---- Everything below requires a valid session ----
-app.use('/api', requireAuth);
+// ---- Everything below requires a valid session, and access to the page it belongs to ----
+app.use('/api', requireAuth, checkAccess);
+app.use('/api/admin', requireOwner, admin); // Super Admin page
 
 app.get('/api/events', sseHandler);
 app.use('/api/contacts', contacts);

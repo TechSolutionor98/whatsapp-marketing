@@ -91,4 +91,6 @@ export const DEFAULTS = {
   autoReplyMaxSec: 10, // and at most this long — replies within ~10 s
   mainCatalogId: null, // product catalog the main number's AI uses ('none' = off)
   defaultConvPhone: null, // the number Conversations opens on (chosen on the Gateway page); null = main
+  sendingPaused: false, // super admin paused all campaign sending (kept across restarts)
+  teamLocked: false, // super admin paused sign-in for everyone but themself
 };

@@ -8,6 +8,8 @@ import {
   TOKEN_TTL_DAYS,
   DATA_DIR,
 } from './config.js';
+import { isMongoUp, getSetting } from './db/mongo.js';
+import { loadUser, pagesOf } from './access.js';
 
 // A stable secret: env var wins, else a persisted random one (created on first boot).
 function loadSecret() {
@@ -38,7 +40,9 @@ export async function verifyPassword(plain, hash) {
 
 export function signToken(user) {
   return jwt.sign(
-    { uid: String(user._id), email: user.email, role: user.role, name: user.name },
+    // tv: the user's session version — bumping it (sign out everywhere, password reset,
+    // suspension) ends every session signed before.
+    { uid: String(user._id), email: user.email, role: user.role, name: user.name, tv: user.tokenVersion || 0 },
     SECRET,
     { expiresIn: `${TOKEN_TTL_DAYS}d` }
   );
@@ -65,24 +69,58 @@ function readToken(req) {
   return null;
 }
 
-// Gate: valid session required.
-export function requireAuth(req, res, next) {
+// Why a signed-in user can't use the app right now (null = they can).
+export function blockedReason(u) {
+  if (u.suspended) return 'This account is suspended. Ask the super admin.';
+  if (u.role !== 'owner' && getSetting('teamLocked', false)) return 'Sign-in is paused by the super admin.';
+  return null;
+}
+
+// Gate: valid session required. The account is re-read (cached a few seconds) so a removed,
+// suspended or signed-out user, or a changed role/page access, takes effect immediately.
+export async function requireAuth(req, res, next) {
   const token = readToken(req);
   if (!token) return res.status(401).json({ error: 'Not authenticated' });
+  let claims;
   try {
-    req.user = jwt.verify(token, SECRET);
-    next();
+    claims = jwt.verify(token, SECRET);
   } catch {
     return res.status(401).json({ error: 'Session expired' });
   }
+  if (!isMongoUp()) {
+    // Can't check the account: only the super admin's own session carries on.
+    if (claims.role !== 'owner') return res.status(503).json({ error: 'Database unavailable — try again in a moment' });
+    req.user = { ...claims, pages: pagesOf(claims) };
+    return next();
+  }
+  let u;
+  try {
+    u = await loadUser(claims.uid);
+  } catch {
+    return res.status(503).json({ error: 'Database unavailable — try again in a moment' });
+  }
+  if (!u) return res.status(401).json({ error: 'Account no longer exists' });
+  const blocked = blockedReason(u); // checked first so a suspended person is told why
+  if (blocked) return res.status(401).json({ error: blocked });
+  if ((u.tokenVersion || 0) !== (claims.tv || 0)) return res.status(401).json({ error: 'You were signed out. Please sign in again.' });
+  req.user = { uid: String(u._id), email: u.email, name: u.name, role: u.role, pages: pagesOf(u) };
+  next();
 }
 
-// Gate: must be an admin/owner.
+// Gate: must be an admin or the super admin.
 export function requireAdmin(req, res, next) {
   requireAuth(req, res, () => {
     if (req.user.role !== 'owner' && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Admin access required' });
     }
+    next();
+  });
+}
+
+// Gate: super admin only.
+export function requireOwner(req, res, next) {
+  requireAuth(req, res, () => {
+    if (req.user.role !== 'owner') return res.status(403).json({ error: 'Only the super admin can do this', noAccess: true });
     next();
   });
 }

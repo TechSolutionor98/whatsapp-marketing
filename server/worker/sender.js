@@ -1,4 +1,4 @@
-import { db, audit, getSetting, oid, nowIso, dayKey } from '../db/mongo.js';
+import { db, audit, getSetting, setSetting, oid, nowIso, dayKey } from '../db/mongo.js';
 import { emit, bus } from '../events.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -232,7 +232,7 @@ async function sendOne(campaign, target, contact) {
 
 export async function tick() {
   if (running) return { skipped: true };
-  if (paused) return { paused: true };
+  if (isPaused()) return { paused: true };
   running = true;
   try {
     const next = await nextEligibleTarget();
@@ -280,9 +280,11 @@ export async function runCycleNow() {
   return res;
 }
 
+// Paused sending is saved, so it stays paused after a restart until someone resumes it.
 export function setPaused(v) {
   paused = !!v;
+  setSetting('sendingPaused', paused).catch(() => {});
 }
 export function isPaused() {
-  return paused;
+  return paused || !!getSetting('sendingPaused', false);
 }

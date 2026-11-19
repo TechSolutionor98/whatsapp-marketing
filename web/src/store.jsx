@@ -70,6 +70,18 @@ export function AppProvider({ children }) {
     fetchStatus();
   }, [fetchStatus]);
 
+  // Can this user open a page? The super admin (owner) can open everything; everyone else
+  // gets the pages the super admin gave them. Your own account page is always open.
+  const can = useCallback(
+    (page) => {
+      if (!user) return false;
+      if (page === 'auth') return true;
+      if (page === 'superadmin') return user.role === 'owner';
+      return user.role === 'owner' || (user.pages || []).includes(page);
+    },
+    [user]
+  );
+
   const onBus = useCallback((cb) => {
     listeners.current.add(cb);
     return () => listeners.current.delete(cb);
@@ -89,6 +101,26 @@ export function AppProvider({ children }) {
     window.addEventListener('auth:expired', onExpired);
     return () => window.removeEventListener('auth:expired', onExpired);
   }, [fetchStatus]);
+
+  // Pick up changes the super admin makes (pages, role) without signing out and in again.
+  const signedIn = !!user;
+  useEffect(() => {
+    if (!signedIn) return;
+    const recheck = async () => {
+      try {
+        const r = await api.get('/auth/me');
+        setUser((prev) => (JSON.stringify(prev) === JSON.stringify(r.user) ? prev : r.user));
+      } catch {}
+    };
+    const t = setInterval(recheck, 60000);
+    window.addEventListener('auth:changed', recheck);
+    window.addEventListener('focus', recheck);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener('auth:changed', recheck);
+      window.removeEventListener('focus', recheck);
+    };
+  }, [signedIn]);
 
   // Live data + SSE only while authenticated.
   useEffect(() => {
@@ -118,6 +150,7 @@ export function AppProvider({ children }) {
         logout,
         refreshAuth,
         fetchStatus,
+        can,
         wa,
         stats,
         toast,

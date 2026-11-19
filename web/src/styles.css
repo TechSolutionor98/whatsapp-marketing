@@ -2268,3 +2268,61 @@ tbody tr:hover {
   border-radius: 8px;
   color: inherit;
 }
+
+/* ---- Super Admin ---- */
+.sa .stat .sa-value { font-size: 26px; }
+.sa-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  gap: 18px;
+  margin-bottom: 18px;
+  align-items: start;
+}
+.sa-rows { padding-top: 4px; padding-bottom: 4px; }
+.sa-rows .setting-row { gap: 16px; }
+.sa-stop .st-label { color: var(--danger); }
+.sa-nums { display: flex; flex-direction: column; }
+.sa-num {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 22px;
+  border-bottom: 1px solid var(--border);
+}
+.sa-num:last-child { border-bottom: none; }
+.sa-num-main { flex: 1; min-width: 0; }
+.sa-num-name { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 13.5px; }
+.sa-num-sub { font-size: 12px; color: var(--text-soft); margin-top: 2px; }
+.sa-num-ai { font-size: 11px; font-weight: 700; color: var(--text-faint); }
+.sa-table td { vertical-align: middle; }
+.sa-pages .chip { margin: 2px 4px 2px 0; display: inline-block; }
+.sa-none { background: var(--warn-soft); color: #b45309; }
+.sa-suspended td { opacity: 0.65; }
+.sa-suspended td:last-child { opacity: 1; }
+.sa-actions { display: flex; gap: 4px; justify-content: flex-end; flex-wrap: wrap; }
+.sa-actions .btn svg { width: 14px; height: 14px; }
+.sa-warn { color: #b45309; }
+.sa-checks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 6px; }
+.sa-check,
+.field .sa-check {
+  display: flex;
+  margin-bottom: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+.sa-check.on { border-color: var(--brand); background: var(--brand-soft); color: var(--brand-700); }
+.sa-check input { accent-color: var(--brand); width: 15px; height: 15px; margin: 0; flex: none; }
+.sa-table .badge { white-space: nowrap; }
+@media (max-width: 1100px) {
+  .sa-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 620px) {
+  .sa-checks { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
