@@ -26,13 +26,14 @@ export default function Team() {
   const [editing, setEditing] = useState(null); // a person, or 'new'
   const [pwFor, setPwFor] = useState(null);
   const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
 
   const load = async () => {
     try {
       setData(await api.get('/team'));
+      setError('');
     } catch (e) {
-      toast(e.message, 'error');
-      setData((d) => d || { people: [], grantable: [] });
+      setError(e.message); // never pretend the team is empty when it couldn't be loaded
     }
   };
   useEffect(() => {
@@ -63,6 +64,15 @@ export default function Team() {
     act(u.id, () => api.del(`/team/${u.id}`), `${u.name} removed`);
   };
 
+  if (!data && error) {
+    return (
+      <div className="card card-pad">
+        <Empty icon="users" title="Couldn't load the team" action={<button className="btn" onClick={load}><Icon.refresh /> Try again</button>}>
+          {error}
+        </Empty>
+      </div>
+    );
+  }
   if (!data) return <Loading label="Loading team…" minHeight={260} />;
   const people = data.people || [];
   const active = people.filter((p) => !p.suspended).length;

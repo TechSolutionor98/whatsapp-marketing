@@ -7,6 +7,7 @@ import { emit } from '../events.js';
 import { sendText, sendToJid, isConnected } from '../whatsapp/client.js';
 import { poolState, sendJidFrom, chatJidOf, isAccountConnected, startPoolAccount, removePoolAccount, setPoolLabel, setPoolAutoReply, downloadStoredMedia, canPostInGroup, phoneOfAccount, requestOlderMessages } from '../whatsapp/pool.js';
 import { accountGroup, tabPhone, listNumbers, hasMain } from '../numbers.js';
+import { canLinkNumber } from '../limits.js';
 
 const MEDIA_DIR = path.join(DATA_DIR, 'media_cache');
 const mediaInflight = new Map(); // one download per file even if the page asks twice
@@ -86,6 +87,8 @@ conversations.put('/accounts/:id/catalog', async (req, res) => {
 
 // Add a conversation-only number (not used for warm-up or campaigns). Scan its QR.
 conversations.post('/accounts', async (req, res) => {
+  const full = await canLinkNumber(); // the super admin's limit on numbers per workspace
+  if (full) return res.status(400).json({ error: full });
   const label = (req.body?.label || '').trim();
   const r = await db.warmupAccounts().insertOne({
     label,

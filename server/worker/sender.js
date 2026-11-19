@@ -9,6 +9,7 @@ import { UPLOADS_DIR } from '../routes/uploads.js';
 import { renderTemplate, randInt, nowInTz, withinWindow } from '../utils.js';
 import { hasMain, defaultSenderId } from '../numbers.js';
 import { DEFAULT_WS, currentWs, runInWs } from '../tenant.js';
+import { getLimits, campaignPacing, insidePlatformHours } from '../limits.js';
 
 // The number a campaign sends from: its chosen number (sender_id), else the main Gateway
 // number — or, in a workspace without one, that workspace's default number (fallbackId).
@@ -83,7 +84,7 @@ async function daysSinceFirstSend() {
 
 async function warmupCeiling() {
   const hardCap = getSetting('dailyLimit', 150);
-  if (!getSetting('warmupEnabled', true)) return hardCap;
+  if (!getSetting('warmupEnabled', true) && !getLimits().forceRamp) return hardCap;
   const start = getSetting('warmupStart', 20);
   const step = getSetting('warmupStep', 20);
   return Math.min(hardCap, start + step * (await daysSinceFirstSend()));
@@ -114,6 +115,8 @@ async function promoteScheduled() {
 
 async function nextEligibleTarget(fallbackId) {
   await promoteScheduled();
+  const L = getLimits();
+  const sentByNumber = new Map(); // phone -> campaign messages it sent today
   const campaigns = await db.campaigns().find({ status: 'running' }).sort({ _id: 1 }).toArray();
 
   const ceiling = await warmupCeiling();
@@ -143,7 +146,16 @@ async function nextEligibleTarget(fallbackId) {
     }
     const { hhmm } = nowInTz(c.timezone);
     if (!withinWindow(hhmm, c.window_start, c.window_end)) continue;
-    if (c.sent_today >= c.daily_limit) continue;
+    // The super admin's rules apply on top of what the campaign says (even older campaigns).
+    if (!insidePlatformHours(hhmm, L)) continue;
+    if (c.sent_today >= campaignPacing(c, L).daily) continue;
+    if (L.maxPerNumberDay) {
+      const phone = phoneOfAccount(senderIdOf(c, fallbackId) || 'main');
+      if (!sentByNumber.has(phone)) {
+        sentByNumber.set(phone, phone ? await db.messages().countDocuments({ direction: 'out', campaign_id: { $nin: [null, ''] }, account_phone: phone, day_key: dayKey() }) : 0);
+      }
+      if (sentByNumber.get(phone) >= L.maxPerNumberDay) continue; // this number reached today's limit
+    }
 
     const queued = await db
       .targets()
@@ -213,7 +225,7 @@ async function sendOne(campaign, target, contact, fallbackId) {
 
   const media = loadMedia(template);
   try {
-    if (getSetting('typingSimulation', true)) await sender.typing(contact.phone, randInt(900, 2200));
+    if (getSetting('typingSimulation', true) || getLimits().forceTyping) await sender.typing(contact.phone, randInt(900, 2200));
     const waId = media
       ? await sender.sendMedia(contact.phone, media, text)
       : await sender.send(contact.phone, text);
@@ -264,8 +276,7 @@ export async function tick() {
     const next = await nextEligibleTarget(fallbackId);
     if (!next || !next.target) return { idle: true, info: next };
     await sendOne(next.campaign, next.target, next.contact, fallbackId);
-    const min = next.campaign.min_delay_sec || getSetting('minDelaySec', 35);
-    const max = next.campaign.max_delay_sec || getSetting('maxDelaySec', 90);
+    const { min, max } = campaignPacing(next.campaign); // never faster than the super admin allows
     return { sent: true, delayMs: randInt(min, max) * 1000 };
   } catch (err) {
     audit('system', `Worker tick error: ${err.message}`, { level: 'error' });

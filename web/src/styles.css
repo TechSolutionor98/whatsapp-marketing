@@ -2414,3 +2414,23 @@ tbody tr:hover {
   .team-checks { grid-template-columns: 1fr; }
   .team-actions { padding-left: 0; }
 }
+
+/* A rule the super admin set for every workspace, under the field it limits */
+.st-rule { display: inline-flex; align-items: center; gap: 5px; margin-top: 6px; padding: 2px 9px 2px 7px; border-radius: 999px; background: #f3e8ff; color: #6b21a8; font-size: 11.5px; font-weight: 600; }
+.st-rule svg { width: 12px; height: 12px; }
+
+/* Super Admin tabs + rules */
+.sa-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 16px; padding: 5px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; }
+.sa-tab { display: inline-flex; align-items: center; gap: 7px; padding: 9px 14px; border: none; border-radius: 10px; background: transparent; color: var(--text-soft); font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer; }
+.sa-tab svg { width: 16px; height: 16px; }
+.sa-tab:hover { background: var(--surface-2); color: var(--text); }
+.sa-tab.on { background: var(--brand-soft); color: var(--brand-700); }
+.sa-explain { display: block; padding: 12px 14px; margin-bottom: 16px; border-radius: 12px; background: #f3e8ff; color: #4c1d95; font-size: 13.5px; line-height: 1.5; }
+.sa-explain > svg { width: 15px; height: 15px; vertical-align: -2px; margin-right: 4px; }
+.sa-copy { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; color: #4c1d95; font-weight: 600; }
+.sa-copy .select { width: auto; min-width: 180px; height: 34px; padding-top: 0; padding-bottom: 0; }
+.sa-save-row { justify-content: flex-end; gap: 10px; flex-wrap: wrap; margin-bottom: 18px; }
+@media (max-width: 720px) {
+  .sa-tabs { flex-wrap: nowrap; overflow-x: auto; }
+  .sa-tab { white-space: nowrap; }
+}

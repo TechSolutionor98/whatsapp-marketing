@@ -152,6 +152,22 @@ export default function Campaigns() {
   );
 }
 
+// The super admin's rules for every workspace — the server keeps campaigns inside them.
+function PacingRules() {
+  const { limits: L = {} } = useApp();
+  const parts = [
+    L.minDelaySec > 0 && `at least ${L.minDelaySec} sec between messages`,
+    L.maxPerNumberDay > 0 && `at most ${L.maxPerNumberDay} a day per number`,
+    (L.windowStart || L.windowEnd) && `only ${L.windowStart || '00:00'}–${L.windowEnd || '23:59'}`,
+  ].filter(Boolean);
+  if (!parts.length) return null;
+  return (
+    <div className="st-rule" style={{ marginTop: -4, marginBottom: 12 }}>
+      <Icon.crown /> Super admin rules: {parts.join(' · ')}
+    </div>
+  );
+}
+
 function NewCampaign({ onClose, onSaved }) {
   const { toast, workspace } = useApp();
   const hasMain = workspace?.main !== false; // other workspaces send from their default number
@@ -405,6 +421,7 @@ function NewCampaign({ onClose, onSaved }) {
               <Icon.shield style={{ width: 16, color: 'var(--brand-700)' }} />
               <strong style={{ fontSize: 13 }}>Safe pacing (anti-ban)</strong>
             </div>
+            <PacingRules />
             <div className="row">
               <div className="field" style={{ margin: 0 }}>
                 <label>Daily limit</label>
@@ -680,6 +697,7 @@ function EditCampaignModal({ id, onClose, onSaved }) {
               <Icon.shield style={{ width: 16, color: 'var(--brand-700)' }} />
               <strong style={{ fontSize: 13 }}>Safe pacing (anti-ban)</strong>
             </div>
+            <PacingRules />
             <div className="row">
               <div className="field" style={{ margin: 0 }}><label>Daily limit</label><input type="number" className="input" value={f.daily_limit} onChange={(e) => setF({ ...f, daily_limit: +e.target.value })} /></div>
               <div className="field" style={{ margin: 0 }}><label>Min gap (sec)</label><input type="number" className="input" value={f.min_delay_sec} onChange={(e) => setF({ ...f, min_delay_sec: +e.target.value })} /></div>

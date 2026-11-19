@@ -8,6 +8,7 @@ export function AppProvider({ children }) {
   const [user, setUser] = useState(null);
   const [workspace, setWs] = useState(null); // { id, name, suspended, main } — the one this tab works in
   const [workspaces, setWorkspaces] = useState([]); // super admin: every workspace
+  const [limits, setLimits] = useState({}); // the super admin's rules for every workspace
   const [authChecked, setAuthChecked] = useState(false);
   const [authStatus, setAuthStatus] = useState(null); // { mongoConnected, hasUsers, error }
   const [wa, setWa] = useState({ status: 'disconnected', qr: null, me: null });
@@ -52,6 +53,7 @@ export function AppProvider({ children }) {
       const next = r.workspaces || [];
       return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
     });
+    if (r.limits) setLimits((prev) => (JSON.stringify(prev) === JSON.stringify(r.limits) ? prev : r.limits));
   }, []);
 
   const refreshAuth = useCallback(async () => {
@@ -176,6 +178,7 @@ export function AppProvider({ children }) {
         workspace,
         workspaces,
         switchWorkspace,
+        limits,
         authChecked,
         authStatus,
         login,

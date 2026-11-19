@@ -16,6 +16,7 @@ import { poolState, setPoolAutoReply, removePoolAccount } from '../whatsapp/pool
 import { listNumbers, accountGroup } from '../numbers.js';
 import { emit } from '../events.js';
 import { DEFAULT_WS, runInWs } from '../tenant.js';
+import { getLimits, cleanLimits, enforceEverywhere, getWsDefaults, saveWsDefaults, defaultsOf, canAddPerson, clampSettings, DEFAULT_KEYS, LIMIT_DEFAULTS } from '../limits.js';
 
 export const admin = Router();
 
@@ -77,7 +78,7 @@ admin.post('/workspaces', async (req, res) => {
     if (String(a.password || '').length < 6) return res.status(400).json({ error: "The admin's password must be at least 6 characters" });
     if (await users().findOne({ email: String(a.email).toLowerCase().trim() })) return res.status(409).json({ error: 'An account with that email already exists' });
   }
-  const w = await createWorkspace(name);
+  const w = await createWorkspace(name, getWsDefaults()); // starts with the super admin's defaults
   let adminUser = null;
   if (a && a.email) {
     const doc = {
@@ -252,6 +253,8 @@ admin.put('/users/:id', async (req, res) => {
   let moved = false;
   if (b.ws && b.ws !== (u.ws || DEFAULT_WS)) {
     if (!workspaceOf(b.ws)) return res.status(400).json({ error: 'Workspace not found' });
+    const full = await canAddPerson(String(b.ws));
+    if (full) return res.status(400).json({ error: full });
     set.ws = String(b.ws);
     moved = true;
   }
@@ -332,4 +335,65 @@ admin.get('/activity', async (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 15, 1), 100);
   const list = await col('audit_logs').find({ type: 'admin' }).sort({ _id: -1 }).limit(limit).toArray();
   res.json(list.map(({ _id, ws, ...a }) => ({ id: String(_id), ...a, ws: ws || null, wsName: ws ? workspaceOf(ws)?.name || '(deleted workspace)' : 'All workspaces' })));
+});
+
+// ---- Rules for every workspace + settings new workspaces start with ----
+
+admin.get('/rules', (_req, res) => {
+  res.json({ limits: getLimits(), limitDefaults: LIMIT_DEFAULTS, defaults: getWsDefaults(), defaultKeys: DEFAULT_KEYS });
+});
+
+// Save the rules, then bring every workspace's settings and campaigns inside them.
+admin.put('/limits', async (req, res) => {
+  let next;
+  try {
+    next = cleanLimits(req.body || {});
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  await setPlatform('limits', next);
+  const fixed = await enforceEverywhere(next);
+  // keep the new-workspace defaults inside the rules too
+  await saveWsDefaults(getWsDefaults());
+  const parts = [
+    next.minDelaySec ? `≥${next.minDelaySec}s between messages` : 'no minimum gap',
+    next.maxPerNumberDay ? `≤${next.maxPerNumberDay}/day per number` : 'no daily maximum',
+    next.windowStart || next.windowEnd ? `hours ${next.windowStart || 'any'}–${next.windowEnd || 'any'}` : 'any hours',
+    next.maxNumbers ? `≤${next.maxNumbers} numbers` : null,
+    next.maxTeam ? `≤${next.maxTeam} people` : null,
+    next.allowAi ? null : 'AI off',
+  ].filter(Boolean);
+  audit(null, `Rules for every workspace changed by ${by(req)}: ${parts.join(', ')}${fixed.settings || fixed.campaigns ? ` — adjusted ${fixed.settings} workspace setting${fixed.settings === 1 ? '' : 's'} and ${fixed.campaigns} campaign value${fixed.campaigns === 1 ? '' : 's'}` : ''}`);
+  emit('admin:update', {}, { ws: null });
+  res.json({ limits: next, fixed });
+});
+
+// The settings every NEW workspace starts with.
+admin.put('/defaults', async (req, res) => {
+  const { defaults, notes } = await saveWsDefaults(req.body || {});
+  audit(null, `Settings for new workspaces changed by ${by(req)}`);
+  res.json({ defaults, notes });
+});
+
+// Give every EXISTING workspace these settings too (overwrites theirs for these fields).
+admin.post('/defaults/apply', async (req, res) => {
+  const d = getWsDefaults();
+  const only = Array.isArray(req.body?.keys) && req.body.keys.length ? req.body.keys.filter((k) => DEFAULT_KEYS.includes(k)) : DEFAULT_KEYS;
+  let n = 0;
+  for (const w of listWorkspaces()) {
+    await runInWs(w.id, async () => {
+      const { settings } = clampSettings(Object.fromEntries(only.filter((k) => k in d).map((k) => [k, d[k]])));
+      for (const [k, v] of Object.entries(settings)) await setSetting(k, v);
+    });
+    n++;
+  }
+  audit(null, `Default settings applied to all ${n} workspaces by ${by(req)}`, 'warn');
+  res.json({ ok: true, workspaces: n });
+});
+
+// One workspace's current settings (to start the defaults from them).
+admin.get('/workspaces/:id/settings', async (req, res) => {
+  const w = wsOr404(req, res);
+  if (!w) return;
+  res.json(await runInWs(w.id, () => defaultsOf()));
 });

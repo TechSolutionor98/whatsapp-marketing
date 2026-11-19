@@ -4,6 +4,15 @@ import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
 import { Modal, Loading, timeAgo, initials } from '../ui.jsx';
 import { roleName } from './Authentication.jsx';
+import { RulesPanel, DefaultsPanel } from './SuperAdminRules.jsx';
+
+const TABS = [
+  ['workspaces', 'Workspaces', 'briefcase'],
+  ['people', 'People', 'users'],
+  ['rules', 'Rules & controls', 'shield'],
+  ['defaults', 'New workspace settings', 'settings'],
+  ['activity', 'Activity', 'logs'],
+];
 
 // The platform: every workspace (each business using the app — e.g. Tech Solutionor, or a
 // customer you give access), every person in them, and switches that apply everywhere.
@@ -54,6 +63,19 @@ export default function SuperAdmin() {
   const [pwFor, setPwFor] = useState(null);
   const [wsFilter, setWsFilter] = useState('');
   const [busy, setBusy] = useState('');
+  const [tab, setTabState] = useState(() => {
+    try {
+      return sessionStorage.getItem('pulse_sa_tab') || 'workspaces';
+    } catch {
+      return 'workspaces';
+    }
+  });
+  const setTab = (t) => {
+    setTabState(t);
+    try {
+      sessionStorage.setItem('pulse_sa_tab', t);
+    } catch {}
+  };
 
   const load = async () => {
     const [s, a] = await Promise.allSettled([api.get('/admin/state'), api.get('/admin/activity?limit=15')]);
@@ -129,7 +151,22 @@ export default function SuperAdmin() {
         <Stat label="Sent today" value={sentToday.toLocaleString()} hint={platform.sendingPaused ? 'Sending is paused everywhere' : 'campaign messages, all workspaces'} icon={platform.sendingPaused ? 'pause' : 'send'} color={platform.sendingPaused ? 'red' : 'green'} warn={platform.sendingPaused} />
       </div>
 
+      <div className="sa-tabs" role="tablist">
+        {TABS.map(([id, label, icon]) => {
+          const I = Icon[icon];
+          return (
+            <button key={id} role="tab" aria-selected={tab === id} className={`sa-tab ${tab === id ? 'on' : ''}`} onClick={() => setTab(id)}>
+              <I /> {label}
+            </button>
+          );
+        })}
+      </div>
+
+      {tab === 'rules' && <RulesPanel onSaved={load} />}
+      {tab === 'defaults' && <DefaultsPanel workspaces={workspaces} />}
+
       {/* Workspaces */}
+      {tab === 'workspaces' && (
       <div className="card" style={{ marginBottom: 18 }}>
         <div className="card-head">
           <Icon.briefcase style={{ width: 18, color: 'var(--brand-700)' }} />
@@ -190,7 +227,10 @@ export default function SuperAdmin() {
         </div>
       </div>
 
+      )}
+
       {/* Platform switches */}
+      {tab === 'rules' && (
       <div className="card" style={{ marginBottom: 18 }}>
         <div className="card-head">
           <Icon.bolt style={{ width: 18, color: 'var(--brand-700)' }} />
@@ -231,7 +271,10 @@ export default function SuperAdmin() {
         </div>
       </div>
 
+      )}
+
       {/* People */}
+      {tab === 'people' && (
       <div className="card" style={{ marginBottom: 18 }}>
         <div className="card-head sa-people-head">
           <Icon.users style={{ width: 18, color: 'var(--brand-700)' }} />
@@ -306,7 +349,10 @@ export default function SuperAdmin() {
         </div>
       </div>
 
+      )}
+
       {/* Recent activity */}
+      {tab === 'activity' && (
       <div className="card">
         <div className="card-head">
           <Icon.logs style={{ width: 18, color: 'var(--brand-700)' }} />
@@ -325,6 +371,7 @@ export default function SuperAdmin() {
           ))
         )}
       </div>
+      )}
 
       {creating && (
         <NewWorkspaceModal

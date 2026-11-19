@@ -1,6 +1,7 @@
 // Provider-agnostic AI layer. Talks to any OpenAI-compatible chat endpoint.
 // Default provider: Groq (free, fast). Switchable to Gemini / Ollama / custom in Settings.
 import { getSetting } from './db/mongo.js';
+import { getLimits } from './limits.js';
 
 const PRESETS = {
   groq: 'https://api.groq.com/openai/v1',
@@ -41,6 +42,7 @@ function keyFor(p) {
 
 // Available when we have what the chosen provider needs (Ollama needs no key).
 export function aiAvailable() {
+  if (!getLimits().allowAi) return false; // switched off for every workspace by the super admin
   if (provider() === 'ollama') return !!baseUrl();
   return !!keyFor(provider());
 }

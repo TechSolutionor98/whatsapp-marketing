@@ -9,6 +9,7 @@ import {
 import { checkOnWhatsAppVia } from '../whatsapp/pool.js';
 import { runCycleNow, setPaused, isPaused } from '../worker/sender.js';
 import { hasMain, listNumbers, defaultSenderId } from '../numbers.js';
+import { clampSettings } from '../limits.js';
 
 export const system = Router();
 
@@ -130,7 +131,10 @@ system.put('/settings', async (req, res) => {
   // Values the server keeps for itself — the Settings page sends back everything it loaded,
   // so a stale tab must not overwrite them.
   const SERVER_MANAGED = new Set(['productFeedStatus', 'mainPhone', 'addressBookV2', 'namesV2', 'defaultConvPhone', 'mainConvLabel', 'mainCatalogId', 'sendingPaused', 'teamLocked', 'warmupActive']);
-  for (const [k, v] of Object.entries(body)) if (!SERVER_MANAGED.has(k)) await setSetting(k, v);
-  audit('system', `Settings updated by ${req.user?.email || 'unknown'}`);
-  res.json(settingsFor(req));
+  const wanted = Object.fromEntries(Object.entries(body).filter(([k]) => !SERVER_MANAGED.has(k) && !k.startsWith('_')));
+  // Values outside the super admin's rules are brought inside them (and the page is told why).
+  const { settings, notes } = clampSettings(wanted);
+  for (const [k, v] of Object.entries(settings)) await setSetting(k, v);
+  audit('system', `Settings updated by ${req.user?.email || 'unknown'}${notes.length ? ` (adjusted to the super admin's rules: ${notes.join('; ')})` : ''}`);
+  res.json({ ...settingsFor(req), _adjusted: notes });
 });

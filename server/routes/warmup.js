@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { db, audit, setSetting, oid, nowIso, pubList } from '../db/mongo.js';
 import { poolState, startPoolAccount, removePoolAccount } from '../whatsapp/pool.js';
 import { warmupStatus, runWarmupNow } from '../worker/warmup.js';
+import { canLinkNumber } from '../limits.js';
 
 export const warmup = Router();
 
@@ -13,6 +14,8 @@ warmup.get('/status', async (_req, res) => {
 
 // Add a new number slot — starts a WhatsApp session; the UI then shows its QR to scan.
 warmup.post('/accounts', async (req, res) => {
+  const full = await canLinkNumber(); // the super admin's limit on numbers per workspace
+  if (full) return res.status(400).json({ error: full });
   const label = (req.body?.label || '').trim();
   const r = await db.warmupAccounts().insertOne({
     label,

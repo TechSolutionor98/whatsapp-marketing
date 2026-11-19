@@ -3,6 +3,7 @@ import { db, audit, getSetting, oid, pub, nowIso } from '../db/mongo.js';
 import { isConnected } from '../whatsapp/client.js';
 import { isAccountConnected, accountRole } from '../whatsapp/pool.js';
 import { hasMain, defaultSenderId } from '../numbers.js';
+import { clampCampaign } from '../limits.js';
 
 export const campaigns = Router();
 
@@ -188,7 +189,7 @@ campaigns.get('/:id/detail', async (req, res) => {
 });
 
 campaigns.post('/', async (req, res) => {
-  const d = {
+  const d = clampCampaign({
     name: req.body.name,
     template_id: req.body.template_id ? String(req.body.template_id) : null,
     status: 'draft',
@@ -207,7 +208,7 @@ campaigns.post('/', async (req, res) => {
     sent_today: 0,
     sent_today_date: null,
     created_at: nowIso(),
-  };
+  }); // pacing kept inside the super admin's rules
   if (!d.name) return res.status(400).json({ error: 'Campaign name required' });
   if (!(await validSender(d.sender_id))) return res.status(400).json({ error: 'Pick one of your numbers to send from' });
 
@@ -251,6 +252,7 @@ campaigns.put('/:id', async (req, res) => {
           : req.body[f];
 
   if (set.sender_id && !(await validSender(set.sender_id))) return res.status(400).json({ error: 'Pick one of your numbers to send from' });
+  Object.assign(set, clampCampaign(set)); // pacing kept inside the super admin's rules
   // Changing the audience list re-scans members into the queue.
   const existing = await db.campaigns().findOne({ _id });
   if (!existing) return res.status(404).json({ error: 'Not found' });

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { ObjectId } from 'mongodb';
 import { users, isMongoUp, mongoState, audit, workspaceOf, listWorkspaces } from '../db/mongo.js';
 import { DEFAULT_WS } from '../tenant.js';
+import { getLimits, canAddPerson } from '../limits.js';
 import {
   hashPassword,
   verifyPassword,
@@ -40,6 +41,7 @@ function session(req, u) {
   return {
     user: publicUser(u),
     workspace: { id: ws, name: w?.name || 'Workspace', suspended: !!w?.suspended, main: ws === DEFAULT_WS },
+    limits: getLimits(), // the super admin's rules — pages show them next to the fields they limit
     ...(u.role === 'owner' ? { workspaces: listWorkspaces() } : {}),
   };
 }
@@ -74,6 +76,8 @@ auth.post('/register', requireAdmin, async (req, res) => {
     // The super admin picks the workspace; an admin adds people to their own.
     const ws = byOwner ? String(req.body.ws || req.ws || DEFAULT_WS) : req.user.ws || DEFAULT_WS;
     if (!workspaceOf(ws)) return res.status(400).json({ error: 'Pick a workspace' });
+    const full = await canAddPerson(ws);
+    if (full) return res.status(400).json({ error: full });
     const doc = {
       name: name.trim() || email.split('@')[0],
       email: email.toLowerCase().trim(),

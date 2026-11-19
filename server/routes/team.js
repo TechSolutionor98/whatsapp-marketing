@@ -9,6 +9,7 @@ import { hashPassword } from '../auth.js';
 import { PAGES, pagesOf, cleanPages, forgetUser } from '../access.js';
 import { publicUser } from './auth.js';
 import { DEFAULT_WS } from '../tenant.js';
+import { canAddPerson } from '../limits.js';
 
 export const team = Router();
 
@@ -78,6 +79,8 @@ team.post('/', async (req, res) => {
   if (String(b.password || '').length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
   if (b.role === 'admin' && !isOwner(req)) return res.status(403).json({ error: 'Only the super admin can add admins' });
   if (await users().findOne({ email })) return res.status(409).json({ error: 'An account with that email already exists' });
+  const full = await canAddPerson(req.ws);
+  if (full) return res.status(400).json({ error: full });
   const role = b.role === 'admin' ? 'admin' : 'member';
   const doc = {
     name: String(b.name || '').trim() || email.split('@')[0],

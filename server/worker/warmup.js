@@ -3,6 +3,7 @@ import { emit } from '../events.js';
 import { connectedAccounts, sendFromTo, reconnectPoolAccounts } from '../whatsapp/pool.js';
 import { isMongoUp } from '../db/mongo.js';
 import { DEFAULT_WS, currentWs, runInWs } from '../tenant.js';
+import { getLimits } from '../limits.js';
 import { aiAvailable, warmupOpener, warmupReply } from '../ai.js';
 import { spin, randInt, sleep, nowInTz, withinWindow, WARMUP_POOL, WARMUP_REPLIES } from '../utils.js';
 
@@ -37,7 +38,8 @@ async function warmupDay() {
 export async function dailyTarget() {
   const start = getSetting('warmupDailyStart', 5);
   const step = getSetting('warmupDailyStep', 3);
-  const max = getSetting('warmupDailyMax', 40);
+  const cap = getLimits().warmupMaxPerDay; // the super admin's cap for every workspace
+  const max = cap ? Math.min(getSetting('warmupDailyMax', 40), cap) : getSetting('warmupDailyMax', 40);
   return Math.min(max, start + step * (await warmupDay()));
 }
 
@@ -81,6 +83,11 @@ function pick(arr) {
 
 const firstName = (n) => (n || '').split(' ')[0] || '';
 const useAi = () => aiAvailable() && getSetting('warmupUseAi', true);
+// Gaps between warm-up chats, never shorter than the super admin allows.
+function warmupGap() {
+  const min = Math.max(getSetting('warmupMinGap', 180), getLimits().warmupMinGap || 0);
+  return { min, max: Math.max(getSetting('warmupMaxGap', 900), min) };
+}
 
 async function makeOpener(toName) {
   if (useAi()) {
@@ -154,8 +161,7 @@ async function tick() {
     }
 
     audit('warmup', `Warm-up chat: ${a.me.name || a.me.phone} ↔ ${b.me.name || b.me.phone}`);
-    const min = getSetting('warmupMinGap', 180);
-    const max = getSetting('warmupMaxGap', 900);
+    const { min, max } = warmupGap();
     return { sent: true, delayMs: randInt(min, max) * 1000 };
   } finally {
     L.running = false;

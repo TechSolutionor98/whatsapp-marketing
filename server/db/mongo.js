@@ -183,12 +183,14 @@ export function isWsSuspended(id) {
   return !!wsCache.get(String(id || ''))?.suspended;
 }
 
-export async function createWorkspace(name) {
+// A new workspace starts with DEFAULTS plus the super admin's "new workspace" settings.
+export async function createWorkspace(name, startSettings = {}) {
   const id = String(new ObjectId());
   const doc = { _id: id, name: String(name || '').trim() || 'New workspace', suspended: false, created_at: nowIso() };
+  const settings = { ...DEFAULTS, ...startSettings };
   await col('workspaces').insertOne(doc);
-  await col('settings').updateOne({ _id: settingsDocId(id) }, { $setOnInsert: { ...DEFAULTS } }, { upsert: true });
-  settingsByWs.set(id, { ...DEFAULTS });
+  await col('settings').updateOne({ _id: settingsDocId(id) }, { $setOnInsert: settings }, { upsert: true });
+  settingsByWs.set(id, { ...settings });
   wsCache.set(id, wsPub(doc));
   return wsPub(doc);
 }

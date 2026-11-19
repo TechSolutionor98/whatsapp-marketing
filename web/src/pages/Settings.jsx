@@ -13,26 +13,35 @@ const MODEL_HINTS = {
   custom: 'the exact model name your endpoint expects',
 };
 
-function Toggle({ checked, onChange }) {
+function Toggle({ checked, onChange, disabled }) {
   return (
     <label className="switch">
-      <input type="checkbox" checked={!!checked} onChange={(e) => onChange(e.target.checked)} />
+      <input type="checkbox" checked={!!checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
       <span className="slider" />
     </label>
   );
 }
 
-function Num({ value, onChange, suffix, width = 90 }) {
+// A rule the super admin set for every workspace, shown under the field it limits.
+export function Rule({ children }) {
+  return (
+    <div className="st-rule">
+      <Icon.crown /> {children}
+    </div>
+  );
+}
+
+function Num({ value, onChange, suffix, width = 90, min, max }) {
   return (
     <div className="flex" style={{ gap: 6 }}>
-      <input type="number" className="input" style={{ width }} value={value} onChange={(e) => onChange(+e.target.value)} />
+      <input type="number" className="input" style={{ width }} value={value} min={min || undefined} max={max || undefined} onChange={(e) => onChange(+e.target.value)} />
       {suffix && <span className="muted" style={{ fontSize: 12 }}>{suffix}</span>}
     </div>
   );
 }
 
 export default function Settings() {
-  const { toast } = useApp();
+  const { toast, limits: L = {} } = useApp();
   const [s, setS] = useState(null);
   const [saving, setSaving] = useState(false);
   const [aiStatus, setAiStatus] = useState(null);
@@ -52,8 +61,9 @@ export default function Settings() {
   async function save() {
     setSaving(true);
     try {
-      await api.put('/settings', s);
-      toast('Settings saved', 'success');
+      const { _adjusted = [], ...saved } = await api.put('/settings', s);
+      setS(saved); // what was really saved (kept inside the super admin's rules)
+      toast(_adjusted.length ? `Saved — adjusted to the super admin's rules: ${_adjusted.join('; ')}` : 'Settings saved', _adjusted.length ? 'info' : 'success');
     } catch (e) {
       toast(e.message, 'error');
     }
@@ -69,20 +79,32 @@ export default function Settings() {
         </div>
         <div className="card-pad" style={{ paddingTop: 4 }}>
           <div className="setting-row">
-            <div><div className="st-label">Daily send cap</div><div className="st-desc">Hard ceiling of messages per day across the account.</div></div>
-            <Num value={s.dailyLimit} onChange={(v) => set('dailyLimit', v)} suffix="msgs/day" />
+            <div>
+              <div className="st-label">Daily send cap</div>
+              <div className="st-desc">Hard ceiling of messages per day across the account.</div>
+              {L.maxPerNumberDay > 0 && <Rule>At most {L.maxPerNumberDay} campaign messages a day per number</Rule>}
+            </div>
+            <Num value={s.dailyLimit} onChange={(v) => set('dailyLimit', v)} suffix="msgs/day" max={L.maxPerNumberDay} />
           </div>
           <div className="setting-row">
-            <div><div className="st-label">Delay between messages</div><div className="st-desc">Each send waits a random gap in this range — mimics human typing.</div></div>
+            <div>
+              <div className="st-label">Delay between messages</div>
+              <div className="st-desc">Each send waits a random gap in this range — mimics human typing.</div>
+              {L.minDelaySec > 0 && <Rule>At least {L.minDelaySec} seconds between messages</Rule>}
+            </div>
             <div className="flex" style={{ gap: 8 }}>
-              <Num value={s.minDelaySec} onChange={(v) => set('minDelaySec', v)} width={70} />
+              <Num value={s.minDelaySec} onChange={(v) => set('minDelaySec', v)} width={70} min={L.minDelaySec} />
               <span className="muted">to</span>
-              <Num value={s.maxDelaySec} onChange={(v) => set('maxDelaySec', v)} suffix="sec" width={70} />
+              <Num value={s.maxDelaySec} onChange={(v) => set('maxDelaySec', v)} suffix="sec" width={70} min={L.minDelaySec} />
             </div>
           </div>
           <div className="setting-row">
-            <div><div className="st-label">Simulate typing</div><div className="st-desc">Show "typing…" before each message for a natural feel.</div></div>
-            <Toggle checked={s.typingSimulation} onChange={(v) => set('typingSimulation', v)} />
+            <div>
+              <div className="st-label">Simulate typing</div>
+              <div className="st-desc">Show "typing…" before each message for a natural feel.</div>
+              {L.forceTyping && <Rule>Always on</Rule>}
+            </div>
+            <Toggle checked={s.typingSimulation || L.forceTyping} disabled={L.forceTyping} onChange={(v) => set('typingSimulation', v)} />
           </div>
         </div>
       </div>
@@ -94,11 +116,15 @@ export default function Settings() {
         </div>
         <div className="card-pad" style={{ paddingTop: 4 }}>
           <div className="setting-row">
-            <div><div className="st-label">Active hours</div><div className="st-desc">Messages only go out between these local times.</div></div>
+            <div>
+              <div className="st-label">Active hours</div>
+              <div className="st-desc">Messages only go out between these local times.</div>
+              {(L.windowStart || L.windowEnd) && <Rule>Only between {L.windowStart || '00:00'} and {L.windowEnd || '23:59'}</Rule>}
+            </div>
             <div className="flex" style={{ gap: 8 }}>
-              <input type="time" className="input" style={{ width: 120 }} value={s.windowStart} onChange={(e) => set('windowStart', e.target.value)} />
+              <input type="time" className="input" style={{ width: 120 }} value={s.windowStart} min={L.windowStart || undefined} onChange={(e) => set('windowStart', e.target.value)} />
               <span className="muted">to</span>
-              <input type="time" className="input" style={{ width: 120 }} value={s.windowEnd} onChange={(e) => set('windowEnd', e.target.value)} />
+              <input type="time" className="input" style={{ width: 120 }} value={s.windowEnd} max={L.windowEnd || undefined} onChange={(e) => set('windowEnd', e.target.value)} />
             </div>
           </div>
           <div className="setting-row">
@@ -115,8 +141,12 @@ export default function Settings() {
         </div>
         <div className="card-pad" style={{ paddingTop: 4 }}>
           <div className="setting-row">
-            <div><div className="st-label">Gradual warm-up</div><div className="st-desc">Start low and ramp daily volume until the cap is reached.</div></div>
-            <Toggle checked={s.warmupEnabled} onChange={(v) => set('warmupEnabled', v)} />
+            <div>
+              <div className="st-label">Gradual warm-up</div>
+              <div className="st-desc">Start low and ramp daily volume until the cap is reached.</div>
+              {L.forceRamp && <Rule>Always on</Rule>}
+            </div>
+            <Toggle checked={s.warmupEnabled || L.forceRamp} disabled={L.forceRamp} onChange={(v) => set('warmupEnabled', v)} />
           </div>
           {s.warmupEnabled && (
             <div className="setting-row">
@@ -485,14 +515,19 @@ function AiCard({ s, set, status }) {
           <div className="sub">Rewrite every send uniquely so your number stays safe</div>
         </div>
         <span
-          className={`badge ${configured ? 'green' : 'amber'}`}
+          className={`badge ${status?.blocked ? 'red' : configured ? 'green' : 'amber'}`}
           style={{ marginLeft: 'auto' }}
         >
-          {configured ? '● Connected' : 'Not configured'}
+          {status?.blocked ? 'Off — super admin' : configured ? '● Connected' : 'Not configured'}
         </span>
       </div>
       <div className="card-pad" style={{ paddingTop: 4 }}>
-        {!configured && (
+        {status?.blocked && (
+          <div className="auth-note" style={{ marginBottom: 4 }}>
+            The super admin has switched AI off for every workspace. Messages go out as written, and chats are answered by people.
+          </div>
+        )}
+        {!configured && !status?.blocked && (
           <div className="auth-note" style={{ marginBottom: 4 }}>
             {s.aiProvider === 'ollama' ? (
               <>
