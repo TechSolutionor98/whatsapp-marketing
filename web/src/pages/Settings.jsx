@@ -244,9 +244,14 @@ function ProductCatalogs() {
                   {c.type === 'api' && c.live?.ok ? ' · price & stock checked live before each reply' : ''}
                   {c.status?.error ? <span style={{ color: '#e5484d' }}> · last sync failed: {c.status.error}</span> : null}
                 </div>
+                {c.type === 'api' && c.link && c.no_link < c.count && (
+                  <div className="st-desc">Product links: <code>{c.link}</code></div>
+                )}
                 {c.type === 'api' && c.count > 0 && (!c.currency || c.no_link === c.count) && (
                   <div className="st-desc" style={{ color: '#b7791f' }}>
-                    {[!c.currency && 'no currency set', c.no_link === c.count && 'no product links'].filter(Boolean).join(' · ')} — click Edit to add {!c.currency && c.no_link === c.count ? 'them' : 'it'} so the AI can quote prices and send links
+                    {[!c.currency && 'no currency set', c.no_link === c.count && 'no product links — your product API sends none'].filter(Boolean).join(' · ')} — click Edit and{' '}
+                    {c.no_link === c.count ? 'paste the link of any one product from your website (every product then gets its link)' : 'set the currency'}
+                    {!c.currency && c.no_link === c.count ? ', and set the currency' : ''}, so the AI can quote prices and send links
                   </div>
                 )}
               </div>

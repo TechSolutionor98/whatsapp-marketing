@@ -259,6 +259,61 @@ export async function fetchCatalog(feedUrl, headerSetting = '', linkPattern = ''
   return [...out.values()].slice(0, MAX_PRODUCTS);
 }
 
+// ---------- product page links the API doesn't send ----------
+// Real feed (api.grabatoz.ae): every product has a slug ("ugreen-7-port-usb-a-hub-black") but
+// no page link — the page is https://grabatoz.ae/product/<slug>. A product link turns into the
+// pattern for every product: the part of its address that is a product's slug, id or sku
+// becomes {slug} / {id} / {sku}. Returns '' when the link doesn't point at a product we have.
+export async function patternFromLink(link, catalogId) {
+  let u;
+  try {
+    u = new URL(String(link || '').trim());
+  } catch {
+    return '';
+  }
+  if (!/^https?:$/.test(u.protocol)) return '';
+  const segs = u.pathname.split('/').filter(Boolean).map((x) => {
+    try {
+      return decodeURIComponent(x);
+    } catch {
+      return x;
+    }
+  });
+  for (let i = segs.length - 1; i >= 0; i--) {
+    const seg = segs[i];
+    const p = await db.products().findOne({ catalog_id: String(catalogId), $or: [{ slug: seg }, { ext_id: seg }, { sku: seg }] }, { projection: { slug: 1, ext_id: 1, sku: 1 } });
+    if (!p) continue;
+    const key = p.slug === seg ? 'slug' : p.ext_id === seg ? 'id' : 'sku';
+    const out = [...segs];
+    out[i] = `{${key}}`;
+    return `${u.origin}/${out.join('/')}`;
+  }
+  return '';
+}
+
+// No links in the API and no pattern set yet: learn it from a product link already sent or
+// received in this workspace's chats (real data: the team had sent grabatoz.ae/product/… links).
+export async function learnLinkPattern(catalogId) {
+  let msgs = [];
+  try {
+    msgs = await db.messages().find({ body: /https?:\/\// }, { projection: { body: 1 } }).sort({ _id: -1 }).limit(3000).toArray();
+  } catch {
+    return '';
+  }
+  const seen = new Set();
+  for (const m of msgs) {
+    for (const raw of String(m.body).match(/https?:\/\/[^\s<>"')]+/g) || []) {
+      const link = raw.replace(/[.,;:!?]+$/, '');
+      if (seen.has(link)) continue;
+      seen.add(link);
+      const pattern = await patternFromLink(link, catalogId);
+      if (pattern) return pattern;
+      if (seen.size > 200) return '';
+    }
+  }
+  return '';
+}
+
 // ---------- catalogs: API (synced) or manual (typed in Settings) ----------
 // catalogs: { _id, name, type: 'api'|'manual', url, header, link (product page pattern), currency, status: {count, at, error} }
 // products: { catalog_id, ext_id, name, price, regular_price, currency, url, slug, sku, brand, category, in_stock, description, keywords }
@@ -271,6 +326,16 @@ export function syncCatalog(catalogId, reason = 'manual') {
     if (!cat) return { error: 'Catalog not found' };
     if (cat.type !== 'api') return { count: await db.products().countDocuments({ catalog_id: key }) };
     try {
+      // The API sends no page links and none was set → learn the pattern from a product link in
+      // the chats (only once there are products to match it against).
+      if (!cat.link && (await db.products().countDocuments({ catalog_id: key, url: { $nin: [null, ''] } })) === 0) {
+        const learned = await learnLinkPattern(key);
+        if (learned) {
+          cat.link = learned;
+          await db.catalogs().updateOne({ _id: cat._id }, { $set: { link: learned } });
+          audit('system', `Product catalog "${cat.name}": product page links found — ${learned} (learned from a product link in your chats). The AI can send links now.`, { level: 'success' });
+        }
+      }
       const products = await fetchCatalog(cat.url, cat.header || '', cat.link || '');
       const at = nowIso();
       const ops = products.map((p) => ({
