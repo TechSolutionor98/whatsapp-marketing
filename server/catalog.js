@@ -378,6 +378,9 @@ const STOP = new Set(
     'what which who whom whose when where why how any some much many more most need want help know tell show give send get price prices cost ' +
     'rate available avail availability stock hi hello hey hlo salam assalam asslamoalikum assalamualaikum thanks thank ok okay sir bhai bro ' +
     'u ur model models sure interested looking like also there here anything something one ones other options option ' +
+    // what they want ABOUT a product, not the product (real chat: "send the link of ugreen one"
+    // marked every product "doesn't match: link"). Not photo/image/web — photo paper, webcam.
+    'link links url urls website site detail details info information spec specs specification specifications share provide pic pics ' +
     'good best better cheap cheaper cheapest expensive new latest buy purchase order ' +
     'under below above over less than lower within upto up between around approx approximately budget range max maximum min minimum least ' +
     'aed dhs dh dirham dirhams rs pkr sar usd qar omr kwd bhd ' +
@@ -514,7 +517,13 @@ export async function searchCatalog({ latest = '', earlier = '', ours = '', cata
   if (Array.isArray(catalogIds) && !catalogIds.length) return empty;
   const b1 = parseBudget(latest);
   const b0 = parseBudget(earlier);
-  const budget = b1.min != null || b1.max != null ? b1 : b0.min != null || b0.max != null ? b0 : null;
+  // "the ugreen one that is of 162 AED" after we listed "UGREEN … AED 162.96" names THAT product —
+  // it isn't a budget of "up to 162" (real chat: the hub came back as "outside their budget").
+  const quoted = (String(ours || '').replace(/(\d),(\d{3})\b/g, '$1$2').match(/\d+(?:\.\d+)?/g) || []).map(Number).filter((n) => n >= 10);
+  const isQuoted = (n) => n != null && quoted.some((q) => Math.abs(q - n) <= 1);
+  const pick = b1.min == null && isQuoted(b1.max) ? b1.max : b1.max == null && isQuoted(b1.min) ? b1.min : null;
+  const b1b = pick != null ? { min: null, max: null } : b1;
+  const budget = b1b.min != null || b1b.max != null ? b1b : b0.min != null || b0.max != null ? b0 : null;
   const latestTerms = searchTerms(b1.rest);
   let earlierTerms = searchTerms(b0.rest);
   if (!latestTerms.length && !earlierTerms.length && ours) earlierTerms = searchTerms(parseBudget(ours).rest);
@@ -564,7 +573,8 @@ export async function searchCatalog({ latest = '', earlier = '', ours = '', cata
   // AI can't present a Vivobook as a gaming laptop
   const missing = (p) => askedBases.filter((b) => !has(p._words, b));
   const fits = (p) => !budget || (p.price != null && p.price > 0 && (budget.max == null || p.price <= budget.max) && (budget.min == null || p.price >= budget.min));
-  const rank = (a, b) => stockRank(b) - stockRank(a) || b._name - a._name || (a.price ?? Infinity) - (b.price ?? Infinity);
+  const picked = (p) => (pick != null && p.price != null && Math.abs(p.price - pick) <= 1 ? 1 : 0); // the one they pointed at by its price
+  const rank = (a, b) => picked(b) - picked(a) || stockRank(b) - stockRank(a) || b._name - a._name || (a.price ?? Infinity) - (b.price ?? Infinity);
   const select = () => {
     const pool = cands.filter((p) => p._live !== 'gone');
     const exact = pool.filter((p) => p._cov === best);

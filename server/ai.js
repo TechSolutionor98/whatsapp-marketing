@@ -177,6 +177,8 @@ Output ONLY the final message text — no quotes, no notes, no preamble.`;
 
   try {
     const out = await chat(system, user, { temperature: 1.05 });
+    // a link that isn't in the original was made up → send the original instead
+    if (inventedLinks(out, baseText).length) return baseText;
     return out || baseText;
   } catch {
     return baseText;
@@ -281,10 +283,31 @@ Output only the message text, or ${NO_REPLY}.`;
   let out = await chatMessages(`${system}\n\n${langLine}`, msgs, { temperature: 0.6, maxTokens: 900 });
   out = cleanReply(out);
   if (!out) throw new Error('empty reply from the AI');
+  // A link that isn't in the facts was made up: ask once more, plainly; if it still invents one,
+  // send nothing and hand the chat to a person — a fake link must never reach a customer.
+  const facts = [info, opts.products || '', ...history.map((m) => m.body || '')].join('\n');
+  let bad = inventedLinks(out, facts);
+  if (bad.length) {
+    const again = `${system}\n\n${langLine}\n\nIMPORTANT: there is NO link for anything except the links written in the facts above. Never write any other link, and never make one up. If they want a link that isn't listed, say you don't have it here and add ${HANDOFF}.`;
+    out = cleanReply(await chatMessages(again, msgs, { temperature: 0.3, maxTokens: 900 }));
+    bad = inventedLinks(out, facts);
+    if (!out || bad.length) {
+      console.warn(`[ai] reply had a made-up link (${bad.join(', ')}) — not sent, handed to a person`);
+      return { text: '', handoff: true };
+    }
+  }
   if (out.includes(NO_REPLY)) return null;
   const text = cleanReply(out.replace(/\[\s*HANDOFF\s*\]/gi, ' ').replace(/[ \t]+\n/g, '\n').replace(/[ \t]{2,}/g, ' '));
   const handoff = /\[\s*HANDOFF\s*\]/i.test(out) || PROMISE_RX.test(text) || PROMISE_AR.test(text);
   return { text, handoff };
+}
+
+// Links the AI may write are only links it was given (products, business info, earlier messages).
+// Real replay: Gemini timed out, Groq answered and invented "https://www.example.com/ugreen-…".
+const URL_RX = /https?:\/\/[^\s<>()"'*]+/gi;
+const trimUrl = (u) => u.replace(/[.,;:!?)\]]+$/, '');
+export function inventedLinks(text, facts) {
+  return [...new Set((String(text || '').match(URL_RX) || []).map(trimUrl))].filter((u) => !String(facts || '').includes(u));
 }
 
 // Tidy a model reply: drop wrapping quotes, turn Markdown into WhatsApp formatting (**bold** →
