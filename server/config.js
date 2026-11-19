@@ -74,9 +74,10 @@ export const DEFAULTS = {
   // --- AI message variation (anti-ban): rewrite each send uniquely ---
   // Uses any OpenAI-compatible endpoint. Default: Groq (free, fast).
   aiEnabled: false, // master switch for AI rewriting at send time
-  aiProvider: 'groq', // groq | gemini | ollama | custom
+  // Gemini when its key is in .env (Groq then stands in automatically if Gemini is busy/down).
+  aiProvider: process.env.GEMINI_API_KEY ? 'gemini' : 'groq', // groq | gemini | ollama | custom
   aiBaseUrl: '', // only used when aiProvider = 'custom'
-  aiModel: 'openai/gpt-oss-20b', // Groq default; change per provider in Settings
+  aiModel: process.env.GEMINI_API_KEY ? 'gemini-3.1-flash-lite' : 'openai/gpt-oss-20b', // change per provider in Settings
   aiTone: 'friendly', // friendly | professional | casual | enthusiastic
   aiInstructions: '', // optional extra guidance for the rewriter
 

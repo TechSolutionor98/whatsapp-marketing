@@ -31,6 +31,7 @@ export async function connectMongo() {
     await ensureIndexes();
     await loadWorkspaces();
     await loadSettings();
+    await preferGemini();
     await ensureSuperadmin();
 
     mongoState.connected = true;
@@ -389,6 +390,30 @@ export async function setSetting(key, value) {
   if (isMongoUp()) {
     await col('settings').updateOne({ _id: settingsDocId(ws) }, { $set: { [key]: value } }, { upsert: true });
   }
+}
+
+// Once the Gemini key is in .env, workspaces still saved on Groq (the old default) switch to
+// Gemini once — Groq keeps answering automatically whenever Gemini is busy or down. Runs only
+// when the key is really there, so a server without it keeps working on Groq.
+async function preferGemini() {
+  if (!process.env.GEMINI_API_KEY || platformCache.geminiDefaultV1) return;
+  const docs = await col('settings').find({ _id: { $ne: 'platform' } }).toArray();
+  let n = 0;
+  for (const d of docs) {
+    if ((d.aiProvider || 'groq') !== 'groq') continue; // someone picked Gemini/Ollama/custom on purpose
+    await col('settings').updateOne({ _id: d._id }, { $set: { aiProvider: 'gemini', aiModel: 'gemini-3.1-flash-lite' } });
+    const ws = d._id === 'global' ? DEFAULT_WS : String(d._id).slice(3);
+    Object.assign(cacheFor(ws), { aiProvider: 'gemini', aiModel: 'gemini-3.1-flash-lite' });
+    n++;
+  }
+  // (written directly: during startup the connection isn't marked ready yet, so setPlatform
+  // would only change memory — and this would run again, undoing a later choice of Groq)
+  const plat = { geminiDefaultV1: nowIso() };
+  const wsDefaults = platformCache.wsDefaults;
+  if (wsDefaults && (wsDefaults.aiProvider || 'groq') === 'groq') plat.wsDefaults = { ...wsDefaults, aiProvider: 'gemini', aiModel: 'gemini-3.1-flash-lite' };
+  await col('settings').updateOne({ _id: 'platform' }, { $set: plat }, { upsert: true });
+  Object.assign(platformCache, plat);
+  if (n) console.log(`  AI: ${n} workspace${n === 1 ? '' : 's'} switched from Groq to Gemini (Groq stays as the automatic backup)`);
 }
 
 // Platform switches (super admin only): pause all sending, pause everyone's sign-in.

@@ -559,11 +559,14 @@ function AiCard({ s, set, status }) {
         <div className="setting-row">
           <div>
             <div className="st-label">Provider</div>
-            <div className="st-desc">Groq is free & fast. Gemini (key in <code>.env</code> as <code>GEMINI_API_KEY</code>) answers Arabic better. Ollama runs locally (no key).</div>
+            <div className="st-desc">
+              Gemini (key in <code>.env</code> as <code>GEMINI_API_KEY</code>) writes the best replies, Arabic too. If Gemini is busy
+              or down, Groq answers automatically. Ollama runs locally (no key).
+            </div>
           </div>
-          <select className="select" style={{ width: 240 }} value={s.aiProvider || 'groq'} onChange={(e) => set({ aiProvider: e.target.value, aiModel: DEFAULT_MODEL[e.target.value] ?? '' })}>
-            <option value="groq">Groq — free & fast (recommended)</option>
-            <option value="gemini">Google Gemini — free key</option>
+          <select className="select" style={{ width: 240 }} value={s.aiProvider || 'gemini'} onChange={(e) => set({ aiProvider: e.target.value, aiModel: DEFAULT_MODEL[e.target.value] ?? '' })}>
+            <option value="gemini">Google Gemini (recommended)</option>
+            <option value="groq">Groq — free & fast</option>
             <option value="ollama">Ollama — 100% local</option>
             <option value="custom">Custom endpoint</option>
           </select>
