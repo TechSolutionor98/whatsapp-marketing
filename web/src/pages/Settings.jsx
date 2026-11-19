@@ -4,9 +4,11 @@ import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
 import { Loading, Modal } from '../ui.jsx';
 
+// picking a provider fills in its model (a Groq model name on Gemini fails with 404)
+const DEFAULT_MODEL = { groq: 'openai/gpt-oss-20b', gemini: 'gemini-3.1-flash-lite', ollama: 'llama3.2', custom: '' };
 const MODEL_HINTS = {
   groq: 'e.g. openai/gpt-oss-20b (fast) or openai/gpt-oss-120b (best). See console.groq.com for your models.',
-  gemini: 'e.g. gemini-2.0-flash or gemini-1.5-flash',
+  gemini: 'gemini-3.1-flash-lite (fast, recommended). If Gemini is busy or out of quota, replies use Groq instead.',
   ollama: 'e.g. llama3.2 — must be pulled first: ollama pull llama3.2',
   custom: 'the exact model name your endpoint expects',
 };
@@ -45,7 +47,7 @@ export default function Settings() {
   }, []);
 
   if (!s) return <Loading label="Loading settings…" minHeight={360} />;
-  const set = (k, v) => setS({ ...s, [k]: v });
+  const set = (k, v) => setS((prev) => (typeof k === 'object' ? { ...prev, ...k } : { ...prev, [k]: v })); // set('key', v) or set({ several })
 
   async function save() {
     setSaving(true);
@@ -499,8 +501,12 @@ function AiCard({ s, set, status }) {
               </>
             ) : (
               <>
-                Add your free key to <code>.env</code> as <code>AI_API_KEY=…</code> and restart
-                the server. Get a free Groq key (no card) at <code>console.groq.com/keys</code>.
+                {s.aiProvider === 'gemini' ? (
+                  <>Add your key to <code>.env</code> as <code>GEMINI_API_KEY=…</code> and restart the server. Get one at <code>aistudio.google.com/apikey</code>.</>
+                ) : (
+                  <>Add your free key to <code>.env</code> as <code>AI_API_KEY=…</code> and restart
+                  the server. Get a free Groq key (no card) at <code>console.groq.com/keys</code>.</>
+                )}
               </>
             )}
           </div>
@@ -518,9 +524,9 @@ function AiCard({ s, set, status }) {
         <div className="setting-row">
           <div>
             <div className="st-label">Provider</div>
-            <div className="st-desc">Groq is free & fast. Gemini uses a free key. Ollama runs locally (no key).</div>
+            <div className="st-desc">Groq is free & fast. Gemini (key in <code>.env</code> as <code>GEMINI_API_KEY</code>) answers Arabic better. Ollama runs locally (no key).</div>
           </div>
-          <select className="select" style={{ width: 240 }} value={s.aiProvider || 'groq'} onChange={(e) => set('aiProvider', e.target.value)}>
+          <select className="select" style={{ width: 240 }} value={s.aiProvider || 'groq'} onChange={(e) => set({ aiProvider: e.target.value, aiModel: DEFAULT_MODEL[e.target.value] ?? '' })}>
             <option value="groq">Groq — free & fast (recommended)</option>
             <option value="gemini">Google Gemini — free key</option>
             <option value="ollama">Ollama — 100% local</option>

@@ -416,7 +416,7 @@ export default function Conversations({ go }) {
   }
 
   async function resolve() {
-    await api.post(`/conversations/${thread.contact.id}/resolve`);
+    await api.post(`/conversations/${thread.contact.id}/resolve`, { account });
     toast('Handoff resolved', 'success');
     loadThread(thread.contact.id);
     loadThreads();

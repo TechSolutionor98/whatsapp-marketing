@@ -22,7 +22,7 @@ import { promisify } from 'node:util';
 const inflateAsync = promisify(inflate);
 
 import { DATA_DIR } from '../config.js';
-import { db, audit, oid, getSetting, setSetting, nowIso, dayKey } from '../db/mongo.js';
+import { db, audit, oid, getSetting, setSetting, nowIso, dayKey, setHandoff } from '../db/mongo.js';
 import { emit } from '../events.js';
 import { attachReceipts } from '../receipts.js';
 import { aiAvailable, conversationReply } from '../ai.js';
@@ -1213,8 +1213,9 @@ async function poolAutoReply(accountId, contact) {
     const q = { contact_id: String(contact._id), ...(myPhone ? { account_phone: myPhone } : { account_id: accountId }) };
     const history = (await db.messages().find(q).sort({ created_at: -1, _id: -1 }).limit(12).toArray()).reverse();
     // Product catalog (if connected): look up what they're asking about. Their new message(s)
-    // count most; the earlier ones and our last reply fill in ("asus gaming laptop?" … "the one
-    // under 2000AED" → ASUS gaming laptops, budget 2000; "kitne ka hai?" after we named one).
+    // count most; their earlier ones fill in ("asus gaming laptop?" … "the one under 2000AED" →
+    // ASUS gaming laptops, budget 2000). Our last reply is passed apart: never read as their
+    // budget, only used when they name nothing ("kitne ka hai?" after we named one).
     // Only the catalog chosen for THIS number (Conversations → AI settings).
     let products = null;
     const catalogIds = await catalogIdsForAccount(accountId);
@@ -1223,8 +1224,9 @@ async function poolAutoReply(accountId, contact) {
       while (lastOutAt >= 0 && history[lastOutAt].direction !== 'out') lastOutAt--;
       const fresh = history.slice(lastOutAt + 1).filter((m) => m.direction === 'in').slice(-3).map((m) => m.body);
       const before = history.slice(0, lastOutAt + 1);
-      const earlier = [...before.filter((m) => m.direction === 'in').slice(-2).map((m) => m.body), ...(lastOutAt >= 0 ? [history[lastOutAt].body] : [])];
-      products = await productContext({ latest: fresh.join('\n'), earlier: earlier.join('\n'), catalogIds });
+      const earlier = before.filter((m) => m.direction === 'in').slice(-2).map((m) => m.body);
+      const ours = lastOutAt >= 0 ? history[lastOutAt].body || '' : '';
+      products = await productContext({ latest: fresh.join('\n'), earlier: earlier.join('\n'), ours, catalogIds });
     }
     const reply = await conversationReply(history.map((m) => ({ direction: m.direction, body: m.body })), { products });
     if (reply === null) return; // "ok" / "thanks" / already answered — no reply needed
@@ -1233,7 +1235,7 @@ async function poolAutoReply(accountId, contact) {
       // It couldn't answer from what it knows — flag the chat so a person replies (Conversations →
       // "Needs human"), instead of a promise to "get back" that nothing keeps.
       const asked = history.filter((m) => m.direction === 'in').slice(-1)[0]?.body || '';
-      await db.contacts().updateOne({ _id: contact._id }, { $set: { handoff: 1, handoff_reason: 'ai' } });
+      await setHandoff(contact._id, myPhone, 'ai'); // on THIS number only
       audit('handoff', `AI couldn't answer ${who} — needs a person ("${asked.slice(0, 80)}")`, { level: 'warn', meta: { contactId: String(contact._id) } });
       emit('stats:dirty', {});
     }
@@ -1256,7 +1258,7 @@ async function poolAutoReply(accountId, contact) {
     await db.contacts().updateOne({ _id: contact._id }, { $set: { last_outbound_at: nowIso() } });
     emit('message:out', { contactId: String(contact._id) });
   } catch (err) {
-    await db.contacts().updateOne({ _id: contact._id }, { $set: { handoff: 1, handoff_reason: 'reply' } });
+    await setHandoff(contact._id, phoneOfAccount(accountId), 'reply');
     audit('handoff', `AI auto-reply failed for ${contact.name || contact.push_name || '+' + contact.phone} — handed to a human (${err.message})`, { level: 'warn', meta: { contactId: String(contact._id) } });
     emit('stats:dirty', {});
   }
@@ -1375,13 +1377,13 @@ async function ingestPool(accountId, { messages, type }) {
       const lc = body.toLowerCase();
       const acctAutoReply = !!ctxOf(accountId)?.autoReply; // this number's own AI toggle
       if (stop.some((w) => lc === w || lc.startsWith(w))) {
-        await db.contacts().updateOne({ _id: contact._id }, { $set: { status: 'opted_out', handoff: 0 } });
+        await db.contacts().updateOne({ _id: contact._id }, { $set: { status: 'opted_out', handoff: 0, handoff_reason: '', handoffs: {} } });
         audit('reply', `${contact.name || (phone ? '+' + phone : 'A contact')} opted out ("${body}")`, { level: 'warn', meta: { contactId: String(contact._id) } });
       } else if (acctAutoReply && aiAvailable()) {
         await db.targets().updateMany({ contact_id: String(contact._id), status: 'queued' }, { $set: { status: 'replied' } });
         scheduleAutoReply(accountId, contact); // one reply after the burst, not one per message
       } else if (getSetting('handoffOnReply', true)) {
-        await db.contacts().updateOne({ _id: contact._id }, { $set: { handoff: 1, handoff_reason: 'reply' } });
+        await setHandoff(contact._id, myPhone, 'reply'); // on the number they wrote to
         await db.targets().updateMany({ contact_id: String(contact._id), status: 'queued' }, { $set: { status: 'replied' } });
         audit('handoff', `${contact.name || msg.pushName || (phone ? '+' + phone : 'A contact')} replied — handed to a human`, { level: 'info', meta: { contactId: String(contact._id) } });
       }

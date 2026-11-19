@@ -482,12 +482,29 @@ export function parseBudget(text) {
 
 const stockRank = (p) => (p.in_stock === true ? 2 : p.in_stock == null ? 1 : 0);
 const has = (words, base) => words.some((w) => w.startsWith(base));
+// What a product IS, from its category: the last word of each part ("Computers › Laptop ›
+// Gaming Laptops" → computer, laptop; "Accessories › Bags & Sleeves" → accessorie, bag, sleeve).
+// Real catalog: "Redragon Travel Laptop Backpack" (Bags & Sleeves), "Laptop Memory" and a
+// "TUF Gaming" power supply all have the words but aren't laptops.
+const kindsOf = (category) => {
+  const out = [];
+  for (const part of String(category || '').split(/[›>/&,|]|\band\b/)) {
+    const w = wordsOf(part);
+    if (w.length) out.push(singular(w[w.length - 1]));
+  }
+  return out;
+};
+const isKind = (kinds, base) => kinds.some((k) => k === base || k === base + 's' || k === base + 'es' || base === k + 's');
 
 // The catalog search behind AI replies. Their latest message counts double (an earlier
 // "asus gaming laptop" + now "the one under 2000AED" → asus, gaming, laptop + budget 2000).
 // Returns the best matches within budget (in stock first), and when those don't help: the
 // nearest-priced matches outside the budget and other in-stock options inside it.
-export async function searchCatalog({ latest = '', earlier = '', catalogIds = null, limit = 4, live = true } = {}) {
+// `earlier` is only the CUSTOMER's earlier messages; `ours` is our last reply. A budget comes
+// only from the customer — real bug: we listed a "Laptop Backpack – AED 114", they wrote
+// "i need gaming laptop", and the reply said "nothing fits your AED 114 budget". Our reply's
+// words are used only when the customer named nothing at all ("kitne ka hai?").
+export async function searchCatalog({ latest = '', earlier = '', ours = '', catalogIds = null, limit = 4, live = true } = {}) {
   const empty = { items: [], closest: [], related: [], budget: null, total: 0, inStock: 0, asked: '' };
   if (!isMongoUp()) return empty;
   if (Array.isArray(catalogIds) && !catalogIds.length) return empty;
@@ -495,7 +512,8 @@ export async function searchCatalog({ latest = '', earlier = '', catalogIds = nu
   const b0 = parseBudget(earlier);
   const budget = b1.min != null || b1.max != null ? b1 : b0.min != null || b0.max != null ? b0 : null;
   const latestTerms = searchTerms(b1.rest);
-  const earlierTerms = searchTerms(b0.rest);
+  let earlierTerms = searchTerms(b0.rest);
+  if (!latestTerms.length && !earlierTerms.length && ours) earlierTerms = searchTerms(parseBudget(ours).rest);
   const terms = [...new Set([...latestTerms, ...earlierTerms])].slice(0, 10);
   if (!terms.length) return empty;
   const scope = Array.isArray(catalogIds) ? { catalog_id: { $in: catalogIds.map(String) } } : {};
@@ -522,15 +540,22 @@ export async function searchCatalog({ latest = '', earlier = '', catalogIds = nu
     p._cov = bases.reduce((s, b) => s + (has(p._words, b) ? (latestBases.has(b) ? 2 : 1) : 0), 0);
     p._name = bases.filter((b) => has(nameW, b)).length; // words in the name itself rank higher than category-only hits
   }
-  const best = Math.max(0, ...cands.map((p) => p._cov));
-  if (!best) return empty;
+  if (!Math.max(0, ...cands.map((p) => p._cov))) return empty;
   // what they asked for, in their order ("asus gaming laptop"), from the words products actually have
   const askedBases = [...new Set([...earlierTerms, ...latestTerms].map(singular))].filter((b) => cands.some((p) => has(p._words, b)));
-  // the kind of product: the last of their words that products have ("asus gaming LAPTOP",
-  // "hp PRINTER") — alternatives must be that kind (a Vivobook for "gaming laptop", not an ASUS
-  // gaming mouse). Their latest message decides when it names one.
+  // the kind of product: the last of their words that the store has as a category ("asus
+  // gaming LAPTOP", "hp PRINTER"), else the last of their words that products have — alternatives
+  // must be that kind (a Vivobook for "gaming laptop", not an ASUS gaming mouse). Their latest
+  // message decides when it names one.
   const known = (list) => list.map(singular).filter((b) => askedBases.includes(b));
-  const head = known(latestTerms).pop() || known(earlierTerms).pop() || '';
+  for (const p of cands) p._kinds = kindsOf(p.category);
+  const kindOf = (list) => [...known(list)].reverse().find((b) => cands.some((p) => isKind(p._kinds, b)));
+  const kind = kindOf(latestTerms) || kindOf(earlierTerms) || '';
+  const head = kind || known(latestTerms).pop() || known(earlierTerms).pop() || '';
+  // When the store's categories say what that kind is, only products of that kind count
+  // ("new laptop" → the Laptop categories, not a laptop backpack sorted first for its price).
+  if (kind) cands = cands.filter((p) => isKind(p._kinds, kind));
+  const best = Math.max(0, ...cands.map((p) => p._cov));
   // each product shown is told which of those words it lacks ("doesn't match: gaming"), so the
   // AI can't present a Vivobook as a gaming laptop
   const missing = (p) => askedBases.filter((b) => !has(p._words, b));
@@ -567,6 +592,7 @@ export async function searchCatalog({ latest = '', earlier = '', catalogIds = nu
     p.missing = missing(p);
     p.live = p._live === true;
     delete p._words;
+    delete p._kinds;
   }
   return { items, closest, related, budget, total: exact.length, inStock: exact.filter((p) => p.in_stock === true).length, asked: askedBases.join(' ') };
 }
@@ -629,8 +655,8 @@ export async function findProducts(text, limit = 5, catalogIds = null) {
 }
 
 // What the AI is told about products for this message ('' = nothing in the catalog matched).
-export async function productContext({ latest = '', earlier = '', catalogIds = null, limit = 4 } = {}) {
-  const r = await searchCatalog({ latest, earlier, catalogIds, limit });
+export async function productContext({ latest = '', earlier = '', ours = '', catalogIds = null, limit = 4 } = {}) {
+  const r = await searchCatalog({ latest, earlier, ours, catalogIds, limit });
   if (!r.items.length && !r.closest.length && !r.related.length) return '';
   const cur = new Map((await db.catalogs().find({}, { projection: { currency: 1 } }).toArray()).map((c) => [String(c._id), c.currency || '']));
   for (const p of [...r.items, ...r.closest, ...r.related]) if (!p.currency) p.currency = cur.get(p.catalog_id) || '';

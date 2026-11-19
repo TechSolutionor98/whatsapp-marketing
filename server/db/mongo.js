@@ -141,6 +141,34 @@ export function users() {
   return col('users');
 }
 
+// ---- "Needs a person" (handoff) ----
+// It belongs to ONE chat — this person on ONE of your numbers — so a handoff on one number
+// doesn't show on the others (real case: a message to one number flagged the same person in
+// every number's tab). contact.handoffs = { [your number]: reason }; contact.handoff stays 1
+// while any number needs a person (dashboard count, campaigns skip them).
+export async function setHandoff(contactId, phone, reason) {
+  const $set = { handoff: 1, handoff_reason: reason };
+  if (phone) $set[`handoffs.${phone}`] = reason;
+  await col('contacts').updateOne({ _id: oid(contactId) }, { $set });
+}
+export async function clearHandoff(contactId, phone) {
+  const _id = oid(contactId);
+  const c = await col('contacts').findOne({ _id }, { projection: { handoffs: 1 } });
+  if (!c) return;
+  const map = { ...(c.handoffs || {}) };
+  if (phone && Object.keys(map).length) delete map[phone]; // only this number's chat (none here → nothing changes)
+  else for (const k of Object.keys(map)) delete map[k]; // an older flag with no number, or no tab given → clear it
+  const left = Object.values(map);
+  await col('contacts').updateOne({ _id }, { $set: { handoffs: map, handoff: left.length ? 1 : 0, handoff_reason: left.length ? left[left.length - 1] : '' } });
+}
+// The handoff reason for this person in ONE number's tab ('' = none). Flags from before this
+// change (no number recorded) still show everywhere until resolved.
+export function handoffFor(contact, phone) {
+  const map = contact?.handoffs;
+  if (map && Object.keys(map).length) return (phone && map[phone]) || '';
+  return contact?.handoff === 1 ? contact.handoff_reason || 'reply' : '';
+}
+
 // ---- Helpers ----
 export function oid(id) {
   try {

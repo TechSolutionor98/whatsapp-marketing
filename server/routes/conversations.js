@@ -2,7 +2,7 @@ import { Router } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from '../config.js';
-import { db, audit, oid, pub, pubList, nowIso, dayKey, getSetting, setSetting } from '../db/mongo.js';
+import { db, audit, oid, pub, pubList, nowIso, dayKey, getSetting, setSetting, clearHandoff, handoffFor } from '../db/mongo.js';
 import { emit } from '../events.js';
 import { sendText, sendToJid, isConnected, getWaState } from '../whatsapp/client.js';
 import { poolState, sendJidFrom, chatJidOf, isAccountConnected, startPoolAccount, removePoolAccount, setPoolLabel, setPoolAutoReply, downloadStoredMedia, canPostInGroup, phoneOfAccount, requestOlderMessages } from '../whatsapp/pool.js';
@@ -247,14 +247,16 @@ conversations.get('/', async (req, res) => {
   for (const s of summaries) {
     const c = byId.get(s._id);
     if (!c) continue;
+    const handoff = handoffFor(c, phoneOfTab); // only when THIS number's chat needs a person
+    if (filter === 'handoff' && !handoff) continue;
     rows.push({
       id: String(c._id),
       name: chatNameFor(c, phoneOfTab),
       push_name: c.is_group ? '' : c.push_name || '',
       phone: c.phone,
       status: c.status,
-      handoff: c.handoff,
-      handoff_reason: c.handoff_reason,
+      handoff: handoff ? 1 : 0,
+      handoff_reason: handoff,
       synced: c.synced ? 1 : 0,
       is_group: c.is_group ? 1 : 0,
       lid_only: c.lid_only ? 1 : 0, // WhatsApp hid this contact's number (@lid) — don't show the lid as a phone
@@ -343,8 +345,10 @@ conversations.get('/:contactId', async (req, res) => {
   const { phone } = accountGroup(account);
   const read_only = !!(contact.is_group && phone && (contact.read_only_for || []).includes(phone));
   // Names saved on OTHER linked phones (and old mixed-up names) stay server-side.
-  const { read_only_for, saved_names, legacy_name, ...shown } = contact;
-  const named = { name: chatNameFor(contact, phone || (await tabPhone(account))), push_name: contact.is_group ? '' : contact.push_name || '' };
+  const { read_only_for, saved_names, legacy_name, handoffs, ...shown } = contact;
+  const tabPh = phone || (await tabPhone(account));
+  const handoff = handoffFor(contact, tabPh);
+  const named = { name: chatNameFor(contact, tabPh), push_name: contact.is_group ? '' : contact.push_name || '', handoff: handoff ? 1 : 0, handoff_reason: handoff };
   res.json({ contact: pub({ ...shown, ...named, unread: 0, read_only }), messages: pubList(messages), has_more });
 });
 
@@ -443,7 +447,8 @@ conversations.post('/:contactId/older', async (req, res) => {
 conversations.post('/:contactId/resolve', async (req, res) => {
   const _id = oid(req.params.contactId);
   if (!_id) return res.status(400).json({ error: 'Bad id' });
-  await db.contacts().updateOne({ _id }, { $set: { handoff: 0, handoff_reason: '' } });
+  // resolves it on the number whose tab you're in (an older flag with no number: everywhere)
+  await clearHandoff(_id, await tabPhone(req.body?.account || req.query.account || 'main'));
   audit('handoff', `Handoff resolved for contact ${req.params.contactId}`, { level: 'success' });
   emit('stats:dirty', {});
   res.json({ ok: true });

@@ -8,66 +8,108 @@ const PRESETS = {
   ollama: 'http://localhost:11434/v1',
 };
 
+// Default model per provider. Gemini: 3.1-flash-lite answered the real shop questions in ~1 s
+// (Arabic too); 3.5-flash / 3.8-flash kept failing with 503 "high demand" or 45 s timeouts, and
+// 2.5-flash / 2.5-flash-lite are closed to new keys (404) — tested with the real key, Nov 2026.
+const DEFAULT_MODEL = { groq: 'openai/gpt-oss-20b', gemini: 'gemini-3.1-flash-lite' };
+
 function provider() {
   return getSetting('aiProvider', 'groq');
 }
-function baseUrl() {
-  const p = provider();
+function baseUrl(p = provider()) {
   if (p === 'custom') return (getSetting('aiBaseUrl', '') || '').replace(/\/+$/, '');
   return PRESETS[p] || PRESETS.groq;
 }
 export function aiModel() {
-  return getSetting('aiModel', 'openai/gpt-oss-20b') || 'openai/gpt-oss-20b'; // llama-3.3-70b-versatile no longer exists on Groq (404)
+  const p = provider();
+  const m = (getSetting('aiModel', '') || '').trim();
+  // switched to Gemini but the model box still names a Groq model ("openai/gpt-oss-20b") → 404
+  if (p === 'gemini' && !/^(gemini|gemma)/i.test(m)) return DEFAULT_MODEL.gemini;
+  return m || DEFAULT_MODEL[p] || DEFAULT_MODEL.groq; // llama-3.3-70b-versatile no longer exists on Groq (404)
 }
 export function aiProviderName() {
   return provider();
+}
+// Each provider's key: GEMINI_API_KEY for Gemini (AI_API_KEY still works on its own), GROQ_API_KEY
+// or AI_API_KEY for Groq — so both can be in .env and Groq can stand in when Gemini is down.
+function keyFor(p) {
+  if (p === 'gemini') return process.env.GEMINI_API_KEY || process.env.AI_API_KEY || '';
+  if (p === 'groq') return process.env.GROQ_API_KEY || process.env.AI_API_KEY || '';
+  if (p === 'ollama') return '';
+  return process.env.AI_API_KEY || '';
 }
 
 // Available when we have what the chosen provider needs (Ollama needs no key).
 export function aiAvailable() {
   if (provider() === 'ollama') return !!baseUrl();
-  return !!process.env.AI_API_KEY;
+  return !!keyFor(provider());
 }
 
 async function chat(system, user, opts = {}) {
   return chatMessages(system, [{ role: 'user', content: user }], opts);
 }
 
-async function chatMessages(system, msgs, { maxTokens = 1024, temperature = 1 } = {}) {
-  const base = baseUrl();
+const REQUEST_TIMEOUT_MS = 25000; // a provider that hangs must not hold a customer's reply forever
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// One provider: busy minute (429: Groq free tier 8,000 tokens/min; Gemini "Please retry in 41s")
+// → wait what it asks (at most 25 s) and try again; overloaded (503 "high demand") or no answer
+// in time → one more try. Gives up with an error the caller can fall back on.
+async function callProvider(p, model, system, msgs, { maxTokens, temperature }) {
+  const base = baseUrl(p);
   if (!base) throw new Error('No AI endpoint configured');
-  const key = process.env.AI_API_KEY;
+  const key = keyFor(p);
   const headers = { 'Content-Type': 'application/json' };
-  if (key && provider() !== 'ollama') headers.Authorization = `Bearer ${key}`;
+  if (key && p !== 'ollama') headers.Authorization = `Bearer ${key}`;
+  const body = { model, temperature, max_tokens: maxTokens, messages: [{ role: 'system', content: system }, ...msgs] };
+  // Groq's GPT-OSS and Gemini 3 are reasoning models — keep reasoning low so the token budget
+  // goes to the answer (otherwise content can come back empty) and replies stay fast.
+  if (p === 'groq' || (p === 'gemini' && /^gemini/i.test(model))) body.reasoning_effort = 'low';
 
-  const body = {
-    model: aiModel(),
-    temperature,
-    max_tokens: maxTokens,
-    messages: [{ role: 'system', content: system }, ...msgs],
-  };
-  // Groq's GPT-OSS/Qwen models are reasoning models — keep reasoning minimal so
-  // the token budget goes to the actual answer (otherwise content can come back empty).
-  if (provider() === 'groq') body.reasoning_effort = 'low';
-
-  // Busy minute on the provider (Groq free tier: 8,000 tokens a minute) → wait what it asks
-  // (retry-after / "try again in 7.5s", at most 25 s) and try again, instead of failing the reply.
   let resp;
+  let failure = '';
   for (let attempt = 0; ; attempt++) {
-    resp = await fetch(`${base}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) });
-    if (resp.status !== 429 || attempt >= 3) break;
-    const t = await resp.text().catch(() => '');
-    const m = t.match(/try again in (?:(\d+)m)?([\d.]+)(ms|s)/i);
-    const asked = m ? (Number(m[1] || 0) * 60 + Number(m[2]) / (m[3] === 'ms' ? 1000 : 1)) * 1000 : Number(resp.headers.get('retry-after')) * 1000;
-    const wait = Math.min(25000, Math.max(1000, (Number.isFinite(asked) && asked > 0 ? asked : 8000) + 300));
-    await new Promise((r) => setTimeout(r, wait));
+    failure = '';
+    resp = await fetch(`${base}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }).catch((e) => {
+      failure = e.name === 'TimeoutError' ? `no answer in ${REQUEST_TIMEOUT_MS / 1000}s` : e.message;
+      return null;
+    });
+    if (resp && resp.ok) break;
+    const status = resp ? resp.status : 0;
+    const t = resp ? await resp.text().catch(() => '') : '';
+    if (resp) failure = `${status}: ${t.replace(/\s+/g, ' ').slice(0, 300)}`;
+    if (status === 429 && attempt < 3) {
+      // a daily quota won't come back in seconds — let the caller fall back right away
+      if (/per ?day|PerDay|daily/i.test(t)) break;
+      const m = t.match(/(?:try again|retry) in (?:(\d+)m)?([\d.]+)(ms|s)/i) || t.match(/"retryDelay"\s*:\s*"()([\d.]+)(s)"/);
+      const asked = m ? (Number(m[1] || 0) * 60 + Number(m[2]) / (m[3] === 'ms' ? 1000 : 1)) * 1000 : Number(resp.headers.get('retry-after')) * 1000;
+      if (Number.isFinite(asked) && asked > 25000) break;
+      await sleep(Math.max(1000, (Number.isFinite(asked) && asked > 0 ? asked : 8000) + 300));
+      continue;
+    }
+    if ((!resp || status >= 500) && attempt < 1) {
+      await sleep(1500);
+      continue;
+    }
+    break;
   }
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => '');
-    throw new Error(`AI error ${resp.status}: ${t.slice(0, 300)}`);
-  }
+  if (!resp || !resp.ok) throw new Error(`AI error ${failure}`);
   const data = await resp.json();
   return (data.choices?.[0]?.message?.content || '').trim();
+}
+
+async function chatMessages(system, msgs, { maxTokens = 1024, temperature = 1 } = {}) {
+  const p = provider();
+  try {
+    return await callProvider(p, aiModel(), system, msgs, { maxTokens, temperature });
+  } catch (e) {
+    // Gemini busy, out of quota or down → answer with Groq when its key is there too, instead
+    // of leaving the customer without a reply.
+    const groqKey = keyFor('groq');
+    if (p !== 'gemini' || !groqKey || groqKey === keyFor('gemini')) throw e;
+    console.warn(`[ai] Gemini failed (${e.message.slice(0, 160)}) — answering with Groq instead`);
+    return callProvider('groq', DEFAULT_MODEL.groq, system, msgs, { maxTokens, temperature });
+  }
 }
 
 // Rewrite a message so each recipient gets a unique, human variation.
@@ -219,6 +261,9 @@ function cleanReply(text) {
     .replace(/\*\*(.+?)\*\*/g, '*$1*')
     .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, (_, label, url) => (label.trim() === url ? url : `${label}: ${url}`))
     .replace(/^#{1,6}\s+/gm, '')
+    // our product notes are for the model, not the customer ("(doesn't match: gaming)")
+    .replace(/\s*\([^()\n]*doesn['’]t match:[^)\n]*\)/gi, '')
+    .replace(/[ \t]*[—–-][ \t]*doesn['’]t match:[^\n]*/gi, '')
     .trim();
   for (let len = Math.floor(t.length / 2); len >= 8; len--) {
     const a = t.slice(0, len).trim();
