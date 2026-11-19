@@ -101,7 +101,7 @@ system.put('/settings', async (req, res) => {
   const body = req.body || {};
   // Values the server keeps for itself — the Settings page sends back everything it loaded,
   // so a stale tab must not overwrite them.
-  const SERVER_MANAGED = new Set(['productFeedStatus', 'mainPhone', 'addressBookV2', 'namesV2']);
+  const SERVER_MANAGED = new Set(['productFeedStatus', 'mainPhone', 'addressBookV2', 'namesV2', 'defaultConvPhone', 'mainConvLabel', 'mainCatalogId']);
   for (const [k, v] of Object.entries(body)) if (!SERVER_MANAGED.has(k)) await setSetting(k, v);
   audit('system', 'Settings updated');
   res.json(getAllSettings());

@@ -2003,8 +2003,37 @@ tbody tr:hover {
 }
 .wa-tab-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); flex: none; }
 .wa-tab-dot.on { background: var(--brand); }
-.wa-tab.add { padding: 9px 12px; color: var(--text-faint); }
-.wa-tab.add svg { width: 16px; height: 16px; }
+/* The default number's tab (picked on the WhatsApp Gateway page). */
+.wa-tab-default {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: var(--brand-soft);
+  color: var(--brand-700);
+}
+/* "Manage numbers" → WhatsApp Gateway (numbers are linked/unlinked there, not here). */
+.wa-tabs-manage {
+  margin-left: auto;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-soft);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.wa-tabs-manage svg { width: 15px; height: 15px; }
+.wa-tabs-manage:hover { color: var(--brand-700); background: var(--surface-2); }
 /* Make room for the tab strip above the chat. */
 .chat-layout { height: calc(100vh - 172px); border-top-left-radius: 0; }
 
@@ -2050,22 +2079,30 @@ tbody tr:hover {
 /* Tab dot: connecting state */
 .wa-tab-dot.connecting { background: var(--warn); }
 
-/* Tab remove (×) button */
-.wa-tab-x {
-  display: inline-flex;
+/* ---- WhatsApp Gateway: every linked number, with the default one ---- */
+.num-card { margin-top: 18px; }
+.num-card .card-head { flex-wrap: wrap; }
+.num-list { display: flex; flex-direction: column; }
+.num-row {
+  display: flex;
   align-items: center;
-  justify-content: center;
-  width: 17px;
-  height: 17px;
-  border-radius: 50%;
-  font-size: 11px;
-  color: var(--text-faint);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.12s, background 0.12s, color 0.12s;
+  gap: 14px;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--border);
 }
-.wa-tab:hover .wa-tab-x { opacity: 0.8; }
-.wa-tab-x:hover { background: var(--danger-soft); color: var(--danger); opacity: 1; }
+.num-row:last-child { border-bottom: none; }
+.num-row.is-default { background: var(--brand-soft); }
+.num-main { flex: 1; min-width: 0; }
+.num-name { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14px; }
+.num-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.num-default { padding: 1px 8px; font-size: 10.5px; }
+.num-sub { font-size: 12.5px; color: var(--text-soft); margin-top: 3px; }
+.num-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.num-actions .btn svg { width: 14px; height: 14px; }
+@media (max-width: 700px) {
+  .num-row { flex-wrap: wrap; padding: 14px 16px; }
+  .num-actions { width: 100%; justify-content: flex-start; }
+}
 
 /* ---- Conversations: fit the window exactly (like WhatsApp Web) ----
    The chat used a hard-coded height (calc(100vh - 172px)); the header is taller now, so the

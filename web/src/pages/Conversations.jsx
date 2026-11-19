@@ -171,9 +171,9 @@ export default function Conversations({ go }) {
   const [sending, setSending] = useState(false);
   const [aiAvail, setAiAvail] = useState(false);
   const [showAiSettings, setShowAiSettings] = useState(false);
-  const [showAddAccount, setShowAddAccount] = useState(false);
-  const [accounts, setAccounts] = useState([{ id: 'main', label: 'Main number', phone: null, connected: false }]);
-  const [account, setAccount] = useState('main'); // active account tab
+  const [accounts, setAccounts] = useState([]);
+  const [account, setAccount] = useState(null); // active account tab — starts on the default number
+  const accountsRef = useRef([]);
   const [syncingChats, setSyncingChats] = useState(false); // polling a just-connected number
   const msgsRef = useRef(null);
   const stickRef = useRef(true); // keep the chat pinned to its newest message while at the bottom
@@ -181,11 +181,26 @@ export default function Conversations({ go }) {
   const olderBusy = useRef(false);
   const [phoneOlder, setPhoneOlder] = useState(''); // '' | 'loading' | 'none'
 
+  // Numbers are linked/unlinked on the WhatsApp Gateway page; here they're only tabs. Opens on
+  // the default number; if the open tab's number was unlinked, goes back to the default.
   const loadAccounts = async () => {
+    let list = [];
     try {
-      const a = await api.get('/conversations/accounts');
-      if (a.length) setAccounts(a);
+      list = await api.get('/conversations/accounts');
     } catch {}
+    const prev = accountsRef.current;
+    if (list.length) {
+      accountsRef.current = list;
+      setAccounts(list);
+    }
+    setAccount((cur) => {
+      if (!list.length) return cur || 'main';
+      if (cur && list.some((a) => a.id === cur)) return cur;
+      const phone = cur && prev.find((a) => a.id === cur)?.phone;
+      const same = phone && list.find((a) => a.phone === phone); // same number, other link
+      if (same) return same.id;
+      return (list.find((a) => a.default) || list[0]).id;
+    });
   };
 
   async function renameTab(a) {
@@ -193,18 +208,6 @@ export default function Conversations({ go }) {
     if (name == null) return;
     try {
       await api.put(`/conversations/accounts/${a.id}/label`, { label: name.trim() });
-      loadAccounts();
-    } catch (e) {
-      toast(e.message, 'error');
-    }
-  }
-
-  async function removeTab(a) {
-    if (!confirm(`Remove ${a.label || '+' + a.phone} from Conversations? This unlinks the number from the app.`)) return;
-    try {
-      await api.del(`/conversations/accounts/${a.id}`);
-      toast('Number removed');
-      if (account === a.id) setAccount('main');
       loadAccounts();
     } catch (e) {
       toast(e.message, 'error');
@@ -232,6 +235,7 @@ export default function Conversations({ go }) {
   }, []);
 
   async function toggleAutoReply() {
+    if (!account) return;
     const v = !autoReply;
     try {
       await api.post(`/conversations/accounts/${account}/autoreply`, { enabled: v });
@@ -243,6 +247,7 @@ export default function Conversations({ go }) {
   }
 
   const loadThreads = async () => {
+    if (!account) return; // waiting for the number list (opens on the default number)
     const params = new URLSearchParams({ account });
     if (filter) params.set('filter', filter);
     try {
@@ -452,11 +457,12 @@ export default function Conversations({ go }) {
           <button
             className={`btn sm ${autoReply ? 'primary' : ''}`}
             onClick={toggleAutoReply}
+            disabled={!account}
             title="When on, AI answers incoming replies automatically"
           >
             <Icon.sparkles /> AI auto-reply: {autoReply ? 'On' : 'Off'}
           </button>
-          <button className="btn sm" onClick={() => setShowAiSettings(true)} title="AI auto-reply settings">
+          <button className="btn sm" onClick={() => setShowAiSettings(true)} disabled={!account} title="AI auto-reply settings">
             <Icon.settings />
           </button>
         </>
@@ -480,7 +486,7 @@ export default function Conversations({ go }) {
       )}
 
       <div className="wa-tabs">
-        {accounts.map((a) => (
+        {[...accounts].sort((a, b) => (b.default ? 1 : 0) - (a.default ? 1 : 0)).map((a) => (
           <button
             key={a.id}
             className={`wa-tab ${account === a.id ? 'active' : ''} ${a.connected ? '' : 'off'}`}
@@ -493,35 +499,18 @@ export default function Conversations({ go }) {
               {a.label || (a.id === 'main' ? 'Main number' : 'Number')}
               {a.phone ? ` · +${a.phone}` : ''}
             </span>
+            {a.default && <span className="wa-tab-default" title="Default number — Conversations opens here. Change it on the WhatsApp Gateway page.">Default</span>}
             {a.syncing && <span className="wa-spin" title="Syncing chats…" />}
-            {a.id !== 'main' && (
-              <span
-                className="wa-tab-x"
-                title="Remove this number"
-                onClick={(e) => { e.stopPropagation(); removeTab(a); }}
-              >
-                ✕
-              </span>
-            )}
           </button>
         ))}
-        <button className="wa-tab add" onClick={() => setShowAddAccount(true)} title="Link another WhatsApp number for chats">
-          <Icon.plus />
+        <button
+          className="wa-tabs-manage"
+          onClick={() => go?.('gateway')}
+          title="Link or unlink numbers and choose the default on the WhatsApp Gateway page"
+        >
+          <Icon.gateway /> Manage numbers
         </button>
       </div>
-      {showAddAccount && (
-        <AddAccountModal
-          onClose={() => setShowAddAccount(false)}
-          onLinked={(id) => {
-            setShowAddAccount(false);
-            if (id) setAccount(id);
-            // The new number takes a moment to register server-side — refresh the tab
-            // list a few times so it appears without a manual page reload.
-            let n = 0;
-            const iv = setInterval(() => { loadAccounts(); if (++n >= 8) clearInterval(iv); }, 1500);
-          }}
-        />
-      )}
 
       <div className="chat-layout">
         <div className="thread-list">
@@ -819,112 +808,6 @@ function AiReplySettings({ account, accountInfo, onClose, onSaved }) {
           </div>
         </>
       )}
-    </Modal>
-  );
-}
-
-// Link a conversation-only WhatsApp number (not used for campaigns or warm-up).
-function AddAccountModal({ onClose, onLinked }) {
-  const { toast, onBus } = useApp();
-  const [label, setLabel] = useState('');
-  const [id, setId] = useState(null);
-  const [qr, setQr] = useState(null);
-  const [status, setStatus] = useState('');
-  const [failed, setFailed] = useState('');
-  const startedRef = useRef(false);
-  const linkedRef = useRef(false);
-  const sawQrRef = useRef(false); // a QR was shown → a later 'connecting' means it was scanned
-
-  // Start the WhatsApp session as soon as the window opens, so the QR is ready by the time
-  // you look at it (≈1 s). The label is optional and can be typed while the QR shows.
-  useEffect(() => {
-    if (startedRef.current) return; // guard against a double mount creating two numbers
-    startedRef.current = true;
-    api
-      .post('/conversations/accounts', { label: '' })
-      .then((r) => {
-        setId(r.id);
-        setStatus('connecting');
-      })
-      .catch((e) => setFailed(e.message));
-  }, []);
-
-  // Save the label as it's typed (debounced) — uses the normal rename endpoint.
-  useEffect(() => {
-    if (!id) return;
-    const t = setTimeout(() => api.put(`/conversations/accounts/${id}/label`, { label: label.trim() }).catch(() => {}), 500);
-    return () => clearTimeout(t);
-  }, [label, id]);
-
-  // QR + link status: refresh the moment the server says something changed (live event),
-  // with a short poll as a fallback if the live connection drops.
-  useEffect(() => {
-    if (!id) return;
-    let stop = false;
-    const tick = async () => {
-      try {
-        const s = await api.get(`/conversations/accounts/${id}/qr`);
-        if (stop) return;
-        if (s.qr) sawQrRef.current = true;
-        setQr(s.qr);
-        setStatus(s.status);
-        if (s.status === 'connected' && !linkedRef.current) {
-          linkedRef.current = true;
-          toast('Number linked ✓ — loading chats', 'success');
-          onLinked(id);
-        }
-      } catch {}
-    };
-    tick();
-    const off = onBus((ev) => {
-      if (ev === 'pool:update') tick();
-    });
-    const t = setInterval(tick, 1500);
-    return () => {
-      stop = true;
-      clearInterval(t);
-      off?.();
-    };
-  }, [id]);
-
-  async function cancel() {
-    // Only discard if it was never scanned (still showing a QR). If it's linking or
-    // linked, keep it — its tab appears on its own once connected.
-    const scanned = sawQrRef.current && status === 'connecting'; // linking in progress — keep it
-    if (id && !linkedRef.current && !scanned) {
-      try { await api.del(`/conversations/accounts/${id}`); } catch {}
-    }
-    onClose();
-  }
-
-  return (
-    <Modal
-      title="Add a WhatsApp number"
-      onClose={cancel}
-      footer={<button className="btn" onClick={cancel}>{status === 'connected' ? 'Done' : 'Close'}</button>}
-    >
-      <div className="field">
-        <label>Label (optional)</label>
-        <input className="input" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. Support line" />
-        <div className="hint">This number is only for Conversations + AI replies — it won't be used for campaigns or warm-up.</div>
-      </div>
-      <div style={{ textAlign: 'center' }}>
-        {failed ? (
-          <div className="auth-error">{failed}</div>
-        ) : status === 'connected' ? (
-          <div className="auth-note">Linked! Your chats are loading in its tab — you can close this.</div>
-        ) : qr ? (
-          <>
-            <img src={qr} alt="WhatsApp QR" style={{ width: 260, height: 260, borderRadius: 12 }} />
-            <div className="hint" style={{ marginTop: 10 }}>
-              On the phone for this number: <strong>WhatsApp → Linked Devices → Link a device</strong>, then scan this code.
-              Keep WhatsApp open on the phone until the chats appear.
-            </div>
-          </>
-        ) : (
-          <Loading label={sawQrRef.current ? 'Scanned — linking…' : 'Preparing QR…'} minHeight={260} />
-        )}
-      </div>
     </Modal>
   );
 }

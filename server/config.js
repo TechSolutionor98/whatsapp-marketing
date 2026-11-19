@@ -90,4 +90,5 @@ export const DEFAULTS = {
   autoReplyMinSec: 3, // wait at least this long before AI replies (feels human)
   autoReplyMaxSec: 10, // and at most this long — replies within ~10 s
   mainCatalogId: null, // product catalog the main number's AI uses ('none' = off)
+  defaultConvPhone: null, // the number Conversations opens on (chosen on the Gateway page); null = main
 };

@@ -48,7 +48,7 @@ const TITLES = {
   campaigns: ['Campaigns', 'Paced, window-aware outreach runs'],
   warmup: ['Number Warmup', 'Build organic activity before cold outreach'],
   conversations: ['Conversations', 'Replies and human handoffs'],
-  gateway: ['WhatsApp Gateway', 'Link your number by scanning a QR code'],
+  gateway: ['WhatsApp Gateway', 'Link, unlink and choose your default number'],
   audit: ['Audit Logs', 'Every action, send and reply'],
   settings: ['Settings', 'Pacing, limits and safety controls'],
   auth: ['Authentication', 'Workspace access'],

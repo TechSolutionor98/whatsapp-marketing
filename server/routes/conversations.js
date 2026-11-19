@@ -119,7 +119,22 @@ conversations.get('/accounts', async (req, res) => {
     else if (!cur.label && acc.label) rep = { ...cur, label: acc.label };
     byPhone.set(key, { ...rep, ...merged });
   }
-  res.json([...byPhone.values()]);
+  // The default number (picked on the Gateway page) — Conversations opens on it. Main if none
+  // is picked or that number is gone.
+  const list = [...byPhone.values()];
+  const defPhone = getSetting('defaultConvPhone', null);
+  const def = list.find((a) => defPhone && a.phone === defPhone) || list[0];
+  res.json(list.map((a) => ({ ...a, default: a === def })));
+});
+
+// Make a number the default one (Conversations opens on its tab).
+conversations.put('/accounts/:id/default', async (req, res) => {
+  const phone = await tabPhone(req.params.id);
+  if (!phone) return res.status(400).json({ error: "This number isn't linked yet" });
+  await setSetting('defaultConvPhone', phone);
+  audit('connection', `Default number set to +${phone}`);
+  emit('pool:update', poolState()); // open pages refresh their number list
+  res.json({ ok: true, phone });
 });
 
 // Turn AI auto-reply on/off for a number (applies to every link of that phone).
@@ -206,7 +221,9 @@ conversations.delete('/accounts/:id', async (req, res) => {
     await removePoolAccount(idStr);
     await db.warmupAccounts().deleteOne({ _id: d._id });
   }
-  audit('connection', `Number removed from Conversations${phone ? ` (+${phone})` : ''}`);
+  // It was the default → the main number is the default again (not this one if it's re-linked later).
+  if (phone && getSetting('defaultConvPhone', null) === phone) await setSetting('defaultConvPhone', null);
+  audit('connection', `Number unlinked${phone ? ` (+${phone})` : ''}`);
   res.json({ ok: true, removed: docs.length });
 });
 
