@@ -153,7 +153,8 @@ export default function Campaigns() {
 }
 
 function NewCampaign({ onClose, onSaved }) {
-  const { toast } = useApp();
+  const { toast, workspace } = useApp();
+  const hasMain = workspace?.main !== false; // other workspaces send from their default number
   const [templates, setTemplates] = useState([]);
   const [lists, setLists] = useState([]);
   const [settings, setSettings] = useState({});
@@ -326,7 +327,7 @@ function NewCampaign({ onClose, onSaved }) {
           <div className="field">
             <label>Send from</label>
             <select className="select" value={f.sender_id} onChange={(e) => setF({ ...f, sender_id: e.target.value })}>
-              <option value="">Main number (WhatsApp Gateway)</option>
+              <option value="">{hasMain ? 'Main number (WhatsApp Gateway)' : 'Default number (WhatsApp Gateway)'}</option>
               {senders.map((a) => (
                 <option key={a.id} value={a.id}>
                   +{a.me.phone}{a.label ? ` — ${a.label}` : ''}
@@ -335,8 +336,8 @@ function NewCampaign({ onClose, onSaved }) {
             </select>
             <div className="hint">
               {senders.length
-                ? 'Send from your main number or any linked number. (Warm-up numbers are separate and not used here.)'
-                : 'Sends from your main number. Add linked numbers in Conversations to send from them.'}
+                ? `Send from your ${hasMain ? 'main' : 'default'} number or any linked number. (Warm-up numbers are separate and not used here.)`
+                : `Sends from your ${hasMain ? 'main' : 'default'} number. Link more numbers on the WhatsApp Gateway page to send from them.`}
             </div>
           </div>
 
@@ -585,7 +586,8 @@ function CampaignDetail({ id, onBack }) {
 }
 
 function EditCampaignModal({ id, onClose, onSaved }) {
-  const { toast } = useApp();
+  const { toast, workspace } = useApp();
+  const hasMain = workspace?.main !== false;
   const [templates, setTemplates] = useState([]);
   const [lists, setLists] = useState([]);
   const [senders, setSenders] = useState([]);
@@ -668,7 +670,7 @@ function EditCampaignModal({ id, onClose, onSaved }) {
           <div className="field">
             <label>Send from</label>
             <select className="select" value={f.sender_id} onChange={(e) => setF({ ...f, sender_id: e.target.value })}>
-              <option value="">Main number (WhatsApp Gateway)</option>
+              <option value="">{hasMain ? 'Main number (WhatsApp Gateway)' : 'Default number (WhatsApp Gateway)'}</option>
               {senders.map((a) => <option key={a.id} value={a.id}>+{a.me.phone}{a.label ? ` — ${a.label}` : ''}</option>)}
             </select>
           </div>

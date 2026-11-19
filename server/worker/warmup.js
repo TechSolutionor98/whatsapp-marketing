@@ -1,12 +1,21 @@
-import { db, audit, getSetting, nowIso, dayKey } from '../db/mongo.js';
-import { emit, bus } from '../events.js';
+import { db, audit, getSetting, nowIso, dayKey, listWorkspaces, isWsSuspended } from '../db/mongo.js';
+import { emit } from '../events.js';
 import { connectedAccounts, sendFromTo, reconnectPoolAccounts } from '../whatsapp/pool.js';
 import { isMongoUp } from '../db/mongo.js';
+import { DEFAULT_WS, currentWs, runInWs } from '../tenant.js';
 import { aiAvailable, warmupOpener, warmupReply } from '../ai.js';
 import { spin, randInt, sleep, nowInTz, withinWindow, WARMUP_POOL, WARMUP_REPLIES } from '../utils.js';
 
-let running = false;
-let timer = null;
+// One warm-up loop per workspace: a workspace's numbers only ever chat with each other.
+const loops = new Map(); // ws -> { timer, running }
+const loopOf = (ws) => {
+  let L = loops.get(ws);
+  if (!L) {
+    L = { timer: null, running: false };
+    loops.set(ws, L);
+  }
+  return L;
+};
 let reconnected = false;
 
 async function sentToday() {
@@ -97,11 +106,13 @@ async function makeReply(incoming, toName) {
   return spin(pick(WARMUP_REPLIES)).replace(/\{\{first_name\}\}/g, firstName(toName));
 }
 
-// One mini-conversation between two of the user's numbers: A -> B, then B -> A.
+// One mini-conversation between two of this workspace's numbers: A -> B, then B -> A.
 async function tick() {
-  if (running) return { skipped: true };
+  const L = loopOf(currentWs() || DEFAULT_WS);
+  if (L.running) return { skipped: true };
   if (!getSetting('warmupActive', false)) return { inactive: true };
-  running = true;
+  if (isWsSuspended(currentWs() || DEFAULT_WS)) return { inactive: true };
+  L.running = true;
   try {
     const target = await dailyTarget();
     if ((await sentToday()) >= target) return { done_for_today: true };
@@ -147,21 +158,17 @@ async function tick() {
     const max = getSetting('warmupMaxGap', 900);
     return { sent: true, delayMs: randInt(min, max) * 1000 };
   } finally {
-    running = false;
+    L.running = false;
   }
 }
 
-function scheduleNext(ms) {
-  clearTimeout(timer);
-  timer = setTimeout(loop, ms);
+function scheduleNext(ws, ms) {
+  const L = loopOf(ws);
+  clearTimeout(L.timer);
+  L.timer = setTimeout(() => runInWs(ws, () => loop(ws)), ms);
 }
 
-async function loop() {
-  // Reconnect saved numbers once Mongo is ready.
-  if (!reconnected && isMongoUp()) {
-    reconnected = true;
-    reconnectPoolAccounts();
-  }
+async function loop(ws) {
   let delay = 60000;
   try {
     const res = await tick();
@@ -169,16 +176,36 @@ async function loop() {
   } catch (err) {
     audit('system', `Warm-up worker error: ${err.message}`, { level: 'error' });
   }
-  scheduleNext(delay);
+  if (loops.has(ws)) scheduleNext(ws, delay);
+}
+
+// Once Mongo is ready: reconnect every saved number (each in its own workspace), then keep
+// one warm-up loop per workspace.
+function supervise() {
+  if (!isMongoUp()) return;
+  if (!reconnected) {
+    reconnected = true;
+    reconnectPoolAccounts();
+  }
+  const ids = new Set(listWorkspaces().map((w) => w.id));
+  for (const id of ids) if (!loops.has(id)) scheduleNext(id, 6000);
+  for (const [id, L] of loops) {
+    if (!ids.has(id)) {
+      clearTimeout(L.timer);
+      loops.delete(id);
+    }
+  }
 }
 
 export function startWarmupWorker() {
-  scheduleNext(6000);
-  bus.on('wa:status', () => {});
+  setTimeout(supervise, 6000);
+  setInterval(supervise, 15000);
 }
 
+// "Run now" on the Warmup page — for the current workspace.
 export async function runWarmupNow() {
+  const ws = currentWs() || DEFAULT_WS;
   const res = await tick();
-  if (res.sent) scheduleNext(res.delayMs);
+  if (res.sent && loops.has(ws)) scheduleNext(ws, res.delayMs);
   return res;
 }

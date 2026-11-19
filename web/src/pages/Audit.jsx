@@ -3,7 +3,7 @@ import { api } from '../api.js';
 import { Icon } from '../icons.jsx';
 import { Empty, Loading, timeAgo } from '../ui.jsx';
 
-const TYPES = ['', 'connection', 'send', 'reply', 'handoff', 'campaign', 'system'];
+const TYPES = ['', 'connection', 'send', 'reply', 'handoff', 'campaign', 'system', 'admin'];
 
 export default function Audit() {
   const [logs, setLogs] = useState([]);

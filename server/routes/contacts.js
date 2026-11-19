@@ -86,7 +86,7 @@ contacts.put('/:id', async (req, res) => {
     { $set: set },
     { returnDocument: 'after' }
   );
-  const doc = r.value || r; // driver version differences
+  const doc = r && (r.value || r); // driver version differences
   if (!doc) return res.status(404).json({ error: 'Not found' });
   res.json(pub(doc));
 });

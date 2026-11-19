@@ -8,8 +8,9 @@ import {
   TOKEN_TTL_DAYS,
   DATA_DIR,
 } from './config.js';
-import { isMongoUp, getSetting } from './db/mongo.js';
+import { isMongoUp, getPlatform, workspaceOf } from './db/mongo.js';
 import { loadUser, pagesOf } from './access.js';
+import { DEFAULT_WS, runInWs } from './tenant.js';
 
 // A stable secret: env var wins, else a persisted random one (created on first boot).
 function loadSecret() {
@@ -72,8 +73,20 @@ function readToken(req) {
 // Why a signed-in user can't use the app right now (null = they can).
 export function blockedReason(u) {
   if (u.suspended) return 'This account is suspended. Ask the super admin.';
-  if (u.role !== 'owner' && getSetting('teamLocked', false)) return 'Sign-in is paused by the super admin.';
+  if (u.role === 'owner') return null;
+  if (getPlatform('teamLocked', false)) return 'Sign-in is paused by the super admin.';
+  const w = workspaceOf(u.ws || DEFAULT_WS);
+  if (!w) return 'Your workspace no longer exists. Ask the super admin.';
+  if (w.suspended) return `${w.name} is suspended. Ask the super admin.`;
   return null;
+}
+
+// The workspace a request works in. Everyone works in their own workspace; the super admin
+// picks one (the page sends it as X-Workspace, or ?ws= for the live event stream).
+export function workspaceFor(req, u) {
+  if (u?.role !== 'owner') return u?.ws || DEFAULT_WS;
+  const asked = String(req.get?.('x-workspace') || req.query?.ws || '');
+  return asked && workspaceOf(asked) ? asked : DEFAULT_WS;
 }
 
 // Gate: valid session required. The account is re-read (cached a few seconds) so a removed,
@@ -91,7 +104,8 @@ export async function requireAuth(req, res, next) {
     // Can't check the account: only the super admin's own session carries on.
     if (claims.role !== 'owner') return res.status(503).json({ error: 'Database unavailable — try again in a moment' });
     req.user = { ...claims, pages: pagesOf(claims) };
-    return next();
+    req.ws = workspaceFor(req, claims);
+    return runInWs(req.ws, next);
   }
   let u;
   try {
@@ -103,8 +117,10 @@ export async function requireAuth(req, res, next) {
   const blocked = blockedReason(u); // checked first so a suspended person is told why
   if (blocked) return res.status(401).json({ error: blocked });
   if ((u.tokenVersion || 0) !== (claims.tv || 0)) return res.status(401).json({ error: 'You were signed out. Please sign in again.' });
-  req.user = { uid: String(u._id), email: u.email, name: u.name, role: u.role, pages: pagesOf(u) };
-  next();
+  req.user = { uid: String(u._id), email: u.email, name: u.name, role: u.role, pages: pagesOf(u), ws: u.ws || null };
+  req.ws = workspaceFor(req, u);
+  // Everything this request does — queries, settings, events, audit — is in this workspace.
+  runInWs(req.ws, next);
 }
 
 // Gate: must be an admin or the super admin.
@@ -119,8 +135,10 @@ export function requireAdmin(req, res, next) {
 
 // Gate: super admin only.
 export function requireOwner(req, res, next) {
-  requireAuth(req, res, () => {
+  const check = () => {
     if (req.user.role !== 'owner') return res.status(403).json({ error: 'Only the super admin can do this', noAccess: true });
     next();
-  });
+  };
+  if (req.user) return check(); // already signed in by the /api gate
+  requireAuth(req, res, check);
 }

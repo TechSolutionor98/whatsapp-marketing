@@ -43,7 +43,7 @@ lists.put('/:id', async (req, res) => {
   const name = String(req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'List name required' });
   const r = await db.lists().findOneAndUpdate({ _id }, { $set: { name } }, { returnDocument: 'after' });
-  const doc = r.value || r;
+  const doc = r && (r.value || r);
   if (!doc) return res.status(404).json({ error: 'Not found' });
   res.json(pub(doc));
 });

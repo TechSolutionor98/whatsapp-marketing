@@ -7,7 +7,10 @@ import { Modal, Loading } from '../ui.jsx';
 // All WhatsApp numbers are linked, unlinked and renamed here, and one is picked as the
 // default (Conversations opens on it). The Conversations page only shows their tabs.
 export default function Gateway() {
-  const { wa, toast, refreshWa, onBus } = useApp();
+  const { wa, toast, refreshWa, onBus, workspace } = useApp();
+  // Only the original workspace has the "main number"; every other workspace links its own
+  // numbers below, and its default number is its main one.
+  const hasMain = workspace?.main !== false;
   const [busy, setBusy] = useState(false);
   const [numbers, setNumbers] = useState(null); // every number with a Conversations tab
   const [adding, setAdding] = useState(false);
@@ -77,17 +80,58 @@ export default function Gateway() {
       await api.del(`/conversations/accounts/${a.id}`);
       toast('Number unlinked');
       loadNumbers();
+      refreshWa();
     } catch (e) {
       toast(e.message, 'error');
     }
   }
 
   const mainLinked = wa.status === 'connected';
+  const def = (numbers || []).find((n) => n.default) || null;
 
   return (
     <>
       <div className="card card-pad">
-        {wa.status === 'connected' ? (
+        {!hasMain ? (
+          numbers === null ? (
+            <Loading label="Loading numbers…" minHeight={160} />
+          ) : !def ? (
+            <div className="empty">
+              <div className="emoji"><Icon.gateway /></div>
+              <h3>No WhatsApp number linked yet</h3>
+              <p style={{ maxWidth: 440, margin: '0 auto' }}>
+                Link {workspace?.name ? `${workspace.name}'s` : 'your'} WhatsApp by scanning a QR code — just like WhatsApp Web. The first
+                number becomes the default: campaigns send from it and Conversations opens on it.
+              </p>
+              <div style={{ marginTop: 18 }}>
+                <button className="btn primary" onClick={() => setAdding(true)}>
+                  <Icon.link /> Connect WhatsApp
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="qr-stage">
+              <div style={{ display: 'grid', placeItems: 'center' }}>
+                <div className={def.connected ? 'pulse-ring' : 'pulse-ring off'}>
+                  {def.connected ? <Icon.check style={{ width: 40 }} /> : <div className="spinner" />}
+                </div>
+              </div>
+              <div>
+                <span className={`badge ${def.connected ? 'green' : 'amber'}`} style={{ marginBottom: 10 }}>
+                  {def.connected ? '● Connected · Default number' : 'Reconnecting… · Default number'}
+                </span>
+                <h2 style={{ fontSize: 22, margin: '6px 0' }}>{def.label || def.name || `+${def.phone}`}</h2>
+                <p className="muted" style={{ fontSize: 14 }}>
+                  Number <strong>+{def.phone}</strong> {def.connected ? 'is linked and ready.' : 'is reconnecting.'} Campaigns send from it
+                  unless you pick another number, and Conversations opens on it.
+                </p>
+                <div className="flex" style={{ marginTop: 20 }}>
+                  <button className="btn" onClick={() => setAdding(true)}><Icon.plus /> Link another number</button>
+                </div>
+              </div>
+            </div>
+          )
+        ) : wa.status === 'connected' ? (
           <div className="qr-stage">
             <div style={{ display: 'grid', placeItems: 'center' }}>
               <div className="pulse-ring">
@@ -157,11 +201,14 @@ export default function Gateway() {
         )}
       </div>
 
+      {(hasMain || numbers?.length > 0) && (
       <div className="card num-card">
         <div className="card-head">
           <div style={{ flex: 1, minWidth: 0 }}>
             <h3>Your WhatsApp numbers</h3>
-            <div className="sub">Link, unlink or rename numbers here. Conversations opens on the default number.</div>
+            <div className="sub">
+              Link, unlink or rename numbers here. Conversations opens on the default number{hasMain ? '' : ', and campaigns send from it unless you pick another'}.
+            </div>
           </div>
           <button className="btn primary sm" onClick={() => setAdding(true)}>
             <Icon.plus /> Link another number
@@ -186,7 +233,7 @@ export default function Gateway() {
                     </div>
                     <div className="num-sub">
                       {a.phone && name !== `+${a.phone}` ? `+${a.phone} · ` : ''}{state} ·{' '}
-                      {isMain ? 'campaigns, warm-up and chats' : 'chats and AI replies'}
+                      {isMain ? 'campaigns, warm-up and chats' : !hasMain && a.default ? 'campaigns, chats and AI replies' : 'chats and AI replies'}
                     </div>
                   </div>
                   <div className="num-actions">
@@ -210,6 +257,7 @@ export default function Gateway() {
           </div>
         )}
       </div>
+      )}
 
       {adding && (
         <AddNumberModal

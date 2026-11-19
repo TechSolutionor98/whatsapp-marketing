@@ -15,6 +15,11 @@ import { db, audit, getSetting, setSetting } from '../db/mongo.js';
 import { emit } from '../events.js';
 import { attachReceipts } from '../receipts.js';
 import { jidToPhone, normalizePhone } from '../utils.js';
+import { DEFAULT_WS, runInWs, inWs } from '../tenant.js';
+
+// The original main number belongs to the default workspace (the business that used the app
+// before workspaces). Other workspaces link their numbers on their own Gateway page (pool.js).
+const WS = DEFAULT_WS;
 
 const logger = pino({ level: 'silent' });
 
@@ -39,7 +44,7 @@ export function getWaState() {
 function setStatus(status, extra = {}) {
   state.status = status;
   Object.assign(state, extra);
-  emit('wa:status', getWaState());
+  emit('wa:status', getWaState(), { ws: WS });
 }
 
 // The main number's entry in the shared conversation pipeline (pool.js). Live getters, so
@@ -47,6 +52,7 @@ function setStatus(status, extra = {}) {
 // (history batches, learned numbers, group names) on this object.
 const mainCtx = {
   id: 'main',
+  ws: WS,
   role: 'conversation',
   get sock() {
     return sock;
@@ -65,7 +71,11 @@ const mainCtx = {
   },
 };
 
-export async function connectWhatsApp() {
+export function connectWhatsApp() {
+  return runInWs(WS, connectMain);
+}
+
+async function connectMain() {
   if (starting || sock) return;
   starting = true;
   manualLogout = false;
@@ -94,15 +104,15 @@ export async function connectWhatsApp() {
       // Full history like linked numbers (false delivered nothing for linked numbers), and
       // read WhatsApp's number table + inline recent-chats batch from each notification.
       syncFullHistory: true,
-      shouldSyncHistoryMessage: historyHook('main'),
+      shouldSyncHistoryMessage: historyHook('main', WS),
       // Answer recipients' retry requests so our messages decrypt (avoids "Waiting for this message").
-      getMessage: async (key) => {
+      getMessage: inWs(WS, async (key) => {
         try {
           const m = await db.messages().findOne({ wa_message_id: key?.id });
           if (m?.body) return { conversation: m.body };
         } catch {}
         return undefined;
-      },
+      }),
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -111,7 +121,7 @@ export async function connectWhatsApp() {
     registerMainNumber(mainCtx);
     attachConversationHandlers('main', sock);
 
-    sock.ev.on('connection.update', async (update) => {
+    sock.ev.on('connection.update', inWs(WS, async (update) => {
       const { connection, lastDisconnect, qr } = update;
       if (connection || qr) step(`connection: ${connection || 'qr'}${lastDisconnect?.error ? ` (code ${lastDisconnect.error?.output?.statusCode ?? '?'})` : ''}`);
 
@@ -167,10 +177,10 @@ export async function connectWhatsApp() {
           reconnectTimer = setTimeout(() => connectWhatsApp(), code === DisconnectReason.restartRequired ? 250 : 3000);
         }
       }
-    });
+    }));
 
-    sock.ev.on('messages.upsert', (ev) => ingestMain(ev)); // same live pipeline as linked numbers
-    attachReceipts(sock);
+    sock.ev.on('messages.upsert', inWs(WS, (ev) => ingestMain(ev))); // same live pipeline as linked numbers
+    attachReceipts(sock, WS);
   } catch (err) {
     starting = false;
     sock = null;
@@ -183,7 +193,10 @@ export async function connectWhatsApp() {
   }
 }
 
-export async function logoutWhatsApp() {
+export function logoutWhatsApp() {
+  return runInWs(WS, logoutMain);
+}
+async function logoutMain() {
   manualLogout = true;
   clearTimeout(reconnectTimer);
   try {

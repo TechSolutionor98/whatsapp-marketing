@@ -26,6 +26,10 @@ import { catalogs } from './routes/catalogs.js';
 import { startWorker } from './worker/sender.js';
 import { startWarmupWorker } from './worker/warmup.js';
 
+// An error inside one request (Express 4 doesn't catch async ones) must not restart the whole
+// server — that would drop every linked WhatsApp number for a moment.
+process.on('unhandledRejection', (e) => console.error('  Unhandled error (server kept running):', e?.stack || e));
+
 const app = express();
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '15mb' })); // room for base64 image uploads

@@ -1,9 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
 import { Modal, Loading, timeAgo, initials } from '../ui.jsx';
 import { roleName } from './Authentication.jsx';
+
+// The platform: every workspace (each business using the app — e.g. Tech Solutionor, or a
+// customer you give access), every person in them, and switches that apply everywhere.
 
 // Pages the super admin can give or take away (Authentication — your own account — is always open).
 const PAGE_LIST = [
@@ -18,6 +21,7 @@ const PAGE_LIST = [
   ['settings', 'Settings'],
 ];
 const pageName = Object.fromEntries(PAGE_LIST);
+const plural = (n, one, many = one + 's') => `${n} ${n === 1 ? one : many}`;
 
 function Toggle({ checked, onChange, disabled, label }) {
   return (
@@ -40,31 +44,28 @@ function Stat({ label, value, hint, icon, color, warn }) {
   );
 }
 
-export default function SuperAdmin({ go }) {
-  const { user, toast, onBus } = useApp();
-  const [state, setState] = useState(null); // { users, system }
-  const [numbers, setNumbers] = useState([]);
+export default function SuperAdmin() {
+  const { user, workspace, toast, onBus, switchWorkspace, refreshAuth } = useApp();
+  const [state, setState] = useState(null); // { workspaces, users, platform, current }
   const [activity, setActivity] = useState([]);
-  const [editing, setEditing] = useState(null); // a user, or 'new'
+  const [manage, setManage] = useState(null); // workspace id
+  const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState(null); // a person, or 'new'
   const [pwFor, setPwFor] = useState(null);
+  const [wsFilter, setWsFilter] = useState('');
   const [busy, setBusy] = useState('');
 
   const load = async () => {
-    const [s, n, a] = await Promise.allSettled([
-      api.get('/admin/state'),
-      api.get('/conversations/accounts'),
-      api.get('/audit?limit=12'),
-    ]);
+    const [s, a] = await Promise.allSettled([api.get('/admin/state'), api.get('/admin/activity?limit=15')]);
     if (s.status === 'fulfilled') setState(s.value);
-    else if (!state) toast(s.reason?.message || 'Could not load', 'error');
-    if (n.status === 'fulfilled') setNumbers(n.value);
+    else toast(s.reason?.message || 'Could not load', 'error');
     if (a.status === 'fulfilled') setActivity(a.value);
   };
   useEffect(() => {
     load();
     const t = setInterval(load, 15000);
     const off = onBus((ev) => {
-      if (ev === 'pool:update' || ev === 'wa:status' || ev === 'stats:dirty') load();
+      if (ev === 'admin:update' || ev === 'pool:update' || ev === 'wa:status') load();
     });
     return () => {
       clearInterval(t);
@@ -83,17 +84,15 @@ export default function SuperAdmin({ go }) {
     }
     setBusy('');
     load();
+    refreshAuth(); // workspace names / suspensions in the sidebar
   }
 
-  const setSystem = (patch, ok) => act('sys', () => api.put('/admin/system', patch), ok);
-  const emergency = () => {
-    if (!confirm('Stop everything now?\n\n• Campaign sending is paused\n• Warm-up is stopped\n• AI auto-reply is turned off on every number\n\nYou can switch each one back on here.')) return;
-    act('stop', () => api.post('/admin/emergency-stop'), 'Everything stopped');
+  const setPlatform = (patch, ok) => act('plat', () => api.put('/admin/system', patch), ok);
+  const stopAll = () => {
+    if (!confirm('Stop everything in EVERY workspace now?\n\n• Campaign sending is paused\n• Warm-up is stopped\n• AI auto-reply is turned off on every number\n\nYou can switch each one back on per workspace.')) return;
+    act('stopall', () => api.post('/admin/emergency-stop'), 'Everything stopped in every workspace');
   };
-  const setNumberAi = (a, on) =>
-    act('ai' + a.id, () => api.post(`/conversations/accounts/${a.id}/autoreply`, { enabled: on }), `AI auto-reply ${on ? 'on' : 'off'} for ${a.label || '+' + a.phone}`);
-
-  const suspend = (u, on) => {
+  const suspendUser = (u, on) => {
     if (on && !confirm(`Suspend ${u.name} (${u.email})?\n\nThey're signed out at once and can't sign in until you re-activate them.`)) return;
     act('u' + u.id, () => api.post(`/admin/users/${u.id}/suspend`, { suspended: on }), on ? `${u.name} suspended` : `${u.name} re-activated`);
   };
@@ -101,132 +100,158 @@ export default function SuperAdmin({ go }) {
     if (!confirm(`Sign ${u.name} out on every device?`)) return;
     act('u' + u.id, () => api.post(`/admin/users/${u.id}/signout`), `${u.name} was signed out everywhere`);
   };
-  const remove = (u) => {
+  const removeUser = (u) => {
     if (!confirm(`Delete ${u.name} (${u.email})? This can't be undone.`)) return;
     act('u' + u.id, () => api.del(`/auth/users/${u.id}`), `${u.name} deleted`);
   };
 
+  const people = useMemo(() => {
+    const list = state?.users || [];
+    return wsFilter ? list.filter((u) => u.ws === wsFilter) : list;
+  }, [state, wsFilter]);
+
   if (!state) return <Loading label="Loading Super Admin…" minHeight={300} />;
 
-  const { users, system } = state;
+  const { workspaces, users, platform } = state;
   const others = users.filter((u) => u.role !== 'owner');
-  const admins = others.filter((u) => u.role === 'admin').length;
-  const suspended = others.filter((u) => u.suspended).length;
-  const connected = numbers.filter((n) => n.connected).length;
-  const aiOn = numbers.filter((n) => n.auto_reply).length;
+  const suspendedWs = workspaces.filter((w) => w.suspended).length;
+  const numbers = workspaces.reduce((n, w) => n + w.numbers.length, 0);
+  const connected = workspaces.reduce((n, w) => n + w.numbers.filter((x) => x.connected).length, 0);
+  const sentToday = workspaces.reduce((n, w) => n + (w.sentToday || 0), 0);
+  const managing = manage ? workspaces.find((w) => w.id === manage) : null;
 
   return (
     <div className="sa">
       <div className="stat-grid">
-        <Stat label="Team" value={users.length} hint={`${admins} admin${admins === 1 ? '' : 's'} · ${others.length - admins} member${others.length - admins === 1 ? '' : 's'}${suspended ? ` · ${suspended} suspended` : ''}`} icon="users" color="green" />
-        <Stat label="WhatsApp numbers" value={`${connected}/${numbers.length}`} hint="connected" icon="phone" color="blue" />
-        <Stat label="Campaign sending" value={system.sendingPaused ? 'Paused' : 'Running'} hint={system.sendingPaused ? 'Nothing is being sent' : 'Campaigns send on schedule'} icon={system.sendingPaused ? 'pause' : 'send'} color={system.sendingPaused ? 'red' : 'green'} warn={system.sendingPaused} />
-        <Stat label="AI auto-reply" value={`${aiOn}/${numbers.length}`} hint="numbers answering with AI" icon="sparkles" color="violet" />
+        <Stat label="Workspaces" value={workspaces.length} hint={suspendedWs ? `${suspendedWs} suspended` : 'businesses on the platform'} icon="briefcase" color="green" />
+        <Stat label="People" value={others.length} hint={`in ${plural(workspaces.length, 'workspace')} · plus you`} icon="users" color="blue" />
+        <Stat label="WhatsApp numbers" value={`${connected}/${numbers}`} hint="connected, all workspaces" icon="phone" color="violet" />
+        <Stat label="Sent today" value={sentToday.toLocaleString()} hint={platform.sendingPaused ? 'Sending is paused everywhere' : 'campaign messages, all workspaces'} icon={platform.sendingPaused ? 'pause' : 'send'} color={platform.sendingPaused ? 'red' : 'green'} warn={platform.sendingPaused} />
       </div>
 
-      <div className="sa-grid">
-        {/* System switches */}
-        <div className="card">
-          <div className="card-head">
-            <Icon.bolt style={{ width: 18, color: 'var(--brand-700)' }} />
-            <div><h3>Control center</h3><div className="sub">Switch any part of the app on or off — it applies at once.</div></div>
-          </div>
-          <div className="card-pad sa-rows">
-            <div className="setting-row">
-              <div>
-                <div className="st-label">Campaign sending</div>
-                <div className="st-desc">{system.sendingPaused ? 'Paused — no campaign sends anything until you turn this back on (stays paused after a restart).' : 'Running — campaigns send inside their schedule.'}</div>
-              </div>
-              <Toggle label="Campaign sending" checked={!system.sendingPaused} disabled={busy === 'sys'} onChange={(on) => setSystem({ sendingPaused: !on }, on ? 'Campaign sending resumed' : 'Campaign sending paused')} />
-            </div>
-            <div className="setting-row">
-              <div>
-                <div className="st-label">Warm-up chats</div>
-                <div className="st-desc">{system.warmupActive ? 'On — your warm-up numbers chat with each other.' : `Off.${system.warmupNumbers < 2 ? ' Link at least 2 numbers on the Warmup page to start it.' : ''}`}</div>
-              </div>
-              <Toggle label="Warm-up chats" checked={system.warmupActive} disabled={busy === 'sys' || (!system.warmupActive && system.warmupNumbers < 2)} onChange={(on) => setSystem({ warmupActive: on }, on ? 'Warm-up started' : 'Warm-up stopped')} />
-            </div>
-            <div className="setting-row">
-              <div>
-                <div className="st-label">AI auto-reply on every number</div>
-                <div className="st-desc">On for {aiOn} of {numbers.length} numbers. Set each number on its own on the right.</div>
-              </div>
-              <div className="flex" style={{ gap: 6 }}>
-                <button className="btn sm" disabled={busy === 'sys'} onClick={() => setSystem({ autoReply: true }, 'AI auto-reply on for every number')}>All on</button>
-                <button className="btn sm" disabled={busy === 'sys'} onClick={() => setSystem({ autoReply: false }, 'AI auto-reply off for every number')}>All off</button>
-              </div>
-            </div>
-            <div className="setting-row">
-              <div>
-                <div className="st-label">Team sign-in</div>
-                <div className="st-desc">{system.teamLocked ? 'Paused — only you can use the app. Everyone else was signed out and cannot sign in.' : 'Open — your team can sign in and use the pages you allow.'}</div>
-              </div>
-              <Toggle
-                label="Team sign-in"
-                checked={!system.teamLocked}
-                disabled={busy === 'sys'}
-                onChange={(on) => {
-                  if (!on && !confirm('Pause sign-in for everyone except you? They are signed out at once.')) return;
-                  setSystem({ teamLocked: !on }, on ? 'Team sign-in re-opened' : 'Team sign-in paused — only you can use the app');
-                }}
-              />
-            </div>
-            <div className="setting-row sa-stop">
-              <div>
-                <div className="st-label">Emergency stop</div>
-                <div className="st-desc">Pause campaign sending, stop warm-up and turn AI auto-reply off on every number — all at once.</div>
-              </div>
-              <button className="btn danger" onClick={emergency} disabled={busy === 'stop'}>
-                <Icon.pause /> {busy === 'stop' ? 'Stopping…' : 'Stop everything'}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Numbers */}
-        <div className="card">
-          <div className="card-head">
-            <Icon.phone style={{ width: 18, color: 'var(--brand-700)' }} />
-            <div style={{ flex: 1, minWidth: 0 }}><h3>WhatsApp numbers</h3><div className="sub">AI auto-reply for each number</div></div>
-            <button className="btn sm" onClick={() => go?.('gateway')}>Manage</button>
-          </div>
-          <div className="sa-nums">
-            {numbers.length === 0 ? (
-              <div className="card-pad muted" style={{ fontSize: 13 }}>No numbers linked yet.</div>
-            ) : (
-              numbers.map((n) => (
-                <div key={n.id} className="sa-num">
-                  <span className={`wa-tab-dot ${n.connected ? 'on' : 'connecting'}`} title={n.connected ? 'Connected' : 'Not connected'} />
-                  <div className="sa-num-main">
-                    <div className="sa-num-name">
-                      {n.label || (n.id === 'main' ? 'Main number' : '+' + n.phone)}
-                      {n.default && <span className="wa-tab-default">Default</span>}
-                    </div>
-                    <div className="sa-num-sub">{n.phone ? '+' + n.phone : 'not linked'} · {n.connected ? 'connected' : 'offline'}</div>
-                  </div>
-                  <span className="sa-num-ai">AI</span>
-                  <Toggle label={`AI auto-reply for ${n.label || n.phone}`} checked={n.auto_reply} disabled={busy === 'ai' + n.id} onChange={(on) => setNumberAi(n, on)} />
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Team & access */}
+      {/* Workspaces */}
       <div className="card" style={{ marginBottom: 18 }}>
         <div className="card-head">
+          <Icon.briefcase style={{ width: 18, color: 'var(--brand-700)' }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h3>Workspaces</h3>
+            <div className="sub">Each business gets its own workspace — its own numbers, contacts, campaigns, chats, settings and team. Nobody sees another workspace.</div>
+          </div>
+          <button className="btn primary sm" onClick={() => setCreating(true)}><Icon.plus /> New workspace</button>
+        </div>
+        <div className="table-wrap">
+          <table className="sa-table sa-ws-table">
+            <thead>
+              <tr><th>Workspace</th><th>Team</th><th>Numbers</th><th>Contacts</th><th>Campaigns</th><th>Sent today</th><th>Status</th><th></th></tr>
+            </thead>
+            <tbody>
+              {workspaces.map((w) => {
+                const on = w.numbers.filter((n) => n.connected).length;
+                const here = w.id === workspace?.id;
+                return (
+                  <tr key={w.id} className={w.suspended ? 'sa-suspended' : ''}>
+                    <td>
+                      <div className="sa-ws-name">
+                        {w.name}
+                        {here && <span className="chip">open now</span>}
+                        {w.main && <span className="chip sa-orig" title="The workspace that was using the app before workspaces existed. It has the original main number.">original</span>}
+                      </div>
+                      <div className="cell-muted" style={{ fontSize: 12 }}>since {new Date(w.created_at || Date.now()).toLocaleDateString()}</div>
+                    </td>
+                    <td>{plural(w.team, 'person', 'people')}</td>
+                    <td>
+                      <span className={on ? '' : 'cell-muted'}>{on}/{w.numbers.length}</span>
+                      <span className="cell-muted"> connected</span>
+                    </td>
+                    <td>{w.contacts.toLocaleString()}</td>
+                    <td>{w.campaignsRunning ? <span className="badge green">{w.campaignsRunning} running</span> : <span className="cell-muted">none running</span>}</td>
+                    <td>{w.sentToday.toLocaleString()}</td>
+                    <td>
+                      <div className="sa-status">
+                        {w.suspended ? <span className="badge red">Suspended</span> : <span className="badge green">Active</span>}
+                        {!w.suspended && w.sendingPaused && <span className="badge amber">Sending paused</span>}
+                      </div>
+                    </td>
+                    <td>
+                      <div className="sa-actions">
+                        {!here && (
+                          <button className="btn sm" onClick={() => switchWorkspace(w.id)} title={`Work in ${w.name}`}>
+                            Open
+                          </button>
+                        )}
+                        <button className="btn sm primary" onClick={() => setManage(w.id)}>Manage</button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Platform switches */}
+      <div className="card" style={{ marginBottom: 18 }}>
+        <div className="card-head">
+          <Icon.bolt style={{ width: 18, color: 'var(--brand-700)' }} />
+          <div><h3>Platform controls</h3><div className="sub">These apply to every workspace at once. Each workspace's own switches are under Manage.</div></div>
+        </div>
+        <div className="card-pad sa-rows">
+          <div className="setting-row">
+            <div>
+              <div className="st-label">Campaign sending — all workspaces</div>
+              <div className="st-desc">{platform.sendingPaused ? 'Paused everywhere — no workspace sends campaign messages until you turn this back on.' : 'Allowed — each workspace sends on its own schedule (unless paused there).'}</div>
+            </div>
+            <Toggle label="Campaign sending, all workspaces" checked={!platform.sendingPaused} disabled={busy === 'plat'} onChange={(on) => setPlatform({ sendingPaused: !on }, on ? 'Sending allowed again in every workspace' : 'Sending paused in every workspace')} />
+          </div>
+          <div className="setting-row">
+            <div>
+              <div className="st-label">Sign-in — everyone</div>
+              <div className="st-desc">{platform.teamLocked ? 'Paused — only you can use the app. Everyone else, in every workspace, was signed out.' : 'Open — people can sign in to their workspace.'}</div>
+            </div>
+            <Toggle
+              label="Sign-in for everyone"
+              checked={!platform.teamLocked}
+              disabled={busy === 'plat'}
+              onChange={(on) => {
+                if (!on && !confirm('Pause sign-in for everyone except you, in every workspace? They are signed out at once.')) return;
+                setPlatform({ teamLocked: !on }, on ? 'Sign-in re-opened for everyone' : 'Sign-in paused — only you can use the app');
+              }}
+            />
+          </div>
+          <div className="setting-row sa-stop">
+            <div>
+              <div className="st-label">Emergency stop — all workspaces</div>
+              <div className="st-desc">Pause campaign sending, stop warm-up and turn AI auto-reply off on every number of every workspace.</div>
+            </div>
+            <button className="btn danger" onClick={stopAll} disabled={busy === 'stopall'}>
+              <Icon.pause /> {busy === 'stopall' ? 'Stopping…' : 'Stop everything'}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* People */}
+      <div className="card" style={{ marginBottom: 18 }}>
+        <div className="card-head sa-people-head">
           <Icon.users style={{ width: 18, color: 'var(--brand-700)' }} />
-          <div style={{ flex: 1, minWidth: 0 }}><h3>Team &amp; access</h3><div className="sub">Choose what each person can open. Changes apply at once — even to people already signed in.</div></div>
+          <div style={{ flex: 1, minWidth: 0 }}><h3>People</h3><div className="sub">Everyone on the platform. Choose which workspace each person works in and what they can open — changes apply at once.</div></div>
+          <select className="select sa-filter" value={wsFilter} onChange={(e) => setWsFilter(e.target.value)} aria-label="Show people of">
+            <option value="">All workspaces</option>
+            {workspaces.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+          </select>
           <button className="btn primary sm" onClick={() => setEditing('new')}><Icon.plus /> Add person</button>
         </div>
         <div className="table-wrap">
           <table className="sa-table">
             <thead>
-              <tr><th>Person</th><th>Role</th><th>Can open</th><th>Status</th><th>Last sign-in</th><th></th></tr>
+              <tr><th>Person</th><th>Workspace</th><th>Role</th><th>Can open</th><th>Status</th><th>Last sign-in</th><th></th></tr>
             </thead>
             <tbody>
-              {users.map((u) => {
+              {people.length === 0 && (
+                <tr><td colSpan={7} className="cell-muted" style={{ textAlign: 'center', padding: 22 }}>Nobody in this workspace yet — add their first person.</td></tr>
+              )}
+              {people.map((u) => {
                 const owner = u.role === 'owner';
                 const me = u.id === user.id;
                 return (
@@ -240,6 +265,7 @@ export default function SuperAdmin({ go }) {
                         </div>
                       </div>
                     </td>
+                    <td>{owner ? <span className="cell-muted">All workspaces</span> : <span className="sa-wsname">{u.wsName || '—'}</span>}</td>
                     <td><span className={`badge ${owner ? 'green' : u.role === 'admin' ? 'blue' : 'gray'}`}>{roleName(u.role)}</span></td>
                     <td className="sa-pages">
                       {u.allPages ? (
@@ -264,11 +290,11 @@ export default function SuperAdmin({ go }) {
                           <button className="btn sm ghost" onClick={() => setPwFor(u)} title="Set a new password">Password</button>
                           <button className="btn sm ghost" onClick={() => signOut(u)} title="Sign out on every device">Sign out</button>
                           {u.suspended ? (
-                            <button className="btn sm" onClick={() => suspend(u, false)}>Activate</button>
+                            <button className="btn sm" onClick={() => suspendUser(u, false)}>Activate</button>
                           ) : (
-                            <button className="btn sm ghost sa-warn" onClick={() => suspend(u, true)}>Suspend</button>
+                            <button className="btn sm ghost sa-warn" onClick={() => suspendUser(u, true)}>Suspend</button>
                           )}
-                          <button className="btn sm ghost" onClick={() => remove(u)} title="Delete"><Icon.trash /></button>
+                          <button className="btn sm ghost" onClick={() => removeUser(u)} title="Delete"><Icon.trash /></button>
                         </div>
                       )}
                     </td>
@@ -284,8 +310,7 @@ export default function SuperAdmin({ go }) {
       <div className="card">
         <div className="card-head">
           <Icon.logs style={{ width: 18, color: 'var(--brand-700)' }} />
-          <div style={{ flex: 1 }}><h3>Recent activity</h3><div className="sub">What happened last, from the audit log</div></div>
-          <button className="btn sm" onClick={() => go?.('audit')}>View all</button>
+          <div style={{ flex: 1 }}><h3>Recent super admin activity</h3><div className="sub">Workspaces, people and switches you changed — across every workspace</div></div>
         </div>
         {activity.length === 0 ? (
           <div className="card-pad muted" style={{ fontSize: 13 }}>Nothing yet.</div>
@@ -293,7 +318,7 @@ export default function SuperAdmin({ go }) {
           activity.map((l) => (
             <div key={l.id} className="log-row">
               <span className={`log-level lvl-${l.level}`} />
-              <span className="log-type" style={{ minWidth: 92 }}>{l.type}</span>
+              <span className="log-type sa-log-ws" title={l.wsName}>{l.wsName}</span>
               <div style={{ flex: 1 }}>{l.message}</div>
               <div className="log-time">{timeAgo(l.created_at)}</div>
             </div>
@@ -301,9 +326,41 @@ export default function SuperAdmin({ go }) {
         )}
       </div>
 
+      {creating && (
+        <NewWorkspaceModal
+          onClose={() => setCreating(false)}
+          onSaved={() => {
+            setCreating(false);
+            load();
+            refreshAuth();
+          }}
+        />
+      )}
+      {managing && (
+        <ManageWorkspaceModal
+          w={managing}
+          here={managing.id === workspace?.id}
+          onClose={() => setManage(null)}
+          onChanged={() => {
+            load();
+            refreshAuth();
+          }}
+          onDeleted={() => {
+            setManage(null);
+            if (managing.id === workspace?.id) switchWorkspace('default', 'superadmin');
+            else {
+              load();
+              refreshAuth();
+            }
+          }}
+          onOpen={() => switchWorkspace(managing.id)}
+        />
+      )}
       {editing && (
         <PersonModal
           person={editing === 'new' ? null : editing}
+          workspaces={workspaces}
+          defaultWs={wsFilter || workspace?.id}
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
@@ -316,25 +373,235 @@ export default function SuperAdmin({ go }) {
   );
 }
 
-// Add a person, or change someone's name, role and pages.
-function PersonModal({ person, onClose, onSaved }) {
+// A new workspace for a business, optionally with its first admin (who can then add their team).
+function NewWorkspaceModal({ onClose, onSaved }) {
+  const { toast } = useApp();
+  const [f, setF] = useState({ name: '', adminName: '', email: '', password: '' });
+  const [saving, setSaving] = useState(false);
+  const withAdmin = !!(f.email || f.password || f.adminName);
+  async function save() {
+    setSaving(true);
+    try {
+      const r = await api.post('/admin/workspaces', {
+        name: f.name,
+        admin: withAdmin ? { name: f.adminName, email: f.email, password: f.password } : null,
+      });
+      toast(`Workspace "${r.workspace.name}" created${r.admin ? ` — ${r.admin.email} can sign in now` : ''}`, 'success');
+      onSaved();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+    setSaving(false);
+  }
+  return (
+    <Modal
+      title="New workspace"
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn primary" onClick={save} disabled={saving || !f.name.trim() || (withAdmin && (!f.email || f.password.length < 6))}>
+            {saving ? 'Creating…' : 'Create workspace'}
+          </button>
+        </>
+      }
+    >
+      <div className="field">
+        <label>Business name</label>
+        <input className="input" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} placeholder="e.g. Osumprises" autoFocus />
+        <div className="hint">It starts empty: its own WhatsApp numbers, contacts, templates, campaigns, chats, catalogs and settings.</div>
+      </div>
+      <div className="sa-sub-head">Their first admin <span className="muted">(optional — you can add people later)</span></div>
+      <div className="row">
+        <div className="field">
+          <label>Name</label>
+          <input className="input" value={f.adminName} onChange={(e) => setF({ ...f, adminName: e.target.value })} />
+        </div>
+        <div className="field">
+          <label>Email</label>
+          <input className="input" type="email" value={f.email} onChange={(e) => setF({ ...f, email: e.target.value })} />
+        </div>
+      </div>
+      <div className="field">
+        <label>Temporary password</label>
+        <input className="input" type="text" value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} placeholder="At least 6 characters" />
+        <div className="hint">They sign in with this, see only this workspace, and can add members to it. Share it with them.</div>
+      </div>
+    </Modal>
+  );
+}
+
+// Everything about one workspace: name, its switches, its numbers' AI, suspend, delete.
+function ManageWorkspaceModal({ w, here, onClose, onChanged, onDeleted, onOpen }) {
+  const { toast } = useApp();
+  const [name, setName] = useState(w.name);
+  const [busy, setBusy] = useState('');
+  const [confirmName, setConfirmName] = useState('');
+  const aiOn = w.numbers.filter((n) => n.auto_reply).length;
+
+  async function act(key, fn, ok) {
+    setBusy(key);
+    try {
+      await fn();
+      if (ok) toast(ok, 'success');
+      onChanged();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+    setBusy('');
+  }
+  const sys = (patch, ok) => act('sys', () => api.put(`/admin/workspaces/${w.id}/system`, patch), ok);
+  const numberAi = (n, on) =>
+    act('ai' + n.id, () => api.post(`/admin/workspaces/${w.id}/numbers/${n.id}/autoreply`, { enabled: on }), `AI auto-reply ${on ? 'on' : 'off'} for ${n.label || '+' + n.phone}`);
+  const suspend = (on) => {
+    if (on && !confirm(`Suspend ${w.name}?\n\n• Its team is signed out and can't sign in\n• No campaigns, warm-up or AI replies go out\n• Its numbers stay linked and chats keep arriving\n\nYou can re-activate it any time.`)) return;
+    act('susp', () => api.post(`/admin/workspaces/${w.id}/suspend`, { suspended: on }), on ? `${w.name} suspended` : `${w.name} re-activated`);
+  };
+  const stop = () => {
+    if (!confirm(`Stop everything in ${w.name}?\n\nCampaign sending is paused, warm-up stopped and AI auto-reply turned off on its numbers.`)) return;
+    act('stop', () => api.post(`/admin/workspaces/${w.id}/emergency-stop`), `Everything stopped in ${w.name}`);
+  };
+  async function del() {
+    setBusy('del');
+    try {
+      await api.del(`/admin/workspaces/${w.id}`, { confirm: confirmName });
+      toast(`${w.name} deleted`, 'success');
+      onDeleted();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+    setBusy('');
+  }
+
+  return (
+    <Modal title={w.name} onClose={onClose} wide footer={<><button className="btn" onClick={onClose}>Close</button>{!here && <button className="btn primary" onClick={onOpen}>Open {w.name}</button>}</>}>
+      <div className="sa-m-row">
+        <div className="field" style={{ flex: 1, margin: 0 }}>
+          <label>Name</label>
+          <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <button className="btn" disabled={busy === 'name' || !name.trim() || name.trim() === w.name} onClick={() => act('name', () => api.put(`/admin/workspaces/${w.id}`, { name: name.trim() }), 'Workspace renamed')}>
+          Rename
+        </button>
+      </div>
+
+      <div className="sa-sub-head">Switches</div>
+      <div className="sa-rows sa-m-box">
+        <div className="setting-row">
+          <div>
+            <div className="st-label">Campaign sending</div>
+            <div className="st-desc">{w.sendingPaused ? 'Paused — its campaigns send nothing until you turn this back on.' : 'Running — its campaigns send inside their schedule.'}</div>
+          </div>
+          <Toggle label="Campaign sending" checked={!w.sendingPaused} disabled={busy === 'sys'} onChange={(on) => sys({ sendingPaused: !on }, on ? 'Campaign sending resumed' : 'Campaign sending paused')} />
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="st-label">Warm-up chats</div>
+            <div className="st-desc">{w.warmupActive ? 'On — its warm-up numbers chat with each other.' : `Off.${w.warmupNumbers < 2 ? ' It needs at least 2 warm-up numbers (Warmup page).' : ''}`}</div>
+          </div>
+          <Toggle label="Warm-up chats" checked={w.warmupActive} disabled={busy === 'sys' || (!w.warmupActive && w.warmupNumbers < 2)} onChange={(on) => sys({ warmupActive: on }, on ? 'Warm-up started' : 'Warm-up stopped')} />
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="st-label">AI auto-reply</div>
+            <div className="st-desc">On for {aiOn} of {plural(w.numbers.length, 'number')}.</div>
+          </div>
+          <div className="flex" style={{ gap: 6 }}>
+            <button className="btn sm" disabled={busy === 'sys' || !w.numbers.length} onClick={() => sys({ autoReply: true }, 'AI auto-reply on for every number')}>All on</button>
+            <button className="btn sm" disabled={busy === 'sys' || !w.numbers.length} onClick={() => sys({ autoReply: false }, 'AI auto-reply off for every number')}>All off</button>
+          </div>
+        </div>
+      </div>
+
+      <div className="sa-sub-head">WhatsApp numbers</div>
+      <div className="sa-m-box">
+        {w.numbers.length === 0 ? (
+          <div className="muted" style={{ fontSize: 13, padding: '12px 14px' }}>No numbers linked yet — they're linked on this workspace's WhatsApp Gateway page.</div>
+        ) : (
+          w.numbers.map((n) => (
+            <div key={n.id} className="sa-num">
+              <span className={`wa-tab-dot ${n.connected ? 'on' : 'connecting'}`} title={n.connected ? 'Connected' : 'Not connected'} />
+              <div className="sa-num-main">
+                <div className="sa-num-name">
+                  {n.label || n.name || (n.main ? 'Main number' : '+' + n.phone)}
+                  {n.default && <span className="wa-tab-default">Default</span>}
+                </div>
+                <div className="sa-num-sub">{n.phone ? '+' + n.phone : 'not linked'} · {n.connected ? 'connected' : 'offline'}</div>
+              </div>
+              <span className="sa-num-ai">AI</span>
+              <Toggle label={`AI auto-reply for ${n.label || n.phone}`} checked={n.auto_reply} disabled={busy === 'ai' + n.id} onChange={(on) => numberAi(n, on)} />
+            </div>
+          ))
+        )}
+      </div>
+
+      <div className="sa-sub-head">Access</div>
+      <div className="sa-rows sa-m-box">
+        <div className="setting-row">
+          <div>
+            <div className="st-label">{w.suspended ? 'Suspended' : 'Active'}</div>
+            <div className="st-desc">
+              {w.suspended
+                ? "Its team can't sign in and nothing is sent automatically. Chats keep arriving."
+                : `${plural(w.team, 'person', 'people')} can sign in and use the pages you allow them.`}
+            </div>
+          </div>
+          {w.suspended ? (
+            <button className="btn primary sm" disabled={busy === 'susp'} onClick={() => suspend(false)}>Re-activate</button>
+          ) : (
+            <button className="btn sm sa-warn" disabled={busy === 'susp'} onClick={() => suspend(true)}>Suspend</button>
+          )}
+        </div>
+        <div className="setting-row sa-stop">
+          <div>
+            <div className="st-label">Emergency stop</div>
+            <div className="st-desc">Pause its campaign sending, stop its warm-up and turn AI auto-reply off on its numbers.</div>
+          </div>
+          <button className="btn danger sm" disabled={busy === 'stop'} onClick={stop}><Icon.pause /> Stop everything</button>
+        </div>
+      </div>
+
+      {!w.main && (
+        <div className="sa-danger">
+          <div className="st-label">Delete this workspace</div>
+          <div className="st-desc">
+            Unlinks its WhatsApp numbers and permanently deletes its contacts, chats, campaigns, templates, catalogs,
+            settings, logs and its {plural(w.team, 'person', 'people')}. This can't be undone. Type <strong>{w.name}</strong> to confirm.
+          </div>
+          <div className="sa-m-row" style={{ marginTop: 10 }}>
+            <input className="input" value={confirmName} onChange={(e) => setConfirmName(e.target.value)} placeholder={w.name} aria-label="Type the workspace name to confirm" />
+            <button className="btn danger" disabled={busy === 'del' || confirmName.trim() !== w.name} onClick={del}>
+              <Icon.trash /> {busy === 'del' ? 'Deleting…' : 'Delete workspace'}
+            </button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+// Add a person, or change someone's workspace, name, role and pages.
+function PersonModal({ person, workspaces, defaultWs, onClose, onSaved }) {
   const { toast } = useApp();
   const isNew = !person;
   const [f, setF] = useState({
     name: person?.name || '',
     email: '',
     password: '',
+    ws: person?.ws || defaultWs || workspaces[0]?.id || '',
     role: person?.role || 'member',
     pages: person ? [...person.pages] : PAGE_LIST.map(([id]) => id),
   });
   const [saving, setSaving] = useState(false);
   const toggle = (id) => setF((x) => ({ ...x, pages: x.pages.includes(id) ? x.pages.filter((p) => p !== id) : [...x.pages, id] }));
+  const moving = !isNew && f.ws !== person.ws;
 
   async function save() {
+    if (moving && !confirm(`Move ${person.name} to ${workspaces.find((w) => w.id === f.ws)?.name}? They're signed out and will only see that workspace from now on.`)) return;
     setSaving(true);
     try {
       if (isNew) await api.post('/auth/register', f);
-      else await api.put(`/admin/users/${person.id}`, { name: f.name, role: f.role, pages: f.pages });
+      else await api.put(`/admin/users/${person.id}`, { name: f.name, role: f.role, pages: f.pages, ws: f.ws });
       toast(isNew ? `${f.name || f.email} added` : 'Access saved', 'success');
       onSaved();
     } catch (e) {
@@ -350,12 +617,19 @@ function PersonModal({ person, onClose, onSaved }) {
       footer={
         <>
           <button className="btn" onClick={onClose}>Cancel</button>
-          <button className="btn primary" onClick={save} disabled={saving || (isNew && (!f.email || f.password.length < 6))}>
+          <button className="btn primary" onClick={save} disabled={saving || !f.ws || (isNew && (!f.email || f.password.length < 6))}>
             {saving ? 'Saving…' : isNew ? 'Add person' : 'Save access'}
           </button>
         </>
       }
     >
+      <div className="field">
+        <label>Workspace</label>
+        <select className="select" value={f.ws} onChange={(e) => setF({ ...f, ws: e.target.value })}>
+          {workspaces.map((w) => <option key={w.id} value={w.id}>{w.name}{w.suspended ? ' (suspended)' : ''}</option>)}
+        </select>
+        <div className="hint">{moving ? 'They will be moved: signed out, and from then on they only see the new workspace.' : 'They only ever see this workspace — its numbers, contacts, campaigns and chats.'}</div>
+      </div>
       <div className="row">
         <div className="field">
           <label>Name</label>

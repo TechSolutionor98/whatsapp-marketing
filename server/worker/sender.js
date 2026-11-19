@@ -1,4 +1,4 @@
-import { db, audit, getSetting, setSetting, oid, nowIso, dayKey } from '../db/mongo.js';
+import { db, audit, getSetting, setSetting, getPlatform, isWsSuspended, listWorkspaces, isMongoUp, oid, nowIso, dayKey } from '../db/mongo.js';
 import { emit, bus } from '../events.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -7,11 +7,18 @@ import { isAccountConnected, sendFromTo, sendMediaFromTo, checkOnWhatsAppVia, ac
 import { aiAvailable, rewriteMessage } from '../ai.js';
 import { UPLOADS_DIR } from '../routes/uploads.js';
 import { renderTemplate, randInt, nowInTz, withinWindow } from '../utils.js';
+import { hasMain, defaultSenderId } from '../numbers.js';
+import { DEFAULT_WS, currentWs, runInWs } from '../tenant.js';
 
-// A campaign sends either from the main Gateway number (sender_id null) or a warm-up pool number.
-function senderFor(campaign) {
-  if (campaign.sender_id) {
-    const id = campaign.sender_id;
+// The number a campaign sends from: its chosen number (sender_id), else the main Gateway
+// number — or, in a workspace without one, that workspace's default number (fallbackId).
+export function senderIdOf(campaign, fallbackId = null) {
+  return campaign.sender_id || (hasMain() ? null : fallbackId);
+}
+
+function senderFor(campaign, fallbackId = null) {
+  const id = senderIdOf(campaign, fallbackId);
+  if (id) {
     return {
       connected: () => isAccountConnected(id),
       check: (phone) => checkOnWhatsAppVia(id, phone),
@@ -19,6 +26,13 @@ function senderFor(campaign) {
       sendMedia: (phone, buf, caption) => sendMediaFromTo(id, phone, buf, caption),
       typing: async () => {}, // pool send already sets "composing"
     };
+  }
+  if (!hasMain()) {
+    // No main number here and no linked number connected.
+    const off = async () => {
+      throw new Error('No WhatsApp number connected');
+    };
+    return { connected: () => false, check: async () => ({ exists: false, reason: 'not_connected' }), send: off, sendMedia: off, typing: async () => {} };
   }
   return {
     connected: () => isConnected(),
@@ -39,9 +53,17 @@ function loadMedia(template) {
   }
 }
 
-let running = false;
-let loopTimer = null;
-let paused = false;
+// One paced loop per workspace: each business's campaigns go out at their own pace, and one
+// workspace's sending never waits on (or mixes with) another's.
+const loops = new Map(); // ws -> { timer, running }
+const loopOf = (ws) => {
+  let L = loops.get(ws);
+  if (!L) {
+    L = { timer: null, running: false };
+    loops.set(ws, L);
+  }
+  return L;
+};
 
 async function globalSentToday() {
   return db.messages().countDocuments({ direction: 'out', day_key: dayKey() });
@@ -90,7 +112,7 @@ async function promoteScheduled() {
   }
 }
 
-async function nextEligibleTarget() {
+async function nextEligibleTarget(fallbackId) {
   await promoteScheduled();
   const campaigns = await db.campaigns().find({ status: 'running' }).sort({ _id: 1 }).toArray();
 
@@ -109,11 +131,11 @@ async function nextEligibleTarget() {
     }
     // A campaign must send from its assigned number. If that number isn't connected,
     // stop the campaign and tell the user to reconnect it (don't silently do nothing).
-    if (!senderFor(c).connected()) {
+    if (!senderFor(c, fallbackId).connected()) {
       await db.campaigns().updateOne({ _id: c._id }, { $set: { status: 'paused', pause_reason: 'sender_offline' } });
       audit(
         'campaign',
-        `Campaign "${c.name}" paused — ${c.sender_id ? 'its sending number' : 'the main WhatsApp number'} is not connected. Reconnect it, then press Start.`,
+        `Campaign "${c.name}" paused — ${c.sender_id ? 'its sending number' : hasMain() ? 'the main WhatsApp number' : 'no WhatsApp number'} is not connected. Reconnect it, then press Start.`,
         { level: 'warn' }
       );
       emit('campaign:update', { id: String(c._id) });
@@ -156,7 +178,7 @@ async function nextEligibleTarget() {
   return null;
 }
 
-async function sendOne(campaign, target, contact) {
+async function sendOne(campaign, target, contact, fallbackId) {
   const template = campaign.template_id
     ? await db.templates().findOne({ _id: oid(campaign.template_id) })
     : null;
@@ -165,7 +187,8 @@ async function sendOne(campaign, target, contact) {
     return;
   }
 
-  const sender = senderFor(campaign);
+  const sender = senderFor(campaign, fallbackId);
+  const fromId = senderIdOf(campaign, fallbackId) || 'main';
 
   // Verify the number is on WhatsApp before spending a send.
   const check = await sender.check(contact.phone);
@@ -202,8 +225,8 @@ async function sendOne(campaign, target, contact) {
     await db.messages().insertOne({
       contact_id: String(contact._id),
       campaign_id: String(campaign._id),
-      account_id: campaign.sender_id || 'main', // which number this went out from
-      account_phone: phoneOfAccount(campaign.sender_id || 'main'), // shows in that number's Conversations tab
+      account_id: fromId, // which number this went out from
+      account_phone: phoneOfAccount(fromId), // shows in that number's Conversations tab
       direction: 'out',
       body: text,
       media_url: template.media_url || null,
@@ -230,14 +253,17 @@ async function sendOne(campaign, target, contact) {
   }
 }
 
+// One send for the current workspace.
 export async function tick() {
-  if (running) return { skipped: true };
+  const L = loopOf(currentWs() || DEFAULT_WS);
+  if (L.running) return { skipped: true };
   if (isPaused()) return { paused: true };
-  running = true;
+  L.running = true;
   try {
-    const next = await nextEligibleTarget();
+    const fallbackId = hasMain() ? null : await defaultSenderId();
+    const next = await nextEligibleTarget(fallbackId);
     if (!next || !next.target) return { idle: true, info: next };
-    await sendOne(next.campaign, next.target, next.contact);
+    await sendOne(next.campaign, next.target, next.contact, fallbackId);
     const min = next.campaign.min_delay_sec || getSetting('minDelaySec', 35);
     const max = next.campaign.max_delay_sec || getSetting('maxDelaySec', 90);
     return { sent: true, delayMs: randInt(min, max) * 1000 };
@@ -245,16 +271,17 @@ export async function tick() {
     audit('system', `Worker tick error: ${err.message}`, { level: 'error' });
     return { error: err.message };
   } finally {
-    running = false;
+    L.running = false;
   }
 }
 
-function scheduleNext(delayMs) {
-  clearTimeout(loopTimer);
-  loopTimer = setTimeout(loop, delayMs);
+function scheduleNext(ws, delayMs) {
+  const L = loopOf(ws);
+  clearTimeout(L.timer);
+  L.timer = setTimeout(() => runInWs(ws, () => loop(ws)), delayMs);
 }
 
-async function loop() {
+async function loop(ws) {
   let delay = 15000;
   try {
     const res = await tick();
@@ -263,28 +290,46 @@ async function loop() {
   } catch (err) {
     audit('system', `Worker error: ${err.message}`, { level: 'error' });
   }
-  scheduleNext(delay);
+  if (loops.has(ws)) scheduleNext(ws, delay);
+}
+
+// Keep one loop per workspace (new workspaces get one; deleted ones stop).
+function superviseLoops() {
+  if (!isMongoUp()) return;
+  const ids = new Set(listWorkspaces().map((w) => w.id));
+  for (const id of ids) if (!loops.has(id)) scheduleNext(id, 3000);
+  for (const [id, L] of loops) {
+    if (!ids.has(id)) {
+      clearTimeout(L.timer);
+      loops.delete(id);
+    }
+  }
 }
 
 export function startWorker() {
-  audit('system', 'Paced sender worker started', { level: 'info' });
-  scheduleNext(3000);
-  bus.on('wa:status', (s) => {
-    if (s.status === 'connected') scheduleNext(1500);
+  console.log('  Paced sender worker started (one loop per workspace)');
+  setTimeout(superviseLoops, 3000);
+  setInterval(superviseLoops, 15000);
+  // The main number came back → its workspace's campaigns can go out right away.
+  bus.on('wa:status', (s, ws) => {
+    if (s?.status === 'connected' && loops.has(ws || DEFAULT_WS)) scheduleNext(ws || DEFAULT_WS, 1500);
   });
 }
 
+// "Run Worker Cycle": one send now, for the current workspace.
 export async function runCycleNow() {
+  const ws = currentWs() || DEFAULT_WS;
   const res = await tick();
-  if (res.sent) scheduleNext(res.delayMs);
+  if (res.sent && loops.has(ws)) scheduleNext(ws, res.delayMs);
   return res;
 }
 
-// Paused sending is saved, so it stays paused after a restart until someone resumes it.
+// Campaign sending for the current workspace. Paused is saved, so it stays paused after a
+// restart until someone resumes it. The super admin can also pause every workspace at once,
+// and a suspended workspace sends nothing.
 export function setPaused(v) {
-  paused = !!v;
-  setSetting('sendingPaused', paused).catch(() => {});
+  setSetting('sendingPaused', !!v).catch(() => {});
 }
 export function isPaused() {
-  return paused || !!getSetting('sendingPaused', false);
+  return !!getSetting('sendingPaused', false) || !!getPlatform('sendingPaused', false) || isWsSuspended(currentWs() || DEFAULT_WS);
 }

@@ -7,7 +7,7 @@ import { Modal, Empty, Loading, timeAgo, initials } from '../ui.jsx';
 export const roleName = (role) => (role === 'owner' ? 'Super admin' : role === 'admin' ? 'Admin' : 'Member');
 
 export default function Authentication({ go }) {
-  const { user, logout, toast } = useApp();
+  const { user, logout, toast, workspace } = useApp();
   const isOwner = user?.role === 'owner';
   const isAdmin = user?.role === 'admin'; // admins manage members; the super admin manages everyone (Super Admin page)
   const [users, setUsers] = useState([]);
@@ -75,8 +75,9 @@ export default function Authentication({ go }) {
             <div>
               <div style={{ fontWeight: 700, fontSize: 15 }}>{user?.name}</div>
               <div className="muted">{user?.email}</div>
-              <div style={{ marginTop: 4 }}>
+              <div style={{ marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
                 <span className={`badge ${roleBadge(user?.role)}`}>{roleName(user?.role)}</span>
+                {!isOwner && workspace && <span className="chip" title="Your workspace">{workspace.name}</span>}
               </div>
             </div>
           </div>
@@ -117,7 +118,7 @@ export default function Authentication({ go }) {
         <div className="card" style={{ marginBottom: 18 }}>
           <div className="card-head">
             <Icon.crown style={{ width: 18, color: 'var(--brand-700)' }} />
-            <div><h3>You're the super admin</h3><div className="sub">Add people, choose what each one can open, suspend or sign them out, and control the whole app.</div></div>
+            <div><h3>You're the super admin</h3><div className="sub">Create a workspace for each business, add people to it, choose what each one can open, and control every workspace.</div></div>
             <button className="btn primary sm" style={{ marginLeft: 'auto' }} onClick={() => go?.('superadmin')}>
               Open Super Admin
             </button>
@@ -130,7 +131,7 @@ export default function Authentication({ go }) {
         <div className="card" style={{ marginBottom: 18 }}>
           <div className="card-head">
             <Icon.users style={{ width: 18, color: 'var(--brand-700)' }} />
-            <div><h3>Team members</h3><div className="sub">You can add and remove members. Admins are managed by the super admin.</div></div>
+            <div><h3>Team members{workspace ? ` · ${workspace.name}` : ''}</h3><div className="sub">You can add and remove members of your workspace. Admins are managed by the super admin.</div></div>
             <button className="btn sm" style={{ marginLeft: 'auto' }} onClick={() => setShowAdd(true)}>
               <Icon.plus /> Add member
             </button>

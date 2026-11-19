@@ -30,7 +30,7 @@ templates.put('/:id', async (req, res) => {
   if (blocks !== undefined) set.blocks = blocks;
   if (media_url !== undefined) set.media_url = media_url;
   const r = await db.templates().findOneAndUpdate({ _id }, { $set: set }, { returnDocument: 'after' });
-  const doc = r.value || r;
+  const doc = r && (r.value || r);
   if (!doc) return res.status(404).json({ error: 'Not found' });
   res.json(pub(doc));
 });

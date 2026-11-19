@@ -22,7 +22,8 @@ import { promisify } from 'node:util';
 const inflateAsync = promisify(inflate);
 
 import { DATA_DIR } from '../config.js';
-import { db, audit, oid, getSetting, setSetting, nowIso, dayKey, setHandoff } from '../db/mongo.js';
+import { db, col, audit, oid, getSetting, setSetting, nowIso, dayKey, setHandoff, isWsSuspended } from '../db/mongo.js';
+import { DEFAULT_WS, currentWs, runInWs, inWs } from '../tenant.js';
 import { emit } from '../events.js';
 import { attachReceipts } from '../receipts.js';
 import { aiAvailable, conversationReply } from '../ai.js';
@@ -64,18 +65,30 @@ const logger = pino(
   baileysLogSink
 );
 
-// id -> runtime { id, label, sock, status, qr, me, lastError, starting, manualLogout, reconnectTimer }
+// id -> runtime { id, ws, label, sock, status, qr, me, lastError, starting, manualLogout, reconnectTimer }
+// Every number belongs to one workspace (ws) — its chats, contacts and AI replies stay there.
 const accounts = new Map();
 
 // The MAIN number runs through the same pipeline as linked conversation numbers (history,
 // @lid numbers, names, groups, media, reactions, permissions) — client.js registers its
-// connection here. Pipeline functions below take 'main' as an account id too.
+// connection here. Pipeline functions below take 'main' as an account id too. It belongs to
+// the default workspace.
 let mainCtx = null;
 export function registerMainNumber(ctx) {
   mainCtx = ctx;
 }
+// A number by id — only if it belongs to the workspace this code runs in (a request in one
+// workspace can never read, send from, rename or unlink another workspace's number).
 function ctxOf(id) {
-  return id === 'main' ? mainCtx : accounts.get(id);
+  const a = id === 'main' ? mainCtx : accounts.get(id);
+  if (!a) return a;
+  const ws = currentWs();
+  if (ws && (a.ws || DEFAULT_WS) !== ws) return undefined;
+  return a;
+}
+// Subscribe to a number's socket events inside its workspace.
+function onWs(sock, ws, event, fn) {
+  sock.ev.on(event, inWs(ws || DEFAULT_WS, fn));
 }
 // The linked phone of an account id ('main' or a pool id) — used to tag stored messages.
 export function phoneOfAccount(id) {
@@ -96,8 +109,14 @@ function authDir(id) {
   return path.join(POOL_DIR, id);
 }
 
-export function poolState() {
-  return [...accounts.values()].map((a) => ({
+// The numbers of one workspace (default: the current one; platform level: all).
+function wsAccounts(ws = currentWs()) {
+  const all = [...accounts.values()];
+  return ws ? all.filter((a) => (a.ws || DEFAULT_WS) === ws) : all;
+}
+
+export function poolState(ws = currentWs()) {
+  return wsAccounts(ws).map((a) => ({
     id: a.id,
     label: a.label || '',
     role: a.role || 'warmup',
@@ -111,8 +130,8 @@ export function poolState() {
 }
 
 // Warm-up / campaign-sender numbers only (conversation-only numbers are excluded).
-export function connectedAccounts() {
-  return [...accounts.values()].filter(
+export function connectedAccounts(ws = currentWs()) {
+  return wsAccounts(ws).filter(
     (a) => a.status === 'connected' && a.sock && a.me?.phone && (a.role || 'warmup') !== 'conversation'
   );
 }
@@ -121,11 +140,18 @@ function emitPool() {
   emit('pool:update', poolState());
 }
 
-export async function startPoolAccount(id, label = '', role, autoReply) {
+export function startPoolAccount(id, label = '', role, autoReply, ws) {
+  const cur = accounts.get(id);
+  const home = cur?.ws || ws || currentWs() || DEFAULT_WS;
+  if (cur && ws && cur.ws !== ws) return; // never move a number into another workspace
+  return runInWs(home, () => startPoolAccountIn(home, id, label, role, autoReply));
+}
+
+async function startPoolAccountIn(ws, id, label = '', role, autoReply) {
   let a = accounts.get(id);
   if (a?.sock) return; // already live
   if (!a) {
-    a = { id, label, role: role || 'warmup', autoReply: !!autoReply, status: 'connecting', qr: null, me: null };
+    a = { id, ws, label, role: role || 'warmup', autoReply: !!autoReply, status: 'connecting', qr: null, me: null };
     accounts.set(id, a);
   }
   if (label) a.label = label;
@@ -159,26 +185,26 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
       syncFullHistory: isConv,
       // Called with each history notification (Baileys chats.js). Baileys' own history
       // processing drops WhatsApp's @lid -> phone-number table, so read it ourselves.
-      shouldSyncHistoryMessage: (notif) => {
+      shouldSyncHistoryMessage: inWs(ws, (notif) => {
         if (isConv) onHistoryNotification(id, notif);
         return true;
-      },
+      }),
       // Answer recipients' retry requests so our messages decrypt (avoids "Waiting for this message").
-      getMessage: async (key) => {
+      getMessage: inWs(ws, async (key) => {
         try {
           const m = await db.messages().findOne({ wa_message_id: key?.id });
           if (m?.body) return { conversation: m.body };
         } catch {}
         return undefined;
-      },
+      }),
     });
     a.sock = sock;
     sock.ev.on('creds.update', saveCreds);
-    attachReceipts(sock); // delivery/read receipts for campaigns sent from this number
-    sock.ev.on('messages.upsert', (ev) => ingestPool(id, ev)); // capture this number's own chats
+    attachReceipts(sock, ws); // delivery/read receipts for campaigns sent from this number
+    onWs(sock, ws, 'messages.upsert', (ev) => ingestPool(id, ev)); // capture this number's own chats
     if (isConv) attachConversationHandlers(id, sock);
 
-    sock.ev.on('connection.update', async (u) => {
+    onWs(sock, ws, 'connection.update', async (u) => {
       const { connection, lastDisconnect, qr } = u;
       if (qr) {
         a.qr = await QRCode.toDataURL(qr, { margin: 1, width: 280 });
@@ -232,7 +258,7 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
           // almost immediately instead of making every new link wait 3 s (250 ms lets the
           // just-saved login finish writing to disk first).
           const wait = code === DisconnectReason.restartRequired ? 250 : 3000;
-          a.reconnectTimer = setTimeout(() => startPoolAccount(id, a.label, a.role, a.autoReply), wait);
+          a.reconnectTimer = setTimeout(() => startPoolAccount(id, a.label, a.role, a.autoReply, a.ws), wait);
         }
       }
     });
@@ -242,7 +268,7 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
     a.status = 'disconnected';
     a.lastError = e.message;
     emitPool();
-    a.reconnectTimer = setTimeout(() => startPoolAccount(id, a.label, a.role, a.autoReply), 5000);
+    a.reconnectTimer = setTimeout(() => startPoolAccount(id, a.label, a.role, a.autoReply, a.ws), 5000);
   } finally {
     a.starting = false;
   }
@@ -251,7 +277,9 @@ export async function startPoolAccount(id, label = '', role, autoReply) {
 // Wire a conversation number's socket (linked numbers AND the main number) into the
 // pipeline: history batches, saved/push names + @lid pairs, group names/permissions.
 export function attachConversationHandlers(id, sock) {
-  sock.ev.on('messaging-history.set', (ev) => {
+  const ws = (id === 'main' ? mainCtx?.ws : accounts.get(id)?.ws) || DEFAULT_WS;
+  const on = (event, fn) => onWs(sock, ws, event, fn);
+  on('messaging-history.set', (ev) => {
     // Stay "syncing" until WhatsApp marks the FINAL batch (isLatest); progress hits 100 on
     // every batch, so it can't tell us the sync is finished. Quiet-gap fallback: 20 s.
     const onDemand = ev.syncType === proto.HistorySync.HistorySyncType.ON_DEMAND;
@@ -268,30 +296,30 @@ export function attachConversationHandlers(id, sock) {
   });
   // Saved names from the phone's address book + their @lid <-> number pairs arrive via
   // the app-state contact sync (Baileys chat-utils contactAction → contacts.upsert).
-  sock.ev.on('contacts.upsert', (list) => {
+  on('contacts.upsert', (list) => {
     queueIdentity(async () => {
       const n = await applyContactBatch(list, phoneOfAccount(id));
       if (n) audit('connection', `Updated ${n} chat name${n === 1 ? '' : 's'} from your WhatsApp contacts`, { level: 'info' });
     });
   });
   // Push names from incoming messages (Baileys chats.js → contacts.update).
-  sock.ev.on('contacts.update', (list) => queueIdentity(() => applyContactBatch(list, phoneOfAccount(id))));
+  on('contacts.update', (list) => queueIdentity(() => applyContactBatch(list, phoneOfAccount(id))));
   // Group names (subjects) when they're created/changed.
-  sock.ev.on('groups.upsert', (list) => applyGroupSubjects(id, list));
-  sock.ev.on('groups.update', (list) => applyGroupSubjects(id, list));
+  on('groups.upsert', (list) => applyGroupSubjects(id, list));
+  on('groups.update', (list) => applyGroupSubjects(id, list));
   // Someone was made/removed as admin → our own posting rights may have changed.
-  sock.ev.on('group-participants.update', (ev) => {
+  on('group-participants.update', (ev) => {
     if (ev?.action === 'promote' || ev?.action === 'demote') refreshGroupPermission(id, ev.id);
   });
 }
 
 // shouldSyncHistoryMessage hook: Baileys hands us each history notification here — read
 // WhatsApp's number table / inline recent-chats batch from it (see onHistoryNotification).
-export function historyHook(id) {
-  return (notif) => {
+export function historyHook(id, ws = DEFAULT_WS) {
+  return inWs(ws, (notif) => {
     onHistoryNotification(id, notif);
     return true;
-  };
+  });
 }
 
 // Re-read one linked phone's address book on the live connection (no QR): clear the stored
@@ -368,7 +396,8 @@ export function onConversationOpen(id) {
 }
 
 export async function removePoolAccount(id) {
-  const a = accounts.get(id);
+  const a = ctxOf(id);
+  if (accounts.has(id) && !a) return; // another workspace's number
   if (a) {
     a.manualLogout = true;
     clearTimeout(a.reconnectTimer);
@@ -385,29 +414,34 @@ export async function removePoolAccount(id) {
 }
 
 export function isAccountConnected(id) {
-  const a = accounts.get(id);
+  const a = id === 'main' ? null : ctxOf(id);
   return !!(a && a.status === 'connected' && a.sock);
 }
 
 // Update a running account's display label (so poolState reflects it immediately).
 export function setPoolLabel(id, label) {
-  const a = accounts.get(id);
+  const a = id === 'main' ? null : ctxOf(id);
   if (a) a.label = label;
 }
 
 // Per-account AI auto-reply toggle.
 export function setPoolAutoReply(id, enabled) {
-  const a = accounts.get(id);
+  const a = id === 'main' ? null : ctxOf(id);
   if (a) a.autoReply = !!enabled;
 }
 
 // The role of a pool account ('warmup' | 'conversation'), or null if unknown.
 export function accountRole(id) {
-  return accounts.get(id)?.role || null;
+  return (id === 'main' ? null : ctxOf(id)?.role) || null;
+}
+
+// The workspace a number belongs to (null if unknown).
+export function accountWs(id) {
+  return (id === 'main' ? mainCtx?.ws : accounts.get(id)?.ws) || null;
 }
 
 export async function checkOnWhatsAppVia(fromId, phone) {
-  const a = accounts.get(fromId);
+  const a = fromId === 'main' ? null : ctxOf(fromId);
   if (!a?.sock || a.status !== 'connected') return { exists: false, reason: 'not_connected' };
   try {
     const res = await a.sock.onWhatsApp(`${normalizePhone(phone)}@s.whatsapp.net`);
@@ -428,7 +462,7 @@ export async function sendJidFrom(fromId, jid, text) {
 }
 
 export async function sendFromTo(fromId, toPhone, text) {
-  const a = accounts.get(fromId);
+  const a = fromId === 'main' ? null : ctxOf(fromId);
   if (!a?.sock || a.status !== 'connected') throw new Error('Source number not connected');
   const jid = `${normalizePhone(toPhone)}@s.whatsapp.net`;
   await a.sock.sendPresenceUpdate('composing', jid).catch(() => {});
@@ -437,7 +471,7 @@ export async function sendFromTo(fromId, toPhone, text) {
 }
 
 export async function sendMediaFromTo(fromId, toPhone, buffer, caption) {
-  const a = accounts.get(fromId);
+  const a = fromId === 'main' ? null : ctxOf(fromId);
   if (!a?.sock || a.status !== 'connected') throw new Error('Source number not connected');
   const jid = `${normalizePhone(toPhone)}@s.whatsapp.net`;
   const sent = await a.sock.sendMessage(jid, { image: buffer, caption: caption || undefined });
@@ -526,7 +560,8 @@ async function applyReaction(msg) {
 // (404/410), Baileys asks the linked phone to re-upload it (reuploadRequest), like WA Web.
 export async function downloadStoredMedia(doc) {
   const waMsg = JSON.parse(doc.media_raw, BufferJSON.reviver);
-  const live = [...accounts.values(), mainCtx].filter((a) => a?.sock && a.status === 'connected');
+  const ws = currentWs() || DEFAULT_WS; // only this workspace's numbers fetch its media
+  const live = [...accounts.values(), mainCtx].filter((a) => a?.sock && a.status === 'connected' && (a.ws || DEFAULT_WS) === ws);
   const acc = live.find((a) => doc.account_phone && a.me?.phone === doc.account_phone) || live.find((a) => a.role === 'conversation');
   return downloadMediaMessage(waMsg, 'buffer', {}, acc ? { logger, reuploadRequest: acc.sock.updateMediaMessage } : undefined);
 }
@@ -1375,7 +1410,8 @@ async function ingestPool(accountId, { messages, type }) {
 
       const stop = getSetting('stopKeywords', []);
       const lc = body.toLowerCase();
-      const acctAutoReply = !!ctxOf(accountId)?.autoReply; // this number's own AI toggle
+      // this number's own AI toggle (a suspended workspace sends nothing automatically)
+      const acctAutoReply = !!ctxOf(accountId)?.autoReply && !isWsSuspended(currentWs() || DEFAULT_WS);
       if (stop.some((w) => lc === w || lc.startsWith(w))) {
         await db.contacts().updateOne({ _id: contact._id }, { $set: { status: 'opted_out', handoff: 0, handoff_reason: '', handoffs: {} } });
         audit('reply', `${contact.name || (phone ? '+' + phone : 'A contact')} opted out ("${body}")`, { level: 'warn', meta: { contactId: String(contact._id) } });
@@ -1538,12 +1574,12 @@ async function ingestPoolHistory(accountId, { messages, chats }) {
   }
 }
 
-// Reconnect every saved account on boot (after Mongo is up).
+// Reconnect every saved account on boot (after Mongo is up), each in its own workspace.
 export async function reconnectPoolAccounts() {
-  await migrateContactNames().catch((e) => audit('system', `Contact-name cleanup failed: ${e.message}`, { level: 'error' }));
+  await runInWs(DEFAULT_WS, () => migrateContactNames()).catch((e) => audit('system', `Contact-name cleanup failed: ${e.message}`, { level: 'error', ws: DEFAULT_WS }));
   try {
-    const docs = await db.warmupAccounts().find().toArray();
-    for (const d of docs) startPoolAccount(String(d._id), d.label || '', d.role || 'warmup', !!d.auto_reply);
+    const docs = await col('warmup_accounts').find().toArray();
+    for (const d of docs) startPoolAccount(String(d._id), d.label || '', d.role || 'warmup', !!d.auto_reply, d.ws || DEFAULT_WS);
   } catch {
     /* mongo not ready yet; caller retries */
   }

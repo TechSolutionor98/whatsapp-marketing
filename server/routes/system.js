@@ -6,24 +6,46 @@ import {
   logoutWhatsApp,
   checkOnWhatsApp,
 } from '../whatsapp/client.js';
+import { checkOnWhatsAppVia } from '../whatsapp/pool.js';
 import { runCycleNow, setPaused, isPaused } from '../worker/sender.js';
+import { hasMain, listNumbers, defaultSenderId } from '../numbers.js';
 
 export const system = Router();
 
 // ---- WhatsApp gateway ----
-system.get('/wa/status', (_req, res) => {
-  res.json({ ...getWaState(), workerPaused: isPaused() });
+// The default workspace: its original main number. Any other workspace: a summary of its own
+// numbers (the default one first) — it never sees or controls the main number.
+system.get('/wa/status', async (_req, res) => {
+  if (hasMain()) return res.json({ ...getWaState(), main: true, workerPaused: isPaused() });
+  const nums = await listNumbers();
+  const def = nums.find((n) => n.default) || null;
+  const shown = def?.connected ? def : nums.find((n) => n.connected) || def;
+  res.json({
+    status: shown?.connected ? 'connected' : nums.length ? 'connecting' : 'disconnected',
+    qr: null,
+    me: shown ? { phone: shown.phone, name: shown.label || shown.name || '' } : null,
+    lastError: null,
+    syncing: !!shown?.syncing,
+    main: false,
+    numbers: nums.length,
+    workerPaused: isPaused(),
+  });
 });
+const noMain = (res) => res.status(400).json({ error: 'Link your numbers under "Your WhatsApp numbers" on this page' });
 system.post('/wa/connect', (_req, res) => {
+  if (!hasMain()) return noMain(res);
   connectWhatsApp();
   res.json({ ok: true });
 });
 system.post('/wa/logout', async (_req, res) => {
+  if (!hasMain()) return noMain(res);
   await logoutWhatsApp();
   res.json({ ok: true });
 });
 system.get('/wa/check/:phone', async (req, res) => {
-  res.json(await checkOnWhatsApp(req.params.phone));
+  if (hasMain()) return res.json(await checkOnWhatsApp(req.params.phone));
+  const id = await defaultSenderId();
+  res.json(id ? await checkOnWhatsAppVia(id, req.params.phone) : { exists: false, reason: 'not_connected' });
 });
 
 // ---- Worker ----
@@ -32,7 +54,7 @@ system.post('/worker/cycle', async (_req, res) => {
 });
 system.post('/worker/pause', (req, res) => {
   setPaused(!!req.body.paused);
-  audit('system', `${req.body.paused ? 'Worker paused globally' : 'Worker resumed'} by ${req.user?.email || 'unknown'}`);
+  audit('system', `${req.body.paused ? 'Campaign sending paused' : 'Campaign sending resumed'} by ${req.user?.email || 'unknown'}`);
   res.json({ paused: isPaused() });
 });
 
@@ -107,7 +129,7 @@ system.put('/settings', async (req, res) => {
   const body = req.body || {};
   // Values the server keeps for itself — the Settings page sends back everything it loaded,
   // so a stale tab must not overwrite them.
-  const SERVER_MANAGED = new Set(['productFeedStatus', 'mainPhone', 'addressBookV2', 'namesV2', 'defaultConvPhone', 'mainConvLabel', 'mainCatalogId', 'sendingPaused', 'teamLocked']);
+  const SERVER_MANAGED = new Set(['productFeedStatus', 'mainPhone', 'addressBookV2', 'namesV2', 'defaultConvPhone', 'mainConvLabel', 'mainCatalogId', 'sendingPaused', 'teamLocked', 'warmupActive']);
   for (const [k, v] of Object.entries(body)) if (!SERVER_MANAGED.has(k)) await setSetting(k, v);
   audit('system', `Settings updated by ${req.user?.email || 'unknown'}`);
   res.json(settingsFor(req));

@@ -71,6 +71,13 @@ export const Icon = {
       <path d="M5 19h14" />
     </S>
   ),
+  briefcase: (p) => (
+    <S {...p}>
+      <rect x="3" y="7" width="18" height="13" rx="2" />
+      <path d="M8 7V5a2 2 0 012-2h4a2 2 0 012 2v2" />
+      <path d="M3 13h18" />
+    </S>
+  ),
   shield: (p) => (
     <S {...p}>
       <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />

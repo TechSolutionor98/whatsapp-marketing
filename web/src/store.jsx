@@ -1,11 +1,13 @@
 import { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
-import { api, subscribe } from './api.js';
+import { api, subscribe, getWorkspace, setWorkspace } from './api.js';
 
 const AppCtx = createContext(null);
 export const useApp = () => useContext(AppCtx);
 
 export function AppProvider({ children }) {
   const [user, setUser] = useState(null);
+  const [workspace, setWs] = useState(null); // { id, name, suspended, main } — the one this tab works in
+  const [workspaces, setWorkspaces] = useState([]); // super admin: every workspace
   const [authChecked, setAuthChecked] = useState(false);
   const [authStatus, setAuthStatus] = useState(null); // { mongoConnected, hasUsers, error }
   const [wa, setWa] = useState({ status: 'disconnected', qr: null, me: null });
@@ -38,22 +40,43 @@ export function AppProvider({ children }) {
     }
   }, []);
 
+  // Who is signed in and which workspace this tab shows (the server corrects a workspace that
+  // no longer exists, or one a non-super-admin can't open).
+  const applySession = useCallback((r) => {
+    setUser((prev) => (JSON.stringify(prev) === JSON.stringify(r.user) ? prev : r.user));
+    if (r.workspace) {
+      setWs((prev) => (JSON.stringify(prev) === JSON.stringify(r.workspace) ? prev : r.workspace));
+      if (r.user?.role === 'owner' && getWorkspace() !== r.workspace.id) setWorkspace(r.workspace.id);
+    }
+    setWorkspaces((prev) => {
+      const next = r.workspaces || [];
+      return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+    });
+  }, []);
+
   const refreshAuth = useCallback(async () => {
     try {
-      const r = await api.get('/auth/me');
-      setUser(r.user);
+      applySession(await api.get('/auth/me'));
     } catch {
       setUser(null);
       await fetchStatus();
     } finally {
       setAuthChecked(true);
     }
-  }, [fetchStatus]);
+  }, [fetchStatus, applySession]);
 
   const login = useCallback(async (email, password) => {
     const r = await api.post('/auth/login', { email, password });
-    setUser(r.user);
+    applySession(r);
     return r;
+  }, [applySession]);
+
+  // Super admin: open another workspace. A fresh load guarantees nothing from the previous
+  // workspace stays on screen.
+  const switchWorkspace = useCallback((id, page = 'overview') => {
+    setWorkspace(id);
+    window.location.hash = `/${page}`;
+    window.location.reload();
   }, []);
 
   const register = useCallback(async (payload) => {
@@ -108,8 +131,7 @@ export function AppProvider({ children }) {
     if (!signedIn) return;
     const recheck = async () => {
       try {
-        const r = await api.get('/auth/me');
-        setUser((prev) => (JSON.stringify(prev) === JSON.stringify(r.user) ? prev : r.user));
+        applySession(await api.get('/auth/me'));
       } catch {}
     };
     const t = setInterval(recheck, 60000);
@@ -120,15 +142,21 @@ export function AppProvider({ children }) {
       window.removeEventListener('auth:changed', recheck);
       window.removeEventListener('focus', recheck);
     };
-  }, [signedIn]);
+  }, [signedIn, applySession]);
 
   // Live data + SSE only while authenticated.
   useEffect(() => {
     if (!user) return;
     refreshStats();
     refreshWa();
+    let waTimer = null;
     const unsub = subscribe((ev, data) => {
-      if (ev === 'wa:status') setWa(data);
+      if (ev === 'wa:status') setWa((prev) => ({ ...data, main: true, workerPaused: prev.workerPaused }));
+      // A workspace without the main number: its connection is its own numbers' status.
+      if (ev === 'pool:update') {
+        clearTimeout(waTimer);
+        waTimer = setTimeout(refreshWa, 800);
+      }
       if (ev === 'stats:dirty' || ev === 'message:in' || ev === 'message:out') refreshStats();
       listeners.current.forEach((cb) => cb(ev, data));
     });
@@ -136,6 +164,7 @@ export function AppProvider({ children }) {
     return () => {
       unsub();
       clearInterval(poll);
+      clearTimeout(waTimer);
     };
   }, [user, refreshStats, refreshWa]);
 
@@ -143,6 +172,9 @@ export function AppProvider({ children }) {
     <AppCtx.Provider
       value={{
         user,
+        workspace,
+        workspaces,
+        switchWorkspace,
         authChecked,
         authStatus,
         login,

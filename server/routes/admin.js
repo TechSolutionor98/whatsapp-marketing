@@ -1,18 +1,220 @@
-// Super Admin: full control over people and the whole system. Every route here is for the
-// super admin (role 'owner') only — index.js mounts it behind requireOwner.
+// Super Admin: controls the whole platform — every workspace (business), every person in it,
+// and what each workspace's automation is allowed to do. Every route here is for the super
+// admin (role 'owner') only — index.js mounts it behind requireOwner.
 import { Router } from 'express';
 import { ObjectId } from 'mongodb';
-import { db, users, audit, getSetting, setSetting } from '../db/mongo.js';
+import {
+  db, col, users, getSetting, setSetting, getPlatform, setPlatform, dayKey,
+  listWorkspaces, workspaceOf, createWorkspace, updateWorkspace, deleteWorkspaceData,
+} from '../db/mongo.js';
+import { audit as auditLog } from '../db/mongo.js';
 import { hashPassword } from '../auth.js';
 import { cleanPages, forgetUser } from '../access.js';
 import { publicUser } from './auth.js';
-import { setPaused, isPaused } from '../worker/sender.js';
-import { setPoolAutoReply } from '../whatsapp/pool.js';
+import { setPaused } from '../worker/sender.js';
+import { poolState, setPoolAutoReply, removePoolAccount } from '../whatsapp/pool.js';
+import { listNumbers, accountGroup } from '../numbers.js';
 import { emit } from '../events.js';
+import { DEFAULT_WS, runInWs } from '../tenant.js';
 
 export const admin = Router();
 
+const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const by = (req) => req.user.email;
+// Super admin actions are logged as 'admin' in the workspace they affect (its own Audit Logs
+// shows them too); ws null = the whole platform.
+const audit = (ws, message, level = 'info') => auditLog('admin', message, { level, ws });
+
+// ---- Workspaces ----
+
+// One workspace's switches and numbers (read inside that workspace).
+function wsDetail(id) {
+  return runInWs(id, async () => {
+    const numbers = await listNumbers();
+    return {
+      sendingPaused: !!getSetting('sendingPaused', false),
+      warmupActive: !!getSetting('warmupActive', false),
+      warmupNumbers: await db.warmupAccounts().countDocuments({ role: { $ne: 'conversation' } }),
+      numbers: numbers.map((n) => ({ id: n.id, label: n.label, name: n.name || '', phone: n.phone, connected: n.connected, auto_reply: n.auto_reply, default: n.default, main: n.id === 'main' })),
+      contacts: await db.contacts().countDocuments({ synced: { $ne: 1 }, warmup: { $ne: 1 } }),
+      chats: await db.contacts().countDocuments({ synced: 1 }),
+      campaignsRunning: await db.campaigns().countDocuments({ status: 'running' }),
+      sentToday: await db.messages().countDocuments({ direction: 'out', day_key: dayKey() }),
+    };
+  });
+}
+
+const wsOr404 = (req, res) => {
+  const w = workspaceOf(req.params.id);
+  if (!w) res.status(404).json({ error: 'Workspace not found' });
+  return w;
+};
+
+// Everything the Super Admin page shows in one call.
+admin.get('/state', async (req, res) => {
+  const all = await users().find({}, { sort: { createdAt: 1 } }).toArray();
+  const workspaces = [];
+  for (const w of listWorkspaces()) {
+    const d = await wsDetail(w.id);
+    workspaces.push({ ...w, main: w.id === DEFAULT_WS, team: all.filter((u) => u.role !== 'owner' && (u.ws || DEFAULT_WS) === w.id).length, ...d });
+  }
+  res.json({
+    workspaces,
+    users: all.map(publicUser),
+    platform: { sendingPaused: !!getPlatform('sendingPaused', false), teamLocked: !!getPlatform('teamLocked', false) },
+    current: req.ws,
+  });
+});
+
+// New workspace for a business (optionally with its first admin, who then adds their team).
+admin.post('/workspaces', async (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Give the workspace a name (e.g. the business name)' });
+  if (listWorkspaces().some((w) => w.name.toLowerCase() === name.toLowerCase())) return res.status(409).json({ error: 'A workspace with that name already exists' });
+  const a = req.body?.admin || null;
+  if (a && (a.email || a.password)) {
+    if (!emailRe.test(String(a.email || ''))) return res.status(400).json({ error: "Enter the admin's email" });
+    if (String(a.password || '').length < 6) return res.status(400).json({ error: "The admin's password must be at least 6 characters" });
+    if (await users().findOne({ email: String(a.email).toLowerCase().trim() })) return res.status(409).json({ error: 'An account with that email already exists' });
+  }
+  const w = await createWorkspace(name);
+  let adminUser = null;
+  if (a && a.email) {
+    const doc = {
+      name: String(a.name || '').trim() || String(a.email).split('@')[0],
+      email: String(a.email).toLowerCase().trim(),
+      passwordHash: await hashPassword(String(a.password)),
+      role: 'admin',
+      ws: w.id,
+      createdAt: new Date().toISOString(),
+      lastLoginAt: null,
+    };
+    const r = await users().insertOne(doc);
+    doc._id = r.insertedId;
+    adminUser = publicUser(doc);
+  }
+  audit(w.id, `Workspace "${w.name}" created by ${by(req)}${adminUser ? ` with admin ${adminUser.email}` : ''}`);
+  emit('admin:update', {}, { ws: null });
+  res.json({ workspace: w, admin: adminUser });
+});
+
+admin.put('/workspaces/:id', async (req, res) => {
+  const w = wsOr404(req, res);
+  if (!w) return;
+  const name = String(req.body?.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Name required' });
+  if (listWorkspaces().some((x) => x.id !== w.id && x.name.toLowerCase() === name.toLowerCase())) return res.status(409).json({ error: 'A workspace with that name already exists' });
+  const fresh = await updateWorkspace(w.id, { name });
+  audit(w.id, `Workspace renamed by ${by(req)}: "${w.name}" → "${name}"`);
+  res.json({ workspace: fresh });
+});
+
+// Suspend: nobody in it can sign in (open sessions end at once), and it sends nothing
+// automatically — no campaigns, no warm-up, no AI replies. Chats keep arriving.
+admin.post('/workspaces/:id/suspend', async (req, res) => {
+  const w = wsOr404(req, res);
+  if (!w) return;
+  const suspended = !!req.body?.suspended;
+  await updateWorkspace(w.id, { suspended });
+  forgetUser();
+  audit(w.id, `Workspace "${w.name}" ${suspended ? 'suspended' : 're-activated'} by ${by(req)}`, suspended ? 'warn' : 'info');
+  res.json({ ok: true, suspended });
+});
+
+// Turn AI auto-reply on/off for every number of the current workspace.
+async function setAutoReplyAll(enabled) {
+  await setSetting('autoReplyEnabled', enabled); // the main number's switch (default workspace)
+  const docs = await db.warmupAccounts().find({ role: 'conversation' }).toArray();
+  for (const d of docs) {
+    await db.warmupAccounts().updateOne({ _id: d._id }, { $set: { auto_reply: enabled } });
+    setPoolAutoReply(String(d._id), enabled);
+  }
+  emit('pool:update', poolState());
+}
+
+// A workspace's switches: campaign sending, warm-up, AI auto-reply on every number.
+admin.put('/workspaces/:id/system', async (req, res) => {
+  const w = wsOr404(req, res);
+  if (!w) return;
+  const b = req.body || {};
+  const err = await runInWs(w.id, async () => {
+    if ('sendingPaused' in b) {
+      setPaused(!!b.sendingPaused);
+      audit(w.id, `Campaign sending ${b.sendingPaused ? 'paused' : 'resumed'} by ${by(req)}`, b.sendingPaused ? 'warn' : 'info');
+    }
+    if ('warmupActive' in b) {
+      if (b.warmupActive) {
+        const n = await db.warmupAccounts().countDocuments({ role: { $ne: 'conversation' } });
+        if (n < 2) return 'Link at least 2 numbers on the Warmup page first';
+      }
+      await setSetting('warmupActive', !!b.warmupActive);
+      audit(w.id, `Warm-up ${b.warmupActive ? 'started' : 'stopped'} by ${by(req)}`);
+    }
+    if ('autoReply' in b) {
+      await setAutoReplyAll(!!b.autoReply);
+      audit(w.id, `AI auto-reply turned ${b.autoReply ? 'ON' : 'OFF'} on every number by ${by(req)}`);
+    }
+    emit('stats:dirty', {});
+    return null;
+  });
+  if (err) return res.status(400).json({ error: err });
+  res.json({ ok: true });
+});
+
+// One number's AI auto-reply (every link of that phone).
+admin.post('/workspaces/:id/numbers/:nid/autoreply', async (req, res) => {
+  const w = wsOr404(req, res);
+  if (!w) return;
+  const enabled = !!req.body?.enabled;
+  await runInWs(w.id, async () => {
+    for (const id of accountGroup(req.params.nid).ids) {
+      if (id === 'main') {
+        if (w.id === DEFAULT_WS) await setSetting('autoReplyEnabled', enabled);
+      } else if (ObjectId.isValid(id)) {
+        await db.warmupAccounts().updateOne({ _id: new ObjectId(id) }, { $set: { auto_reply: enabled } });
+        setPoolAutoReply(id, enabled);
+      }
+    }
+    emit('pool:update', poolState());
+  });
+  res.json({ ok: true, enabled });
+});
+
+// Emergency stop for one workspace: nothing goes out automatically until switched back on.
+admin.post('/workspaces/:id/emergency-stop', async (req, res) => {
+  const w = wsOr404(req, res);
+  if (!w) return;
+  await runInWs(w.id, () => stopEverything());
+  audit(w.id, `EMERGENCY STOP by ${by(req)}: campaign sending paused, warm-up stopped, AI auto-reply off on every number`, 'warn');
+  res.json({ ok: true });
+});
+
+async function stopEverything() {
+  setPaused(true);
+  await setSetting('warmupActive', false);
+  await setAutoReplyAll(false);
+  emit('stats:dirty', {});
+}
+
+// Delete a workspace and everything in it: its numbers are unlinked, and its contacts,
+// chats, campaigns, templates, catalogs, settings, logs and people are removed. The name
+// must be typed to confirm. The original workspace can't be deleted.
+admin.delete('/workspaces/:id', async (req, res) => {
+  const w = wsOr404(req, res);
+  if (!w) return;
+  if (w.id === DEFAULT_WS) return res.status(400).json({ error: "The original workspace can't be deleted" });
+  if (String(req.body?.confirm || '').trim() !== w.name) return res.status(400).json({ error: `Type the workspace name ("${w.name}") to confirm` });
+  await runInWs(w.id, async () => {
+    for (const d of await db.warmupAccounts().find().toArray()) await removePoolAccount(String(d._id)).catch(() => {});
+  });
+  const removed = await deleteWorkspaceData(w.id);
+  forgetUser();
+  audit(null, `Workspace "${w.name}" deleted by ${by(req)} (${removed.users} people, ${removed.contacts} contacts, ${removed.messages} messages, ${removed.warmup_accounts} numbers)`, 'warn');
+  emit('admin:update', {}, { ws: null });
+  res.json({ ok: true, removed });
+});
+
+// ---- People ----
 
 // A user the super admin may change: exists, and isn't the super admin account itself.
 async function target(req, res) {
@@ -31,23 +233,9 @@ async function target(req, res) {
   }
   return u;
 }
+const wsName = (id) => workspaceOf(id || DEFAULT_WS)?.name || 'workspace';
 
-// Everything the Super Admin page shows in one call.
-admin.get('/state', async (_req, res) => {
-  const list = await users().find({}, { sort: { createdAt: 1 } }).toArray();
-  const warmupNumbers = await db.warmupAccounts().countDocuments({ role: { $ne: 'conversation' } });
-  res.json({
-    users: list.map(publicUser),
-    system: {
-      sendingPaused: isPaused(),
-      warmupActive: !!getSetting('warmupActive', false),
-      teamLocked: !!getSetting('teamLocked', false),
-      warmupNumbers,
-    },
-  });
-});
-
-// Change a user's name, role (admin/member) and pages.
+// Change a person's name, role (admin/member), pages and workspace.
 admin.put('/users/:id', async (req, res) => {
   const u = await target(req, res);
   if (!u) return;
@@ -61,13 +249,21 @@ admin.put('/users/:id', async (req, res) => {
     if (pages) set.pages = pages;
     else unset.pages = '';
   }
+  let moved = false;
+  if (b.ws && b.ws !== (u.ws || DEFAULT_WS)) {
+    if (!workspaceOf(b.ws)) return res.status(400).json({ error: 'Workspace not found' });
+    set.ws = String(b.ws);
+    moved = true;
+  }
   const upd = {};
   if (Object.keys(set).length) upd.$set = set;
   if (Object.keys(unset).length) upd.$unset = unset;
+  if (moved) upd.$inc = { tokenVersion: 1 }; // moved to another business → sign in again there
   if (Object.keys(upd).length) await users().updateOne({ _id: u._id }, upd);
   forgetUser(u._id);
   const fresh = await users().findOne({ _id: u._id });
-  audit('system', `Access changed by ${by(req)}: ${u.email} → ${fresh.role}, ${Array.isArray(fresh.pages) ? fresh.pages.join(', ') || 'no pages' : 'all pages'}`);
+  const pages = Array.isArray(fresh.pages) ? fresh.pages.join(', ') || 'no pages' : 'all pages';
+  audit(fresh.ws || DEFAULT_WS, `Access changed by ${by(req)}: ${u.email} → ${fresh.role}, ${pages}${moved ? `, moved from ${wsName(u.ws)} to ${wsName(fresh.ws)}` : ''}`);
   res.json({ user: publicUser(fresh) });
 });
 
@@ -81,7 +277,7 @@ admin.post('/users/:id/suspend', async (req, res) => {
     suspended ? { $set: { suspended: true }, $inc: { tokenVersion: 1 } } : { $unset: { suspended: '' } }
   );
   forgetUser(u._id);
-  audit('system', `${suspended ? 'Suspended' : 'Re-activated'} by ${by(req)}: ${u.email}`, { level: suspended ? 'warn' : 'info' });
+  audit(u.ws || DEFAULT_WS, `${suspended ? 'Suspended' : 'Re-activated'} by ${by(req)}: ${u.email}`, suspended ? 'warn' : 'info');
   res.json({ ok: true, suspended });
 });
 
@@ -93,7 +289,7 @@ admin.post('/users/:id/password', async (req, res) => {
   if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
   await users().updateOne({ _id: u._id }, { $set: { passwordHash: await hashPassword(password) }, $inc: { tokenVersion: 1 } });
   forgetUser(u._id);
-  audit('system', `Password reset by ${by(req)}: ${u.email}`, { level: 'warn' });
+  audit(u.ws || DEFAULT_WS, `Password reset by ${by(req)}: ${u.email}`, 'warn');
   res.json({ ok: true });
 });
 
@@ -103,55 +299,37 @@ admin.post('/users/:id/signout', async (req, res) => {
   if (!u) return;
   await users().updateOne({ _id: u._id }, { $inc: { tokenVersion: 1 } });
   forgetUser(u._id);
-  audit('system', `Signed out everywhere by ${by(req)}: ${u.email}`);
+  audit(u.ws || DEFAULT_WS, `Signed out everywhere by ${by(req)}: ${u.email}`);
   res.json({ ok: true });
 });
 
-// Turn AI auto-reply on/off for every number at once.
-async function setAutoReplyAll(enabled) {
-  await setSetting('autoReplyEnabled', enabled);
-  const docs = await db.warmupAccounts().find({ role: 'conversation' }).toArray();
-  for (const d of docs) {
-    await db.warmupAccounts().updateOne({ _id: d._id }, { $set: { auto_reply: enabled } });
-    setPoolAutoReply(String(d._id), enabled);
-  }
-  emit('pool:update', {});
-}
+// ---- Platform ----
 
-// System switches: campaign sending, warm-up, team sign-in, AI auto-reply on all numbers.
+// Platform switches: campaign sending in every workspace, everyone's sign-in.
 admin.put('/system', async (req, res) => {
   const b = req.body || {};
   if ('sendingPaused' in b) {
-    setPaused(!!b.sendingPaused);
-    audit('system', `Campaign sending ${b.sendingPaused ? 'paused' : 'resumed'} by ${by(req)}`, { level: b.sendingPaused ? 'warn' : 'info' });
-  }
-  if ('warmupActive' in b) {
-    if (b.warmupActive) {
-      const n = await db.warmupAccounts().countDocuments({ role: { $ne: 'conversation' } });
-      if (n < 2) return res.status(400).json({ error: 'Link at least 2 numbers on the Warmup page first' });
-    }
-    await setSetting('warmupActive', !!b.warmupActive);
-    audit('warmup', `Warm-up ${b.warmupActive ? 'started' : 'stopped'} by ${by(req)}`);
+    await setPlatform('sendingPaused', !!b.sendingPaused);
+    audit(null, `Campaign sending ${b.sendingPaused ? 'paused in every workspace' : 'allowed again in every workspace'} by ${by(req)}`, b.sendingPaused ? 'warn' : 'info');
   }
   if ('teamLocked' in b) {
-    await setSetting('teamLocked', !!b.teamLocked);
+    await setPlatform('teamLocked', !!b.teamLocked);
     forgetUser();
-    audit('system', b.teamLocked ? `Team sign-in paused by ${by(req)} — only the super admin can use the app` : `Team sign-in re-opened by ${by(req)}`, { level: b.teamLocked ? 'warn' : 'info' });
+    audit(null, b.teamLocked ? `Sign-in paused for everyone by ${by(req)} — only the super admin can use the app` : `Sign-in re-opened for everyone by ${by(req)}`, b.teamLocked ? 'warn' : 'info');
   }
-  if ('autoReply' in b) {
-    await setAutoReplyAll(!!b.autoReply);
-    audit('system', `AI auto-reply turned ${b.autoReply ? 'ON' : 'OFF'} on every number by ${by(req)}`);
-  }
-  emit('stats:dirty', {});
   res.json({ ok: true });
 });
 
-// Emergency stop: nothing goes out automatically until switched back on.
+// Emergency stop for the whole platform: every workspace stops sending automatically.
 admin.post('/emergency-stop', async (req, res) => {
-  setPaused(true);
-  await setSetting('warmupActive', false);
-  await setAutoReplyAll(false);
-  audit('system', `EMERGENCY STOP by ${by(req)}: campaign sending paused, warm-up stopped, AI auto-reply off on every number`, { level: 'warn' });
-  emit('stats:dirty', {});
+  for (const w of listWorkspaces()) await runInWs(w.id, () => stopEverything());
+  audit(null, `EMERGENCY STOP (all workspaces) by ${by(req)}: campaign sending paused, warm-up stopped, AI auto-reply off on every number`, 'warn');
   res.json({ ok: true });
+});
+
+// What the super admin (and the platform) did lately, across every workspace.
+admin.get('/activity', async (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit) || 15, 1), 100);
+  const list = await col('audit_logs').find({ type: 'admin' }).sort({ _id: -1 }).limit(limit).toArray();
+  res.json(list.map(({ _id, ws, ...a }) => ({ id: String(_id), ...a, ws: ws || null, wsName: ws ? workspaceOf(ws)?.name || '(deleted workspace)' : 'All workspaces' })));
 });

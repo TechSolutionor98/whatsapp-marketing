@@ -2,12 +2,22 @@ import { Router } from 'express';
 import { db, audit, getSetting, oid, pub, nowIso } from '../db/mongo.js';
 import { isConnected } from '../whatsapp/client.js';
 import { isAccountConnected, accountRole } from '../whatsapp/pool.js';
+import { hasMain, defaultSenderId } from '../numbers.js';
 
 export const campaigns = Router();
 
-// Is the number this campaign sends from actually connected right now?
-function senderConnected(c) {
-  return c.sender_id ? isAccountConnected(c.sender_id) : isConnected();
+// Is the number this campaign sends from actually connected right now? (No number chosen:
+// the main number — or, in a workspace without one, its default number.)
+async function senderConnected(c) {
+  if (c.sender_id) return isAccountConnected(c.sender_id);
+  return hasMain() ? isConnected() : !!(await defaultSenderId());
+}
+
+// A chosen sending number must be one of this workspace's numbers.
+async function validSender(id) {
+  if (!id) return true;
+  const _id = oid(id);
+  return !!(_id && (await db.warmupAccounts().findOne({ _id }, { projection: { _id: 1 } })));
 }
 
 function esc(s) {
@@ -199,6 +209,7 @@ campaigns.post('/', async (req, res) => {
     created_at: nowIso(),
   };
   if (!d.name) return res.status(400).json({ error: 'Campaign name required' });
+  if (!(await validSender(d.sender_id))) return res.status(400).json({ error: 'Pick one of your numbers to send from' });
 
   // Optional: schedule it to auto-start at a future time.
   const when = req.body.scheduled_at ? new Date(req.body.scheduled_at) : null;
@@ -239,6 +250,7 @@ campaigns.put('/:id', async (req, res) => {
             : null
           : req.body[f];
 
+  if (set.sender_id && !(await validSender(set.sender_id))) return res.status(400).json({ error: 'Pick one of your numbers to send from' });
   // Changing the audience list re-scans members into the queue.
   const existing = await db.campaigns().findOne({ _id });
   if (!existing) return res.status(404).json({ error: 'Not found' });
@@ -252,7 +264,7 @@ campaigns.put('/:id', async (req, res) => {
   }
 
   const r = await db.campaigns().findOneAndUpdate({ _id }, { $set: set }, { returnDocument: 'after' });
-  const doc = r.value || r;
+  const doc = r && (r.value || r);
   if (!doc) return res.status(404).json({ error: 'Not found' });
   if (rebuild) await buildTargets(String(_id), { audienceFilter: doc.audience_filter, audienceListId: doc.audience_list_id });
   res.json(pub(doc));
@@ -269,11 +281,13 @@ campaigns.post('/:id/start', async (req, res) => {
   if (c.sender_id && accountRole(c.sender_id) === 'warmup')
     return res.status(400).json({ error: 'This campaign is set to a warm-up number. Edit it to send from your main or a linked number.' });
   // The assigned sending number must be connected to start.
-  if (!senderConnected(c))
+  if (!(await senderConnected(c)))
     return res.status(400).json({
       error: c.sender_id
-        ? "This campaign's sending number isn't connected — connect it on the Warmup page, then start."
-        : 'Your main WhatsApp number isn\'t connected — link it on the Gateway page, then start.',
+        ? "This campaign's sending number isn't connected — reconnect it on the WhatsApp Gateway page, then start."
+        : hasMain()
+          ? 'Your main WhatsApp number isn\'t connected — link it on the Gateway page, then start.'
+          : 'No WhatsApp number is connected — link one on the WhatsApp Gateway page, then start.',
     });
   await db.campaigns().updateOne({ _id }, { $set: { status: 'running', scheduled_at: null }, $unset: { pause_reason: '' } });
   audit('campaign', `Campaign "${c.name}" started`, { level: 'success' });

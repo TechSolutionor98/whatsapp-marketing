@@ -1,5 +1,9 @@
 // Tiny in-process event bus bridged to the browser over Server-Sent Events.
+// Every event belongs to the workspace it happened in, and only that workspace's open pages
+// receive it (events carry chat updates, number lists and QR codes). Platform-level events
+// (no workspace) go to the super admin only.
 import { EventEmitter } from 'node:events';
+import { currentWs } from './tenant.js';
 
 export const bus = new EventEmitter();
 bus.setMaxListeners(100);
@@ -15,7 +19,7 @@ export function sseHandler(req, res) {
   });
   res.write('retry: 3000\n\n');
 
-  const client = { res };
+  const client = { res, ws: req.ws || null, owner: req.user?.role === 'owner' };
   clients.add(client);
 
   const ping = setInterval(() => {
@@ -32,11 +36,14 @@ export function sseHandler(req, res) {
   });
 }
 
-export function emit(event, data) {
-  // Local listeners (e.g. worker reacting to connection changes).
-  bus.emit(event, data);
+// opts.ws overrides the workspace (null = platform level).
+export function emit(event, data, opts = {}) {
+  const ws = opts.ws !== undefined ? opts.ws : currentWs();
+  // Local listeners (e.g. worker reacting to connection changes) get the workspace too.
+  bus.emit(event, data, ws);
   const payload = `event: ${event}\ndata: ${JSON.stringify(data ?? {})}\n\n`;
   for (const c of clients) {
+    if (ws ? c.ws !== ws : !c.owner) continue;
     try {
       c.res.write(payload);
     } catch {

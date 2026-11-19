@@ -12,7 +12,8 @@
 //  - any JSON list of products: [..] or {products|items|data|results|docs: [..]} (also nested),
 //    following next/next_page_url/links.next/pagination.next links when present.
 import { ObjectId } from 'mongodb';
-import { db, getSetting, setSetting, audit, nowIso, isMongoUp } from './db/mongo.js';
+import { db, col, getSetting, setSetting, audit, nowIso, isMongoUp } from './db/mongo.js';
+import { DEFAULT_WS, runInWs } from './tenant.js';
 
 const MAX_PRODUCTS = 5000;
 const MAX_PAGES = 50;
@@ -298,8 +299,11 @@ export function syncCatalog(catalogId, reason = 'manual') {
   return job;
 }
 
+// Every workspace's API catalogs, each synced inside its own workspace.
 export async function syncAllCatalogs(reason = 'scheduled') {
-  for (const c of await db.catalogs().find({ type: 'api' }).toArray()) await syncCatalog(c._id, reason);
+  for (const c of await col('catalogs').find({ type: 'api' }).toArray()) {
+    await runInWs(c.ws || DEFAULT_WS, () => syncCatalog(c._id, reason));
+  }
 }
 
 // One-time: the first version had a single feed URL in Settings — turn it into a catalog.
@@ -323,7 +327,7 @@ export function startCatalogSync() {
   const tick = async () => {
     if (!isMongoUp()) return setTimeout(tick, 5000);
     try {
-      await migrateLegacyFeed();
+      await runInWs(DEFAULT_WS, () => migrateLegacyFeed()); // the old single feed was the default workspace's
       await syncAllCatalogs('scheduled');
     } catch {}
   };

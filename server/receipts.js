@@ -1,5 +1,6 @@
 import { db, isMongoUp, audit } from './db/mongo.js';
 import { emit } from './events.js';
+import { inWs } from './tenant.js';
 
 // WhatsApp refused a message we sent (Baileys handleBadAck → status ERROR with the server's
 // error code), e.g. posting in an admins-only group. It was never delivered, so show it as
@@ -59,9 +60,10 @@ export async function applyReceipt(waId, status) {
   }
 }
 
-// Attach a messages.update listener to any Baileys socket (main or pool).
-export function attachReceipts(sock) {
-  sock.ev.on('messages.update', (updates) => {
+// Attach a messages.update listener to any Baileys socket (main or pool), inside the
+// workspace that number belongs to.
+export function attachReceipts(sock, ws) {
+  sock.ev.on('messages.update', inWs(ws, (updates) => {
     for (const u of updates || []) {
       if (!u?.key?.fromMe) continue;
       const st = u.update?.status;
@@ -72,5 +74,5 @@ export function attachReceipts(sock) {
       }
       applyReceipt(u.key.id, st);
     }
-  });
+  }));
 }
