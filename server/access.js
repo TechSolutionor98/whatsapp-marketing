@@ -60,6 +60,7 @@ const ADMINS = 'admins'; // the Team page: admins of the workspace (the route ch
 const RULES = [
   [ANY, /^\/team(\/|$)/, ADMINS],
   ['GET', /^\/(events|stats|wa\/status|ai\/status|uploads\/)/, ANY],
+  [ANY, /^\/settings\/ai-key$/, ['settings']], // a workspace's own AI key
   ['GET', /^\/settings$/, ['settings', 'campaigns', 'conversations', 'warmup']],
   ['PUT', /^\/settings$/, ['settings', 'conversations', 'warmup']], // keys checked in settingsKeysAllowed
   ['GET', /^\/(contacts|lists)(\/|$)/, ['contacts', 'campaigns']],

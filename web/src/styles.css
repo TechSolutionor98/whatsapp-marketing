@@ -2434,3 +2434,9 @@ tbody tr:hover {
   .sa-tabs { flex-wrap: nowrap; overflow-x: auto; }
   .sa-tab { white-space: nowrap; }
 }
+
+/* A saved API key (never shown again) */
+.key-dots { display: inline-flex; align-items: center; gap: 6px; padding: 6px 11px; border-radius: 9px; background: var(--brand-soft); color: var(--brand-700); font-weight: 700; font-size: 13px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.key-dots svg { width: 14px; height: 14px; }
+.key-saved { flex-wrap: nowrap; justify-content: flex-end; flex-shrink: 0; }
+.key-saved .btn { white-space: nowrap; }

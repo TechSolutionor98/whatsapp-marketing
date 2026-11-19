@@ -1,9 +1,9 @@
 import { Router } from 'express';
 import { getSetting, audit } from '../db/mongo.js';
-import { aiAvailable, aiModel, aiProviderName, draftMessage, rewriteMessage } from '../ai.js';
+import { aiAvailable, aiModel, aiProviderName, draftMessage, rewriteMessage, keySource } from '../ai.js';
 import { getLimits } from '../limits.js';
 
-const notAvailable = () => (getLimits().allowAi ? 'AI is not configured — add your key in Settings → AI' : 'AI is switched off by the super admin');
+const notAvailable = () => (getLimits().allowAi ? 'AI has no API key yet — add yours in Settings → AI' : 'AI is switched off by the super admin');
 
 export const ai = Router();
 
@@ -11,6 +11,8 @@ ai.get('/status', (_req, res) => {
   res.json({
     available: aiAvailable(), // provider is usable (key present, or Ollama local)
     blocked: !getLimits().allowAi, // the super admin switched AI off for every workspace
+    keySource: keySource(), // 'own' | 'platform' | 'none' | 'local' — whose key the AI uses
+    backupKey: keySource('groq') !== 'none', // Groq can answer when Gemini is busy
     enabled: getSetting('aiEnabled', false), // send-time rewriting on
     provider: aiProviderName(),
     model: aiModel(),

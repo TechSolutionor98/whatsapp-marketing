@@ -19,6 +19,7 @@ export const LIMIT_DEFAULTS = {
   maxNumbers: 0, // WhatsApp numbers one workspace may link (0 = unlimited)
   maxTeam: 0, // people in one workspace (0 = unlimited)
   allowAi: true, // workspaces may use AI (message variation, auto-reply, warm-up chats)
+  sharePlatformKey: false, // workspaces without their own AI key may use the server's (.env) key
 };
 
 const hhmm = (v) => (/^([01]\d|2[0-3]):[0-5]\d$/.test(String(v || '')) ? String(v) : '');
@@ -34,7 +35,7 @@ export function cleanLimits(b = {}) {
   const out = { ...cur };
   for (const k of ['minDelaySec', 'maxPerNumberDay', 'warmupMaxPerDay', 'warmupMinGap', 'maxNumbers', 'maxTeam']) if (k in b) out[k] = nonNeg(b[k]);
   for (const k of ['windowStart', 'windowEnd']) if (k in b) out[k] = hhmm(b[k]);
-  for (const k of ['forceTyping', 'forceRamp', 'allowAi']) if (k in b) out[k] = !!b[k];
+  for (const k of ['forceTyping', 'forceRamp', 'allowAi', 'sharePlatformKey']) if (k in b) out[k] = !!b[k];
   if (out.windowStart && out.windowEnd && out.windowStart >= out.windowEnd) throw new Error('Sending hours: the start must be before the end');
   return out;
 }

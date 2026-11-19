@@ -2,6 +2,7 @@
 // Default provider: Groq (free, fast). Switchable to Gemini / Ollama / custom in Settings.
 import { getSetting } from './db/mongo.js';
 import { getLimits } from './limits.js';
+import { DEFAULT_WS, currentWs } from './tenant.js';
 
 const PRESETS = {
   groq: 'https://api.groq.com/openai/v1',
@@ -31,13 +32,33 @@ export function aiModel() {
 export function aiProviderName() {
   return provider();
 }
-// Each provider's key: GEMINI_API_KEY for Gemini (AI_API_KEY still works on its own), GROQ_API_KEY
-// or AI_API_KEY for Groq — so both can be in .env and Groq can stand in when Gemini is down.
-function keyFor(p) {
+// The server's own keys (.env): GEMINI_API_KEY for Gemini (AI_API_KEY still works on its own),
+// GROQ_API_KEY or AI_API_KEY for Groq — so Groq can stand in when Gemini is down.
+function envKey(p) {
   if (p === 'gemini') return process.env.GEMINI_API_KEY || process.env.AI_API_KEY || '';
   if (p === 'groq') return process.env.GROQ_API_KEY || process.env.AI_API_KEY || '';
   if (p === 'ollama') return '';
   return process.env.AI_API_KEY || '';
+}
+// A workspace's own key for a provider (Settings → AI → API key).
+function ownKey(p) {
+  const k = (getSetting('aiKeys', null) || {})[p];
+  return typeof k === 'string' ? k.trim() : '';
+}
+// The server's keys are the super admin's: the original workspace uses them; other workspaces
+// only when the super admin allows it (Rules → AI). Otherwise each workspace uses its own key.
+export function platformKeyAllowed() {
+  return (currentWs() || DEFAULT_WS) === DEFAULT_WS || !!getLimits().sharePlatformKey;
+}
+function keyFor(p) {
+  return ownKey(p) || (platformKeyAllowed() ? envKey(p) : '');
+}
+// Where the key for a provider comes from: 'own' | 'platform' | 'none' ('local' for Ollama).
+export function keySource(p = provider()) {
+  if (p === 'ollama') return 'local';
+  if (ownKey(p)) return 'own';
+  if (platformKeyAllowed() && envKey(p)) return 'platform';
+  return 'none';
 }
 
 // Available when we have what the chosen provider needs (Ollama needs no key).
@@ -57,10 +78,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // One provider: busy minute (429: Groq free tier 8,000 tokens/min; Gemini "Please retry in 41s")
 // → wait what it asks (at most 25 s) and try again; overloaded (503 "high demand") or no answer
 // in time → one more try. Gives up with an error the caller can fall back on.
-async function callProvider(p, model, system, msgs, { maxTokens, temperature }) {
+async function callProvider(p, model, system, msgs, { maxTokens, temperature, key: keyOverride }) {
   const base = baseUrl(p);
   if (!base) throw new Error('No AI endpoint configured');
-  const key = keyFor(p);
+  const key = keyOverride ?? keyFor(p);
   const headers = { 'Content-Type': 'application/json' };
   if (key && p !== 'ollama') headers.Authorization = `Bearer ${key}`;
   const body = { model, temperature, max_tokens: maxTokens, messages: [{ role: 'system', content: system }, ...msgs] };
@@ -111,6 +132,19 @@ async function chatMessages(system, msgs, { maxTokens = 1024, temperature = 1 } 
     if (p !== 'gemini' || !groqKey || groqKey === keyFor('gemini')) throw e;
     console.warn(`[ai] Gemini failed (${e.message.slice(0, 160)}) — answering with Groq instead`);
     return callProvider('groq', DEFAULT_MODEL.groq, system, msgs, { maxTokens, temperature });
+  }
+}
+
+// Check a key before saving it: one tiny request to the provider. Throws with the provider's
+// answer when the key is refused; { busy: true } when the provider was just busy (key not judged).
+export async function testAiKey(p, key) {
+  const model = p === provider() ? aiModel() : DEFAULT_MODEL[p] || aiModel();
+  try {
+    await callProvider(p, model, 'Reply with: OK', [{ role: 'user', content: 'Say OK' }], { maxTokens: 64, temperature: 0, key });
+    return { ok: true };
+  } catch (e) {
+    if (/AI error (401|403|400)\b|API key|api_key|invalid/i.test(e.message)) throw e;
+    return { ok: false, busy: true, error: e.message };
   }
 }
 

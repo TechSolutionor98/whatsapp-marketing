@@ -10,6 +10,7 @@ import { checkOnWhatsAppVia } from '../whatsapp/pool.js';
 import { runCycleNow, setPaused, isPaused } from '../worker/sender.js';
 import { hasMain, listNumbers, defaultSenderId } from '../numbers.js';
 import { clampSettings } from '../limits.js';
+import { testAiKey } from '../ai.js';
 
 export const system = Router();
 
@@ -117,12 +118,48 @@ system.get('/audit', async (req, res) => {
 });
 
 // ---- Settings ----
-// The product feed's login header is only for people who can open Settings.
+// The product feed's login header is only for people who can open Settings. AI keys never leave
+// the server: the page only learns whether one is saved and its last 4 characters.
+const AI_KEY_PROVIDERS = ['gemini', 'groq', 'custom'];
+function keyStatus(keys) {
+  return Object.fromEntries(AI_KEY_PROVIDERS.map((p) => {
+    const k = typeof keys?.[p] === 'string' ? keys[p] : '';
+    return [p, { set: !!k, last4: k ? k.slice(-4) : '' }];
+  }));
+}
 function settingsFor(req) {
   const all = getAllSettings();
   if (req.user?.role !== 'owner' && !req.user?.pages?.includes('settings')) delete all.productFeedHeader;
+  all.aiKeyStatus = keyStatus(all.aiKeys);
+  delete all.aiKeys;
   return all;
 }
+
+// Save (tested first) or remove this workspace's own API key for an AI provider.
+system.put('/settings/ai-key', async (req, res) => {
+  const provider = String(req.body?.provider || '');
+  if (!AI_KEY_PROVIDERS.includes(provider)) return res.status(400).json({ error: 'Pick Gemini, Groq or a custom endpoint' });
+  const key = String(req.body?.key ?? '').trim();
+  const name = { gemini: 'Gemini', groq: 'Groq', custom: 'the custom endpoint' }[provider];
+  const keys = { ...(getAllSettings().aiKeys || {}) };
+  if (!key) {
+    delete keys[provider];
+    await setSetting('aiKeys', keys);
+    audit('system', `AI key for ${name} removed by ${req.user?.email || 'unknown'}`);
+    return res.json({ ok: true, aiKeyStatus: keyStatus(keys) });
+  }
+  if (/\s/.test(key) || key.length < 10 || key.length > 400) return res.status(400).json({ error: "That doesn't look like an API key — paste the whole key, without spaces" });
+  let test;
+  try {
+    test = await testAiKey(provider, key);
+  } catch (e) {
+    return res.status(400).json({ error: `${name[0].toUpperCase() + name.slice(1)} refused this key: ${e.message.replace(/^AI error /, '').slice(0, 200)}` });
+  }
+  keys[provider] = key;
+  await setSetting('aiKeys', keys);
+  audit('system', `AI key for ${name} saved by ${req.user?.email || 'unknown'} (…${key.slice(-4)})${test.ok ? ', tested OK' : ' — provider was busy, key not tested'}`);
+  res.json({ ok: true, tested: !!test.ok, aiKeyStatus: keyStatus(keys) });
+});
 system.get('/settings', (req, res) => {
   res.json(settingsFor(req));
 });
@@ -130,7 +167,7 @@ system.put('/settings', async (req, res) => {
   const body = req.body || {};
   // Values the server keeps for itself — the Settings page sends back everything it loaded,
   // so a stale tab must not overwrite them.
-  const SERVER_MANAGED = new Set(['productFeedStatus', 'mainPhone', 'addressBookV2', 'namesV2', 'defaultConvPhone', 'mainConvLabel', 'mainCatalogId', 'sendingPaused', 'teamLocked', 'warmupActive']);
+  const SERVER_MANAGED = new Set(['productFeedStatus', 'mainPhone', 'addressBookV2', 'namesV2', 'defaultConvPhone', 'mainConvLabel', 'mainCatalogId', 'sendingPaused', 'teamLocked', 'warmupActive', 'aiKeys', 'aiKeyStatus']);
   const wanted = Object.fromEntries(Object.entries(body).filter(([k]) => !SERVER_MANAGED.has(k) && !k.startsWith('_')));
   // Values outside the super admin's rules are brought inside them (and the page is told why).
   const { settings, notes } = clampSettings(wanted);

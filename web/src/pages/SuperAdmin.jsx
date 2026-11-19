@@ -551,7 +551,10 @@ function ManageWorkspaceModal({ w, here, onClose, onChanged, onDeleted, onOpen }
         <div className="setting-row">
           <div>
             <div className="st-label">AI auto-reply</div>
-            <div className="st-desc">On for {aiOn} of {plural(w.numbers.length, 'number')}.</div>
+            <div className="st-desc">
+              On for {aiOn} of {plural(w.numbers.length, 'number')}. {w.ai?.provider === 'groq' ? 'Groq' : w.ai?.provider === 'gemini' ? 'Gemini' : w.ai?.provider}{' '}
+              {w.ai?.key === 'own' ? 'with its own API key.' : w.ai?.key === 'platform' ? 'with your API key.' : w.ai?.key === 'local' ? '(local).' : '— no API key yet, so AI is off.'}
+            </div>
           </div>
           <div className="flex" style={{ gap: 6 }}>
             <button className="btn sm" disabled={busy === 'sys' || !w.numbers.length} onClick={() => sys({ autoReply: true }, 'AI auto-reply on for every number')}>All on</button>

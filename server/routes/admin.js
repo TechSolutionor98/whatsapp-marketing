@@ -14,6 +14,7 @@ import { publicUser } from './auth.js';
 import { setPaused } from '../worker/sender.js';
 import { poolState, setPoolAutoReply, removePoolAccount } from '../whatsapp/pool.js';
 import { listNumbers, accountGroup } from '../numbers.js';
+import { keySource, aiProviderName } from '../ai.js';
 import { emit } from '../events.js';
 import { DEFAULT_WS, runInWs } from '../tenant.js';
 import { getLimits, cleanLimits, enforceEverywhere, getWsDefaults, saveWsDefaults, defaultsOf, canAddPerson, clampSettings, DEFAULT_KEYS, LIMIT_DEFAULTS } from '../limits.js';
@@ -41,6 +42,7 @@ function wsDetail(id) {
       chats: await db.contacts().countDocuments({ synced: 1 }),
       campaignsRunning: await db.campaigns().countDocuments({ status: 'running' }),
       sentToday: await db.messages().countDocuments({ direction: 'out', day_key: dayKey() }),
+      ai: { provider: aiProviderName(), key: keySource() }, // whose AI key it uses (never the key)
     };
   });
 }

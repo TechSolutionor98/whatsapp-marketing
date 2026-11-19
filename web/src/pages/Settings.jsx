@@ -174,7 +174,12 @@ export default function Settings() {
         </div>
       </div>
 
-      <AiCard s={s} set={set} status={aiStatus} />
+      <AiCard s={s} set={set} status={aiStatus} onKeyChanged={async (st) => {
+        set('aiKeyStatus', st);
+        try {
+          setAiStatus(await api.get('/ai/status'));
+        } catch {}
+      }} />
 
       <div className="flex" style={{ justifyContent: 'flex-end' }}>
         <button className="btn primary" onClick={save} disabled={saving}>
@@ -485,7 +490,72 @@ function ProductForm({ p, setP, currency, onSave, onCancel }) {
   );
 }
 
-function AiCard({ s, set, status }) {
+const KEY_HELP = {
+  gemini: <>Get a free key at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">aistudio.google.com/apikey</a></>,
+  groq: <>Get a free key (no card) at <a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">console.groq.com/keys</a></>,
+  custom: <>The key your endpoint expects (sent as a Bearer token)</>,
+};
+
+// This workspace's own API key for one provider. The saved key never comes back to the page —
+// only that one is saved and its last 4 characters.
+function KeyField({ provider, label, desc, status, onChanged }) {
+  const { toast } = useApp();
+  const saved = status?.[provider];
+  const [editing, setEditing] = useState(!saved?.set);
+  const [val, setVal] = useState('');
+  const [busy, setBusy] = useState(false);
+  useEffect(() => setEditing(!saved?.set), [saved?.set]);
+
+  async function save(key) {
+    setBusy(true);
+    try {
+      const r = await api.put('/settings/ai-key', { provider, key });
+      setVal('');
+      onChanged(r.aiKeyStatus);
+      toast(key ? (r.tested ? 'Key saved — tested and working' : 'Key saved (the provider was busy, so it was not tested yet)') : 'Key removed', 'success');
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+    setBusy(false);
+  }
+
+  return (
+    <div className="setting-row">
+      <div>
+        <div className="st-label">{label}</div>
+        <div className="st-desc">{desc} {KEY_HELP[provider]}</div>
+      </div>
+      {saved?.set && !editing ? (
+        <div className="flex key-saved" style={{ gap: 8 }}>
+          <span className="key-dots" title="Saved — the key is never shown again">
+            <Icon.shield /> Saved ••••{saved.last4}
+          </span>
+          <button className="btn sm" onClick={() => setEditing(true)} disabled={busy}>Replace</button>
+          <button className="btn sm ghost" onClick={() => confirm('Remove this API key? AI stops using it at once.') && save('')} disabled={busy}>Remove</button>
+        </div>
+      ) : (
+        <div className="flex" style={{ gap: 8 }}>
+          <input
+            className="input"
+            type="password"
+            autoComplete="off"
+            aria-label={label}
+            style={{ width: 240 }}
+            placeholder="Paste the API key"
+            value={val}
+            onChange={(e) => setVal(e.target.value)}
+          />
+          <button className="btn primary sm" onClick={() => save(val.trim())} disabled={busy || val.trim().length < 10}>
+            {busy ? 'Checking…' : 'Save key'}
+          </button>
+          {saved?.set && <button className="btn sm ghost" onClick={() => { setEditing(false); setVal(''); }}>Cancel</button>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AiCard({ s, set, status, onKeyChanged }) {
   const { toast } = useApp();
   const [sample, setSample] = useState('');
   const [testing, setTesting] = useState(false);
@@ -535,14 +605,7 @@ function AiCard({ s, set, status }) {
                 (e.g. <code>ollama pull llama3.2</code>). No key needed.
               </>
             ) : (
-              <>
-                {s.aiProvider === 'gemini' ? (
-                  <>Add your key to <code>.env</code> as <code>GEMINI_API_KEY=…</code> and restart the server. Get one at <code>aistudio.google.com/apikey</code>.</>
-                ) : (
-                  <>Add your free key to <code>.env</code> as <code>AI_API_KEY=…</code> and restart
-                  the server. Get a free Groq key (no card) at <code>console.groq.com/keys</code>.</>
-                )}
-              </>
+              <>Add your {s.aiProvider === 'groq' ? 'Groq' : s.aiProvider === 'custom' ? 'endpoint\'s' : 'Gemini'} API key below — AI starts working as soon as it's saved.</>
             )}
           </div>
         )}
@@ -560,8 +623,8 @@ function AiCard({ s, set, status }) {
           <div>
             <div className="st-label">Provider</div>
             <div className="st-desc">
-              Gemini (key in <code>.env</code> as <code>GEMINI_API_KEY</code>) writes the best replies, Arabic too. If Gemini is busy
-              or down, Groq answers automatically. Ollama runs locally (no key).
+              Gemini writes the best replies, Arabic too. If Gemini is busy or down, Groq answers automatically (add a Groq
+              backup key below). Ollama runs locally (no key).
             </div>
           </div>
           <select className="select" style={{ width: 240 }} value={s.aiProvider || 'gemini'} onChange={(e) => set({ aiProvider: e.target.value, aiModel: DEFAULT_MODEL[e.target.value] ?? '' })}>
@@ -576,6 +639,30 @@ function AiCard({ s, set, status }) {
             <div className="st-label" style={{ marginBottom: 8 }}>Custom base URL (OpenAI-compatible)</div>
             <input className="input" placeholder="https://your-endpoint/v1" value={s.aiBaseUrl || ''} onChange={(e) => set('aiBaseUrl', e.target.value)} />
           </div>
+        )}
+        {s.aiProvider !== 'ollama' && (
+          <KeyField
+            provider={s.aiProvider === 'groq' ? 'groq' : s.aiProvider === 'custom' ? 'custom' : 'gemini'}
+            label="API key"
+            desc={
+              status?.keySource === 'platform'
+                ? "Now using the platform's key. Add your own to use your own account and quota."
+                : status?.keySource === 'own'
+                  ? "This workspace's own key — only this workspace uses it."
+                  : 'This workspace needs its own key for AI to work.'
+            }
+            status={s.aiKeyStatus}
+            onChanged={onKeyChanged}
+          />
+        )}
+        {(s.aiProvider || 'gemini') === 'gemini' && (
+          <KeyField
+            provider="groq"
+            label="Backup key — Groq (optional)"
+            desc="Answers automatically when Gemini is busy or out of quota."
+            status={s.aiKeyStatus}
+            onChanged={onKeyChanged}
+          />
         )}
         <div className="setting-row">
           <div>

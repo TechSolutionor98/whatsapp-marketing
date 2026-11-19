@@ -127,6 +127,12 @@ export function RulesPanel({ onSaved }) {
         <Row label="Workspaces may use AI" desc={L.allowAi ? 'On — each workspace switches AI on or off for itself.' : 'Off — no workspace can use AI. Messages go out as written and chats are answered by people.'}>
           <Toggle label="Allow AI" checked={L.allowAi} onChange={(v) => set('allowAi', v)} />
         </Row>
+        <Row
+          label="Workspaces without their own key may use your AI key"
+          desc={L.sharePlatformKey ? "On — a workspace that hasn't added a key uses the server's key (your quota)." : 'Off — each workspace adds its own API key in Settings → AI. Tech Solutionor always uses your key.'}
+        >
+          <Toggle label="Share your AI key" checked={L.sharePlatformKey} onChange={(v) => set('sharePlatformKey', v)} />
+        </Row>
       </Section>
 
       <div className="flex" style={{ justifyContent: 'flex-end', marginBottom: 18 }}>
