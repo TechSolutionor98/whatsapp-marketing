@@ -102,6 +102,57 @@ function arabicKeys(s) {
   return [...new Set(words.map(normArabic))].join(' ').slice(0, 1400);
 }
 
+// ---------- everything a store's API says about a product, for the AI ----------
+// Any API shape: every field becomes a readable fact ("Specifications: RAM: 16GB; Storage: 1TB",
+// "Weight: 1.26", "Country stock: AE 3, SA 0"). Never shown to customers: what the shop pays
+// (real API: buyingPrice, wholesalePrice), prices (the price line has the live one), internal
+// flags, ids, people, SEO, media and timestamps.
+const HIDDEN_KEY = /(price|cost|buying|wholesale|purchase|margin|profit|supplier|commission|internal|secret|token|password|api.?key|created|updated|deleted|modified|^__|^_?id$|_id$|[a-z]Id$|ids$|uuid|lowstock|onhold|hide|isactive|^active$|visib|publish|draft|seo|^og[A-Z]|schema|robots|canonical|loyalty|points|image|gallery|video|thumb|photo|media|icon|logo|slug|displaytype|barcode|gtin|ean$|upc$|sort|position|template|permalink|url$|link$|href|^name$|^title$|ar$|_ar$)/i;
+const FIRST_KEY = /(short.?desc|desc|spec|feature|highlight|detail|warrant|guarant|includ|box|colou?r|size|dimension|weight|material|model|variant|variation|available|stock|deliver|shipping|return|refund)/i;
+const human = (k) => String(k).replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/\s+/g, ' ').trim().replace(/^./, (c) => c.toUpperCase());
+const plain = (s, max) => String(s).replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+function factValue(v, depth = 0) {
+  if (v == null || v === '') return '';
+  if (typeof v === 'boolean') return v ? 'yes' : 'no';
+  if (typeof v === 'number') return Number.isFinite(v) ? String(v) : '';
+  if (typeof v === 'string') return /^[0-9a-f]{24}$/i.test(v) ? '' : plain(v, 700); // a bare database id says nothing
+  if (Array.isArray(v)) return v.map((x) => factValue(x, depth + 1)).filter(Boolean).slice(0, 15).join('; ');
+  if (typeof v !== 'object' || depth > 3) return '';
+  const k = v.key ?? v.label ?? v.title ?? v.name;
+  const val = v.value ?? v.val ?? v.text;
+  if (k != null && val != null && typeof val !== 'object') return `${plain(k, 80)}: ${plain(val, 200)}`; // spec pairs
+  if (v.name || v.title) return plain(v.name || v.title, 120); // brand / category references
+  return Object.entries(v)
+    .filter(([kk, vv]) => !HIDDEN_KEY.test(kk) && vv != null && vv !== '' && typeof vv !== 'object')
+    .map(([kk, vv]) => `${human(kk)} ${factValue(vv, depth + 1)}`)
+    .slice(0, 6)
+    .join(', ');
+}
+export function productFacts(raw, max = 2500) {
+  if (!raw || typeof raw !== 'object') return '';
+  const keys = Object.keys(raw);
+  const rows = [];
+  for (const k of keys) {
+    if (HIDDEN_KEY.test(k)) {
+      // an Arabic-only field counts when there's no English one ("descriptionAr" without "description")
+      const base = k.replace(/_?ar$/i, '');
+      if (!(/ar$/i.test(k) && base !== k && !factValue(raw[base]) && !HIDDEN_KEY.test(base))) continue;
+    }
+    if (/categor|brand/i.test(k)) continue; // already on the product line
+    const v = factValue(raw[k]);
+    if (!v || v === 'no' || v === '0') continue; // empty, or a flag that's off
+    rows.push([human(k.replace(/_?ar$/i, '')), v]);
+  }
+  rows.sort((a, b) => (FIRST_KEY.test(b[0]) ? 1 : 0) - (FIRST_KEY.test(a[0]) ? 1 : 0));
+  let out = '';
+  for (const [label, v] of rows) {
+    const line = `${label}: ${v}`;
+    if (out.length + line.length + 3 > max) break;
+    out += (out ? ' | ' : '') + line;
+  }
+  return out;
+}
+
 // Product page link from the catalog's pattern, e.g. https://shop.com/product/{slug}.
 export function fillLink(pattern, fields) {
   if (!pattern || !/\{(slug|id|sku|handle)\}/.test(pattern)) return '';
@@ -163,6 +214,7 @@ export function normalizeProduct(p, sourceUrl = '', linkPattern = '') {
     category: categoryOf(p),
     in_stock: stockOf(p),
     description: text(pick(p, ['short_description', 'shortDescription', 'description', 'body_html', 'summary', 'details'])),
+    details: productFacts(p), // every other field the API sends (specs, colours, variants…)
     keywords: keywordsOf(p),
     keywords_ar: arabicKeys(`${name} ${keywordsOf(p)}`),
   };
@@ -447,6 +499,7 @@ const STOP = new Set(
     // what they want ABOUT a product, not the product (real chat: "send the link of ugreen one"
     // marked every product "doesn't match: link"). Not photo/image/web — photo paper, webcam.
     'link links url urls website site detail details info information spec specs specification specifications share provide pic pics ' +
+    'description descriptions discription descriptin desc features ' +
     'good best better cheap cheaper cheapest expensive new latest buy purchase order ' +
     'under below above over less than lower within upto up between around approx approximately budget range max maximum min minimum least ' +
     'aed dhs dh dirham dirhams rs pkr sar usd qar omr kwd bhd ' +
@@ -617,7 +670,7 @@ export async function searchCatalog({ latest = '', earlier = '', ours = '', cata
   if (!terms.length) return empty;
   const scope = Array.isArray(catalogIds) ? { catalog_id: { $in: catalogIds.map(String) } } : {};
   if (!(await db.products().countDocuments(scope, { limit: 1 }))) return empty;
-  const proj = { ext_id: 1, slug: 1, name: 1, price: 1, regular_price: 1, currency: 1, url: 1, in_stock: 1, brand: 1, category: 1, sku: 1, description: 1, keywords: 1, catalog_id: 1 };
+  const proj = { ext_id: 1, slug: 1, name: 1, price: 1, regular_price: 1, currency: 1, url: 1, in_stock: 1, brand: 1, category: 1, sku: 1, description: 1, details: 1, keywords: 1, catalog_id: 1 };
   let cands = await db
     .products()
     .find({ ...scope, $text: { $search: bothNumbers(terms).join(' ') } }, { projection: { ...proj, score: { $meta: 'textScore' } } })
@@ -723,7 +776,7 @@ async function fetchLive(cat, p) {
   const raw = one(body?.product) ? body.product : one(body?.data) ? body.data : body;
   const n = one(raw) ? normalizeProduct(raw, cat.url, cat.link || '') : null;
   if (!n || n.ext_id !== p.ext_id) return { error: 'the API answered with a different product' };
-  return { product: n };
+  return { product: n, details: productFacts(raw) };
 }
 async function refreshLive(list) {
   const ids = [...new Set(list.map((p) => p.catalog_id))];
@@ -740,8 +793,12 @@ async function refreshLive(list) {
         if (!r.product) return (p._live = null); // couldn't check — keep the synced numbers
         const n = r.product;
         Object.assign(p, { price: n.price, regular_price: n.regular_price, in_stock: n.in_stock }, n.url ? { url: n.url } : {});
+        // the single-product answer usually has much more than the list (real API: description,
+        // specifications, stock per country…) — keep it for the AI
+        const more = r.details && r.details.length > (p.details || '').length ? { details: r.details } : {};
+        Object.assign(p, more);
         p._live = true;
-        db.products().updateOne({ _id: p._id }, { $set: { price: n.price, regular_price: n.regular_price, in_stock: n.in_stock, live_at: at } }).catch(() => {});
+        db.products().updateOne({ _id: p._id }, { $set: { price: n.price, regular_price: n.regular_price, in_stock: n.in_stock, live_at: at, ...more } }).catch(() => {});
       } catch {
         p._live = null;
       }
@@ -769,7 +826,7 @@ export async function productContext({ latest = '', earlier = '', ours = '', cat
   }
   const asked = r.asked ? `"${r.asked}"` : 'what they asked for';
   const count = `${r.total} product${r.total === 1 ? '' : 's'} match ${asked}, ${r.inStock} in stock`;
-  if (r.items.length) parts.push(`${r.budget ? `Products matching ${asked} within their budget` : `Matching products (${count})`}:\n${productLines(r.items)}`);
+  if (r.items.length) parts.push(`${r.budget ? `Products matching ${asked} within their budget` : `Matching products (${count})`}:\n${productLines(r.items, '', { detailed: 2 })}`);
   else if (r.budget) parts.push(`No product matching ${asked} is within their budget (${count}).`);
   if (r.closest.length) parts.push(`Nearest in-stock ${asked} outside their budget:\n${productLines(r.closest)}`);
   if (r.related.length) parts.push(`In stock within their budget, but NOT exactly ${asked} — only offer as alternatives and say how they differ:\n${productLines(r.related)}`);
@@ -777,7 +834,8 @@ export async function productContext({ latest = '', earlier = '', ours = '', cat
 }
 
 // One line per product for the AI prompt.
-export function productLines(products, fallbackCurrency = '') {
+// The first `detailed` products carry everything the store's API says about them.
+export function productLines(products, fallbackCurrency = '', { detailed = 0 } = {}) {
   return products
     .map((p, i) => {
       const cur = p.currency || fallbackCurrency;
@@ -789,7 +847,12 @@ export function productLines(products, fallbackCurrency = '') {
       const cat = String(p.category || '').split(' › ').slice(-2).join(' › ');
       const extra = [p.brand && !name.toLowerCase().includes(p.brand.toLowerCase()) ? p.brand : '', cat].filter(Boolean).join(', ');
       const lacks = p.missing?.length ? ` — doesn't match: ${p.missing.join(', ')}` : '';
-      return `${i + 1}. ${name}${extra ? ` (${extra})` : ''} — ${price} — ${stock}${lacks}${p.url ? ` — ${p.url}` : ''}${p.description ? `\n   ${p.description.slice(0, 160)}` : ''}`;
+      const about = i < detailed && p.details
+        ? `\n   Details: ${p.details.slice(0, 1600)}`
+        : p.description
+          ? `\n   ${p.description.slice(0, 160)}`
+          : '';
+      return `${i + 1}. ${name}${extra ? ` (${extra})` : ''} — ${price} — ${stock}${lacks}${p.url ? ` — ${p.url}` : ''}${about}`;
     })
     .join('\n');
 }
