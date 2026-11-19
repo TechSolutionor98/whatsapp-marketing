@@ -4,7 +4,7 @@ import { Icon } from './icons.jsx';
 
 const Logo = () => (
   <div className="auth-logo">
-    <img src="/logo.png" alt="Tech Solutionor" />
+    <img src="/logo.png" alt="Tech Watsapi" />
   </div>
 );
 

@@ -56,7 +56,9 @@ export function forgetUser(uid) {
 // Which pages an /api request belongs to (path is relative to /api). First match wins.
 // Shared reads are open to every page that shows that data (e.g. Campaigns lists templates).
 const ANY = '*';
+const ADMINS = 'admins'; // the Team page: admins of the workspace (the route checks the rest)
 const RULES = [
+  [ANY, /^\/team(\/|$)/, ADMINS],
   ['GET', /^\/(events|stats|wa\/status|ai\/status|uploads\/)/, ANY],
   ['GET', /^\/settings$/, ['settings', 'campaigns', 'conversations', 'warmup']],
   ['PUT', /^\/settings$/, ['settings', 'conversations', 'warmup']], // keys checked in settingsKeysAllowed
@@ -103,6 +105,10 @@ export function checkAccess(req, res, next) {
   if (!Array.isArray(u?.pages)) return res.status(503).json({ error: 'Database unavailable — try again in a moment' });
   if (req.path.startsWith('/admin')) return res.status(403).json({ error: 'Only the super admin can do this', noAccess: true });
   const need = pagesFor(req.method, req.path);
+  if (need === ADMINS) {
+    if (u.role === 'admin') return next();
+    return res.status(403).json({ error: 'Only an admin can manage the team. Ask your admin.', noAccess: true });
+  }
   const allowed = need === ANY || (Array.isArray(need) && need.some((p) => u.pages.includes(p)));
   if (!allowed) {
     const page = Array.isArray(need) ? PAGE_NAMES[need[0]] : null;

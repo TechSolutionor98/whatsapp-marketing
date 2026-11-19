@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
-import { Modal, Empty, Loading, timeAgo, initials } from '../ui.jsx';
+import { initials } from '../ui.jsx';
 
 export const roleName = (role) => (role === 'owner' ? 'Super admin' : role === 'admin' ? 'Admin' : 'Member');
 
@@ -10,24 +10,8 @@ export default function Authentication({ go }) {
   const { user, logout, toast, workspace } = useApp();
   const isOwner = user?.role === 'owner';
   const isAdmin = user?.role === 'admin'; // admins manage members; the super admin manages everyone (Super Admin page)
-  const [users, setUsers] = useState([]);
-  const [usersLoaded, setUsersLoaded] = useState(false);
-  const [showAdd, setShowAdd] = useState(false);
   const [pw, setPw] = useState({ currentPassword: '', newPassword: '', confirm: '' });
   const [savingPw, setSavingPw] = useState(false);
-
-  const loadUsers = async () => {
-    if (!isAdmin) return;
-    try {
-      setUsers(await api.get('/auth/users'));
-    } catch {}
-    finally {
-      setUsersLoaded(true);
-    }
-  };
-  useEffect(() => {
-    loadUsers();
-  }, [isAdmin]);
 
   async function changePassword() {
     if (pw.newPassword !== pw.confirm) return toast('New passwords do not match', 'error');
@@ -40,17 +24,6 @@ export default function Authentication({ go }) {
       toast(e.message, 'error');
     }
     setSavingPw(false);
-  }
-
-  async function removeUser(u) {
-    if (!confirm(`Remove ${u.email}?`)) return;
-    try {
-      await api.del('/auth/users/' + u.id);
-      toast('Account removed');
-      loadUsers();
-    } catch (e) {
-      toast(e.message, 'error');
-    }
   }
 
   const roleBadge = (role) =>
@@ -118,56 +91,27 @@ export default function Authentication({ go }) {
         <div className="card" style={{ marginBottom: 18 }}>
           <div className="card-head">
             <Icon.crown style={{ width: 18, color: 'var(--brand-700)' }} />
-            <div><h3>You're the super admin</h3><div className="sub">Create a workspace for each business, add people to it, choose what each one can open, and control every workspace.</div></div>
-            <button className="btn primary sm" style={{ marginLeft: 'auto' }} onClick={() => go?.('superadmin')}>
+            <div><h3>You're the super admin</h3><div className="sub">Add people to the open workspace on the Team page, or manage every business on Super Admin.</div></div>
+            <button className="btn sm" style={{ marginLeft: 'auto' }} onClick={() => go?.('team')}>
+              Team
+            </button>
+            <button className="btn primary sm" onClick={() => go?.('superadmin')}>
               Open Super Admin
             </button>
           </div>
         </div>
       )}
 
-      {/* Team (admins: members only) */}
+      {/* The team (and what each person can open) is on the Team page */}
       {isAdmin && (
         <div className="card" style={{ marginBottom: 18 }}>
           <div className="card-head">
             <Icon.users style={{ width: 18, color: 'var(--brand-700)' }} />
-            <div><h3>Team members{workspace ? ` · ${workspace.name}` : ''}</h3><div className="sub">You can add and remove members of your workspace. Admins are managed by the super admin.</div></div>
-            <button className="btn sm" style={{ marginLeft: 'auto' }} onClick={() => setShowAdd(true)}>
-              <Icon.plus /> Add member
+            <div><h3>Your team</h3><div className="sub">Add members{workspace ? ` to ${workspace.name}` : ''} and choose what each one can open.</div></div>
+            <button className="btn primary sm" style={{ marginLeft: 'auto' }} onClick={() => go?.('team')}>
+              Open Team
             </button>
           </div>
-          {!usersLoaded ? (
-            <div className="card-pad"><Loading label="Loading team…" minHeight={140} /></div>
-          ) : users.length === 0 ? (
-            <div className="card-pad"><Empty icon="users" title="Just you so far">Invite teammates to share the workspace.</Empty></div>
-          ) : (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr><th>Name</th><th>Email</th><th>Role</th><th>Last sign-in</th><th></th></tr>
-                </thead>
-                <tbody>
-                  {users.map((u) => (
-                    <tr key={u.id}>
-                      <td className="cell-strong">
-                        {u.name} {u.id === user.id && <span className="chip">you</span>}
-                      </td>
-                      <td className="cell-muted">{u.email}</td>
-                      <td><span className={`badge ${roleBadge(u.role)}`}>{roleName(u.role)}</span></td>
-                      <td className="cell-muted">{u.lastLoginAt ? timeAgo(u.lastLoginAt) : 'never'}</td>
-                      <td>
-                        {u.role === 'member' && u.id !== user.id && (
-                          <button className="btn ghost sm" onClick={() => removeUser(u)} style={{ float: 'right' }}>
-                            <Icon.trash />
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
         </div>
       )}
 
@@ -185,33 +129,6 @@ export default function Authentication({ go }) {
         </div>
       </div>
 
-      {showAdd && <AddUser onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); loadUsers(); }} />}
     </div>
-  );
-}
-
-function AddUser({ onClose, onSaved }) {
-  const { toast } = useApp();
-  // Admins add members; the page each member can open is set by the super admin.
-  const [f, setF] = useState({ name: '', email: '', password: '', role: 'member' });
-  async function save() {
-    try {
-      await api.post('/auth/register', f);
-      toast('Member added', 'success');
-      onSaved();
-    } catch (e) {
-      toast(e.message, 'error');
-    }
-  }
-  return (
-    <Modal
-      title="Add team member"
-      onClose={onClose}
-      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}>Add member</button></>}
-    >
-      <div className="field"><label>Name</label><input className="input" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></div>
-      <div className="field"><label>Email</label><input className="input" type="email" value={f.email} onChange={(e) => setF({ ...f, email: e.target.value })} /></div>
-      <div className="field"><label>Temporary password</label><input className="input" type="text" value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} placeholder="At least 6 characters" /><div className="hint">Share it with them; they can change it after signing in.</div></div>
-    </Modal>
   );
 }

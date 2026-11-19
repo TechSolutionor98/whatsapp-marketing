@@ -11,6 +11,7 @@ import { requireAuth, requireOwner } from './auth.js';
 import { checkAccess } from './access.js';
 import { auth } from './routes/auth.js';
 import { admin } from './routes/admin.js';
+import { team } from './routes/team.js';
 import { contacts } from './routes/contacts.js';
 import { lists } from './routes/lists.js';
 import { templates } from './routes/templates.js';
@@ -42,6 +43,7 @@ app.use('/api/auth', auth);
 // ---- Everything below requires a valid session, and access to the page it belongs to ----
 app.use('/api', requireAuth, checkAccess);
 app.use('/api/admin', requireOwner, admin); // Super Admin page
+app.use('/api/team', team); // Team page (the open workspace's people and their access)
 
 app.get('/api/events', sseHandler);
 app.use('/api/contacts', contacts);

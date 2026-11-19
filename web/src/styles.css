@@ -84,39 +84,25 @@ select {
   overflow-y: auto;
 }
 .brand {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  padding: 6px 10px 20px;
+  padding: 2px 0 16px;
 }
+/* The logo fills the whole brand area. Its "Tech" lettering is dark, so it sits on a light
+   panel to stay readable on the dark sidebar. */
 .brand-logo {
-  width: 40px;
-  height: 40px;
-  border-radius: 11px;
-  overflow: hidden;
-  display: grid;
-  place-items: center;
-  flex-shrink: 0;
-  box-shadow: 0 6px 16px -6px rgba(0, 0, 0, 0.5);
+  width: 100%;
+  border-radius: 14px;
+  background: #fff;
+  padding: 10px 14px;
+  box-shadow: 0 8px 20px -10px rgba(0, 0, 0, 0.6);
 }
 .brand-logo img {
+  display: block;
   width: 100%;
-  height: 100%;
-  object-fit: cover;
+  height: auto;
 }
 .brand-logo svg {
   width: 22px;
   height: 22px;
-}
-.brand-name {
-  color: #fff;
-  font-weight: 800;
-  font-size: 17px;
-  letter-spacing: -0.3px;
-}
-.brand-sub {
-  font-size: 11px;
-  color: #64789a;
 }
 
 .nav-section {
@@ -1472,19 +1458,14 @@ tbody tr:hover {
   text-align: center;
 }
 .auth-logo {
-  width: 64px;
-  height: 64px;
-  border-radius: 16px;
-  overflow: hidden;
-  display: grid;
-  place-items: center;
-  margin: 0 auto 16px;
-  box-shadow: 0 10px 24px -10px rgba(0, 0, 0, 0.55);
+  width: 100%;
+  max-width: 280px;
+  margin: 0 auto 18px;
 }
 .auth-logo img {
+  display: block;
   width: 100%;
-  height: 100%;
-  object-fit: cover;
+  height: auto;
 }
 .auth-logo svg {
   width: 28px;
@@ -2395,4 +2376,41 @@ tbody tr:hover {
   .sa .card-head { flex-wrap: wrap; }
   .sa .card-head > div:not(.sa-actions) { flex: 1 1 calc(100% - 40px) !important; } /* beats the inline flex: 1 */
   .sa .card-head > .btn, .sa .card-head > .sa-filter { margin-left: 30px; }
+}
+
+/* ---- Team page ---- */
+.team { max-width: 1100px; }
+.team-head { flex-wrap: wrap; }
+.team-list { display: flex; flex-direction: column; }
+.team-row { display: flex; align-items: flex-start; gap: 14px; padding: 16px 22px; border-top: 1px solid var(--border); }
+.team-row.off { background: var(--surface-2); }
+.team-row.off .team-who { opacity: 0.7; }
+.team-who { flex: 1; min-width: 0; }
+.team-name { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 700; font-size: 14.5px; }
+.team-name .badge { white-space: nowrap; }
+.team-email { font-size: 12.5px; color: var(--text-soft); margin-top: 2px; }
+.team-pages { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+.team-all { background: var(--brand-soft); color: var(--brand-700); }
+.team-actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; align-items: center; max-width: 430px; }
+.team-actions .btn svg { width: 14px; height: 14px; }
+.team-checks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 6px; }
+.team-check,
+.field .team-check {
+  display: flex; align-items: flex-start; gap: 9px; margin: 0; padding: 10px 12px; border: 1px solid var(--border);
+  border-radius: 10px; cursor: pointer; font-weight: 500; transition: border-color 0.15s, background 0.15s;
+}
+.team-check.on { border-color: var(--brand); background: var(--brand-soft); }
+.team-check.locked { cursor: not-allowed; opacity: 0.55; }
+.team-check input { accent-color: var(--brand); width: 16px; height: 16px; margin: 1px 0 0; flex: none; }
+.team-check-name { display: block; font-size: 13.5px; font-weight: 700; color: var(--text); }
+.team-check.on .team-check-name { color: var(--brand-700); }
+.team-check-desc { display: block; font-size: 11.5px; color: var(--text-soft); margin-top: 1px; line-height: 1.35; }
+@media (max-width: 900px) {
+  .team-checks { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .team-row { flex-wrap: wrap; padding: 14px 16px; }
+  .team-actions { width: 100%; justify-content: flex-start; max-width: none; padding-left: 52px; }
+}
+@media (max-width: 520px) {
+  .team-checks { grid-template-columns: 1fr; }
+  .team-actions { padding-left: 0; }
 }

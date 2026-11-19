@@ -100,6 +100,7 @@ export function AppProvider({ children }) {
       if (!user) return false;
       if (page === 'auth') return true;
       if (page === 'superadmin') return user.role === 'owner';
+      if (page === 'team') return user.role === 'owner' || user.role === 'admin'; // admins manage their team
       return user.role === 'owner' || (user.pages || []).includes(page);
     },
     [user]

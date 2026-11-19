@@ -15,6 +15,7 @@ import Audit from './pages/Audit.jsx';
 import Settings from './pages/Settings.jsx';
 import Authentication from './pages/Authentication.jsx';
 import SuperAdmin from './pages/SuperAdmin.jsx';
+import Team from './pages/Team.jsx';
 
 const NAV = [
   { id: 'overview', label: 'Overview', icon: 'grid', group: 'Operations' },
@@ -26,6 +27,7 @@ const NAV = [
   { id: 'gateway', label: 'WhatsApp Gateway', icon: 'gateway', group: 'System' },
   { id: 'audit', label: 'Audit Logs', icon: 'logs', group: 'System' },
   { id: 'settings', label: 'Settings', icon: 'settings', group: 'System' },
+  { id: 'team', label: 'Team', icon: 'users', group: 'System' },
   { id: 'auth', label: 'Authentication', icon: 'shield', group: 'System' },
   { id: 'superadmin', label: 'Super Admin', icon: 'crown', group: 'System' },
 ];
@@ -41,6 +43,7 @@ const PAGES = {
   audit: Audit,
   settings: Settings,
   auth: Authentication,
+  team: Team,
   superadmin: SuperAdmin,
 };
 
@@ -54,7 +57,8 @@ const TITLES = {
   gateway: ['WhatsApp Gateway', 'Link, unlink and choose your default number'],
   audit: ['Audit Logs', 'Every action, send and reply'],
   settings: ['Settings', 'Pacing, limits and safety controls'],
-  auth: ['Authentication', 'Your account and team'],
+  auth: ['Authentication', 'Your account'],
+  team: ['Team', 'Add members and choose what each one can open'],
   superadmin: ['Super Admin', 'Every workspace, every person — the whole platform'],
 };
 
@@ -134,11 +138,7 @@ function Sidebar({ page, go }) {
     <aside className="sidebar">
       <div className="brand">
         <div className="brand-logo">
-          <img src="/logo.png" alt="Tech Solutionor" />
-        </div>
-        <div>
-          <div className="brand-name">Tech WA Marketing</div>
-          <div className="brand-sub">Campaign Studio</div>
+          <img src="/logo.png" alt="Tech Watsapi" />
         </div>
       </div>
 
