@@ -73,6 +73,17 @@ export function AppProvider({ children }) {
     return r;
   }, [applySession]);
 
+  // Public sign-up: a new business gets its own workspace. When the super admin approves new
+  // sign-ups first, nobody is signed in yet (r.pending).
+  const signup = useCallback(async (payload) => {
+    const r = await api.post('/auth/signup', payload);
+    if (r.user) {
+      window.location.hash = '/overview';
+      applySession(r);
+    }
+    return r;
+  }, [applySession]);
+
   // Super admin: open another workspace. A fresh load guarantees nothing from the previous
   // workspace stays on screen.
   const switchWorkspace = useCallback((id, page = 'overview') => {
@@ -182,6 +193,7 @@ export function AppProvider({ children }) {
         authChecked,
         authStatus,
         login,
+        signup,
         register,
         logout,
         refreshAuth,

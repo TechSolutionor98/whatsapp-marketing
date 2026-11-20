@@ -172,7 +172,14 @@ async function loadWorkspaces() {
   wsCache.clear();
   for (const w of list) wsCache.set(String(w._id), wsPub(w));
 }
-const wsPub = (w) => ({ id: String(w._id), name: w.name || 'Workspace', suspended: !!w.suspended, created_at: w.created_at || null });
+const wsPub = (w) => ({
+  id: String(w._id),
+  name: w.name || 'Workspace',
+  suspended: !!w.suspended,
+  pending: !!w.pending, // signed up, waiting for the super admin's approval
+  signup_email: w.signup_email || null, // who signed up for it (public sign-up only)
+  created_at: w.created_at || null,
+});
 
 export function listWorkspaces() {
   return [...wsCache.values()];

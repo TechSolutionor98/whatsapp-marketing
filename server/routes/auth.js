@@ -1,8 +1,12 @@
 import { Router } from 'express';
 import { ObjectId } from 'mongodb';
-import { users, isMongoUp, mongoState, audit, workspaceOf, listWorkspaces } from '../db/mongo.js';
+import {
+  users, isMongoUp, mongoState, audit, workspaceOf, listWorkspaces, getPlatform,
+  createWorkspace, updateWorkspace, deleteWorkspaceData,
+} from '../db/mongo.js';
 import { DEFAULT_WS } from '../tenant.js';
-import { getLimits, canAddPerson } from '../limits.js';
+import { getLimits, canAddPerson, getWsDefaults } from '../limits.js';
+import { emit } from '../events.js';
 import {
   hashPassword,
   verifyPassword,
@@ -13,6 +17,7 @@ import {
   requireAdmin,
   blockedReason,
   workspaceFor,
+  signupMode,
 } from '../auth.js';
 import { pagesOf, cleanPages, forgetUser } from '../access.js';
 
@@ -53,7 +58,7 @@ auth.get('/status', async (_req, res) => {
   }
   try {
     const count = await users().countDocuments();
-    res.json({ mongoConnected: true, hasUsers: count > 0 });
+    res.json({ mongoConnected: true, hasUsers: count > 0, signup: signupMode() });
   } catch (e) {
     res.json({ mongoConnected: false, hasUsers: false, error: e.message });
   }
@@ -99,6 +104,83 @@ auth.post('/register', requireAdmin, async (req, res) => {
   } catch (e) {
     if (e.code === 11000 || String(e.message).includes('duplicate'))
       return res.status(409).json({ error: 'An account with that email already exists' });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---- Public sign-up: a new business gets its own workspace ----
+// The person who signs up becomes that workspace's admin (every page + its Team page). The
+// workspace starts with the super admin's default settings, and the platform rules apply to
+// it like to every other workspace. 'approval' mode keeps it closed until the super admin
+// approves it on the Super Admin page.
+const SIGNUP_WINDOW = 60 * 60 * 1000;
+const signupTries = new Map(); // client address -> attempt times in the last hour
+let signupsDone = []; // successful sign-ups in the last hour (all addresses)
+const clientOf = (req) => String(req.get('x-forwarded-for') || req.ip || '').split(',')[0].trim() || 'unknown';
+function signupLimited(req) {
+  const now = Date.now();
+  const ip = clientOf(req);
+  const tries = (signupTries.get(ip) || []).filter((t) => now - t < SIGNUP_WINDOW);
+  tries.push(now);
+  signupTries.set(ip, tries);
+  if (signupTries.size > 5000) signupTries.clear(); // never grows without bound
+  signupsDone = signupsDone.filter((t) => now - t < SIGNUP_WINDOW);
+  return tries.length > 10 || signupsDone.length >= 50;
+}
+
+auth.post('/signup', async (req, res) => {
+  if (!isMongoUp()) return res.status(503).json({ error: 'Database unavailable — try again shortly' });
+  const mode = signupMode();
+  if (mode === 'off') return res.status(403).json({ error: 'New sign-ups are closed right now.' });
+  if (getPlatform('teamLocked', false)) return res.status(403).json({ error: 'Sign-up is paused right now. Please try again later.' });
+  const b = req.body || {};
+  if (b.website) return res.status(400).json({ error: 'Something went wrong. Please try again.' }); // hidden field only bots fill in
+  if (signupLimited(req)) return res.status(429).json({ error: 'Too many sign-ups from here. Please try again in an hour.' });
+
+  const business = String(b.business || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+  const name = String(b.name || '').trim().slice(0, 80);
+  const email = String(b.email || '').toLowerCase().trim();
+  const password = String(b.password || '');
+  if (business.length < 2) return res.status(400).json({ error: 'Enter your business name' });
+  if (!name) return res.status(400).json({ error: 'Enter your name' });
+  if (!emailRe.test(email)) return res.status(400).json({ error: 'Enter a valid email' });
+  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  if (password.length > 200) return res.status(400).json({ error: 'That password is too long' });
+
+  try {
+    if (listWorkspaces().some((w) => w.name.toLowerCase() === business.toLowerCase()))
+      return res.status(409).json({ error: 'A business with that name is already on the platform. Ask its admin to add you to their team, or use a different name.' });
+    if (await users().findOne({ email })) return res.status(409).json({ error: 'An account with that email already exists — sign in instead.' });
+
+    const w = await createWorkspace(business, getWsDefaults()); // the super admin's defaults
+    await updateWorkspace(w.id, { signup_email: email, ...(mode === 'approval' ? { suspended: true, pending: true } : {}) });
+    const doc = {
+      name,
+      email,
+      passwordHash: await hashPassword(password),
+      role: 'admin',
+      ws: w.id,
+      signup: true,
+      createdAt: new Date().toISOString(),
+      lastLoginAt: mode === 'open' ? new Date().toISOString() : null,
+    };
+    try {
+      doc._id = (await users().insertOne(doc)).insertedId;
+    } catch (e) {
+      await deleteWorkspaceData(w.id).catch(() => {}); // the same email signed up a moment ago
+      if (e.code === 11000) return res.status(409).json({ error: 'An account with that email already exists — sign in instead.' });
+      throw e;
+    }
+    signupsDone.push(Date.now());
+    audit('admin', `New sign-up: "${business}" by ${name} (${email})${mode === 'approval' ? ' — waiting for your approval' : ''}`, { level: 'success', ws: w.id });
+    emit('admin:update', {}, { ws: null });
+
+    if (mode === 'approval') {
+      return res.json({ pending: true, message: `Thanks, ${name}! ${business} is waiting for approval. You can sign in as soon as it's approved.` });
+    }
+    setAuthCookie(res, signToken(doc));
+    res.json({ ...session(req, doc), created: true });
+  } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });

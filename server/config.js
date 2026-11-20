@@ -99,4 +99,7 @@ export const DEFAULTS = {
 export const PLATFORM_DEFAULTS = {
   sendingPaused: false, // pause campaign sending in EVERY workspace
   teamLocked: false, // pause sign-in for everyone but the super admin
+  // Public sign-up from the sign-in screen: 'open' (a new business gets its own workspace and
+  // starts at once), 'approval' (its workspace waits until the super admin approves it) or 'off'.
+  signup: 'open',
 };

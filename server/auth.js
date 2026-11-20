@@ -77,8 +77,16 @@ export function blockedReason(u) {
   if (getPlatform('teamLocked', false)) return 'Sign-in is paused by the super admin.';
   const w = workspaceOf(u.ws || DEFAULT_WS);
   if (!w) return 'Your workspace no longer exists. Ask the super admin.';
+  if (w.pending) return `Thanks for signing up! ${w.name} is waiting for approval — you can sign in as soon as it's approved.`;
   if (w.suspended) return `${w.name} is suspended. Ask the super admin.`;
   return null;
+}
+
+// Public sign-up (the super admin's choice on the Super Admin page).
+export const SIGNUP_MODES = ['open', 'approval', 'off'];
+export function signupMode() {
+  const m = getPlatform('signup', 'open');
+  return SIGNUP_MODES.includes(m) ? m : 'open';
 }
 
 // The workspace a request works in. Everyone works in their own workspace; the super admin

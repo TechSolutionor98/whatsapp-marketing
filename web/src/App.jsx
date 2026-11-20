@@ -48,7 +48,7 @@ const PAGES = {
 };
 
 const TITLES = {
-  overview: ['Campaign Operations', 'Live view of your outreach engine'],
+  overview: ['Dashboard', 'Live view of your campaigns, chats and numbers'],
   contacts: ['Contacts & Leads', 'Your audience database'],
   templates: ['Message Templates', 'Reusable messages with variables & spin text'],
   campaigns: ['Campaigns', 'Paced, window-aware outreach runs'],

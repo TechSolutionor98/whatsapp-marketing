@@ -8,7 +8,7 @@ import {
   listWorkspaces, workspaceOf, createWorkspace, updateWorkspace, deleteWorkspaceData,
 } from '../db/mongo.js';
 import { audit as auditLog } from '../db/mongo.js';
-import { hashPassword } from '../auth.js';
+import { hashPassword, SIGNUP_MODES, signupMode } from '../auth.js';
 import { cleanPages, forgetUser } from '../access.js';
 import { publicUser } from './auth.js';
 import { setPaused } from '../worker/sender.js';
@@ -64,7 +64,7 @@ admin.get('/state', async (req, res) => {
   res.json({
     workspaces,
     users: all.map(publicUser),
-    platform: { sendingPaused: !!getPlatform('sendingPaused', false), teamLocked: !!getPlatform('teamLocked', false) },
+    platform: { sendingPaused: !!getPlatform('sendingPaused', false), teamLocked: !!getPlatform('teamLocked', false), signup: signupMode() },
     current: req.ws,
   });
 });
@@ -118,9 +118,12 @@ admin.post('/workspaces/:id/suspend', async (req, res) => {
   const w = wsOr404(req, res);
   if (!w) return;
   const suspended = !!req.body?.suspended;
-  await updateWorkspace(w.id, { suspended });
+  // Re-activating a workspace that signed up and waits for approval approves it.
+  await updateWorkspace(w.id, suspended ? { suspended } : { suspended, pending: false });
   forgetUser();
-  audit(w.id, `Workspace "${w.name}" ${suspended ? 'suspended' : 're-activated'} by ${by(req)}`, suspended ? 'warn' : 'info');
+  const what = suspended ? 'suspended' : w.pending ? 'approved' : 're-activated';
+  audit(w.id, `Workspace "${w.name}" ${what} by ${by(req)}`, suspended ? 'warn' : 'info');
+  emit('admin:update', {}, { ws: null });
   res.json({ ok: true, suspended });
 });
 
@@ -316,6 +319,12 @@ admin.put('/system', async (req, res) => {
   if ('sendingPaused' in b) {
     await setPlatform('sendingPaused', !!b.sendingPaused);
     audit(null, `Campaign sending ${b.sendingPaused ? 'paused in every workspace' : 'allowed again in every workspace'} by ${by(req)}`, b.sendingPaused ? 'warn' : 'info');
+  }
+  if ('signup' in b) {
+    if (!SIGNUP_MODES.includes(b.signup)) return res.status(400).json({ error: 'Pick open, approval or off' });
+    await setPlatform('signup', b.signup);
+    const said = { open: 'open — new businesses start at once', approval: 'open with your approval', off: 'closed' }[b.signup];
+    audit(null, `Public sign-up set to ${said} by ${by(req)}`);
   }
   if ('teamLocked' in b) {
     await setPlatform('teamLocked', !!b.teamLocked);

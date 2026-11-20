@@ -114,6 +114,7 @@ export default function SuperAdmin() {
     if (!confirm('Stop everything in EVERY workspace now?\n\n• Campaign sending is paused\n• Warm-up is stopped\n• AI auto-reply is turned off on every number\n\nYou can switch each one back on per workspace.')) return;
     act('stopall', () => api.post('/admin/emergency-stop'), 'Everything stopped in every workspace');
   };
+  const approve = (w) => act('ws' + w.id, () => api.post(`/admin/workspaces/${w.id}/suspend`, { suspended: false }), `${w.name} approved — they can sign in now`);
   const suspendUser = (u, on) => {
     if (on && !confirm(`Suspend ${u.name} (${u.email})?\n\nThey're signed out at once and can't sign in until you re-activate them.`)) return;
     act('u' + u.id, () => api.post(`/admin/users/${u.id}/suspend`, { suspended: on }), on ? `${u.name} suspended` : `${u.name} re-activated`);
@@ -136,7 +137,9 @@ export default function SuperAdmin() {
 
   const { workspaces, users, platform } = state;
   const others = users.filter((u) => u.role !== 'owner');
-  const suspendedWs = workspaces.filter((w) => w.suspended).length;
+  const pendingWs = workspaces.filter((w) => w.pending).length;
+  const suspendedWs = workspaces.filter((w) => w.suspended && !w.pending).length;
+  const wsRows = [...workspaces].sort((a, b) => (b.pending ? 1 : 0) - (a.pending ? 1 : 0)); // waiting for approval first
   const numbers = workspaces.reduce((n, w) => n + w.numbers.length, 0);
   const connected = workspaces.reduce((n, w) => n + w.numbers.filter((x) => x.connected).length, 0);
   const sentToday = workspaces.reduce((n, w) => n + (w.sentToday || 0), 0);
@@ -145,7 +148,7 @@ export default function SuperAdmin() {
   return (
     <div className="sa">
       <div className="stat-grid">
-        <Stat label="Workspaces" value={workspaces.length} hint={suspendedWs ? `${suspendedWs} suspended` : 'businesses on the platform'} icon="briefcase" color="green" />
+        <Stat label="Workspaces" value={workspaces.length} hint={pendingWs ? `${pendingWs} waiting for your approval` : suspendedWs ? `${suspendedWs} suspended` : 'businesses on the platform'} icon="briefcase" color="green" warn={pendingWs > 0} />
         <Stat label="People" value={others.length} hint={`in ${plural(workspaces.length, 'workspace')} · plus you`} icon="users" color="blue" />
         <Stat label="WhatsApp numbers" value={`${connected}/${numbers}`} hint="connected, all workspaces" icon="phone" color="violet" />
         <Stat label="Sent today" value={sentToday.toLocaleString()} hint={platform.sendingPaused ? 'Sending is paused everywhere' : 'campaign messages, all workspaces'} icon={platform.sendingPaused ? 'pause' : 'send'} color={platform.sendingPaused ? 'red' : 'green'} warn={platform.sendingPaused} />
@@ -182,18 +185,22 @@ export default function SuperAdmin() {
               <tr><th>Workspace</th><th>Team</th><th>Numbers</th><th>Contacts</th><th>Campaigns</th><th>Sent today</th><th>Status</th><th></th></tr>
             </thead>
             <tbody>
-              {workspaces.map((w) => {
+              {wsRows.map((w) => {
                 const on = w.numbers.filter((n) => n.connected).length;
                 const here = w.id === workspace?.id;
                 return (
-                  <tr key={w.id} className={w.suspended ? 'sa-suspended' : ''}>
+                  <tr key={w.id} className={w.pending ? 'sa-pending' : w.suspended ? 'sa-suspended' : ''}>
                     <td>
                       <div className="sa-ws-name">
                         {w.name}
                         {here && <span className="chip">open now</span>}
                         {w.main && <span className="chip sa-orig" title="The workspace that was using the app before workspaces existed. It has the original main number.">original</span>}
+                        {w.signup_email && <span className="chip" title="Created from the public sign-up">signed up</span>}
                       </div>
-                      <div className="cell-muted" style={{ fontSize: 12 }}>since {new Date(w.created_at || Date.now()).toLocaleDateString()}</div>
+                      <div className="cell-muted" style={{ fontSize: 12 }}>
+                        since {new Date(w.created_at || Date.now()).toLocaleDateString()}
+                        {w.signup_email ? ` · by ${w.signup_email}` : ''}
+                      </div>
                     </td>
                     <td>{plural(w.team, 'person', 'people')}</td>
                     <td>
@@ -205,12 +212,17 @@ export default function SuperAdmin() {
                     <td>{w.sentToday.toLocaleString()}</td>
                     <td>
                       <div className="sa-status">
-                        {w.suspended ? <span className="badge red">Suspended</span> : <span className="badge green">Active</span>}
+                        {w.pending ? <span className="badge amber">Waiting for approval</span> : w.suspended ? <span className="badge red">Suspended</span> : <span className="badge green">Active</span>}
                         {!w.suspended && w.sendingPaused && <span className="badge amber">Sending paused</span>}
                       </div>
                     </td>
                     <td>
                       <div className="sa-actions">
+                        {w.pending && (
+                          <button className="btn sm primary" onClick={() => approve(w)} disabled={busy === 'ws' + w.id} title="Let them sign in and use their workspace">
+                            <Icon.check /> Approve
+                          </button>
+                        )}
                         {!here && (
                           <button className="btn sm" onClick={() => switchWorkspace(w.id)} title={`Work in ${w.name}`}>
                             Open
@@ -243,6 +255,29 @@ export default function SuperAdmin() {
               <div className="st-desc">{platform.sendingPaused ? 'Paused everywhere — no workspace sends campaign messages until you turn this back on.' : 'Allowed — each workspace sends on its own schedule (unless paused there).'}</div>
             </div>
             <Toggle label="Campaign sending, all workspaces" checked={!platform.sendingPaused} disabled={busy === 'plat'} onChange={(on) => setPlatform({ sendingPaused: !on }, on ? 'Sending allowed again in every workspace' : 'Sending paused in every workspace')} />
+          </div>
+          <div className="setting-row">
+            <div>
+              <div className="st-label">Public sign-up</div>
+              <div className="st-desc">
+                {platform.signup === 'approval'
+                  ? 'Anyone can sign up from the sign-in screen. Their new workspace waits until you approve it (Workspaces tab).'
+                  : platform.signup === 'off'
+                    ? 'Closed — only you (and workspace admins, for their own team) can create accounts.'
+                    : 'Open — anyone can sign up from the sign-in screen and starts at once in their own new workspace, with your default settings and rules.'}
+              </div>
+            </div>
+            <select
+              className="select sa-signup"
+              aria-label="Public sign-up"
+              value={platform.signup || 'open'}
+              disabled={busy === 'plat'}
+              onChange={(e) => setPlatform({ signup: e.target.value }, { open: 'Sign-up is open', approval: 'New sign-ups now wait for your approval', off: 'Sign-up is closed' }[e.target.value])}
+            >
+              <option value="open">Open</option>
+              <option value="approval">Needs my approval</option>
+              <option value="off">Closed</option>
+            </select>
           </div>
           <div className="setting-row">
             <div>
