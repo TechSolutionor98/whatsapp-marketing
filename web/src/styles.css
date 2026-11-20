@@ -3078,3 +3078,237 @@ tbody tr:hover {
     width: 100%;
   }
 }
+
+/* ---------- Official WhatsApp API numbers ---------- */
+.link-choices {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+.link-choice {
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: 14px;
+  padding: 18px;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.link-choice:hover,
+.link-choice:focus-visible {
+  border-color: var(--brand);
+  box-shadow: 0 0 0 3px var(--brand-soft);
+  outline: none;
+}
+.link-choice-ico {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: var(--brand-soft);
+  color: var(--brand-700);
+  margin-bottom: 12px;
+}
+.link-choice-ico.official {
+  background: #e7f0fe;
+  color: #1d4ed8;
+}
+.link-choice-ico svg {
+  width: 20px;
+  height: 20px;
+}
+.link-choice-title {
+  font-weight: 800;
+  font-size: 15px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.link-choice-desc {
+  font-size: 12.5px;
+  color: var(--text-soft);
+  margin: 6px 0 10px;
+  line-height: 1.5;
+}
+.link-choice-list {
+  margin: 0 0 0 16px;
+  font-size: 12px;
+  color: var(--text-soft);
+  line-height: 1.7;
+}
+.copy-field {
+  display: flex;
+  gap: 8px;
+}
+.copy-field .input {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+}
+.cloud-status {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  font-size: 12.5px;
+}
+.cloud-status strong {
+  font-size: 13.5px;
+}
+.cloud-status.ok {
+  background: var(--brand-soft);
+  color: var(--brand-700);
+}
+.cloud-status.wait {
+  background: var(--warn-soft);
+  color: #92400e;
+}
+.cloud-status svg {
+  width: 22px;
+  height: 22px;
+  flex: none;
+}
+.spinner.sm {
+  width: 20px;
+  height: 20px;
+  border-width: 2.5px;
+  flex: none;
+  margin: 0;
+}
+.cloud-steps {
+  margin: 0 0 14px 18px;
+  font-size: 13px;
+  line-height: 1.75;
+}
+.cloud-help {
+  background: var(--surface-2);
+  border-radius: 12px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  font-size: 12.5px;
+}
+.cloud-help summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: var(--brand-700);
+}
+.cloud-help ol {
+  margin: 8px 0 0 18px;
+  line-height: 1.7;
+  color: var(--text-soft);
+}
+.cloud-help code,
+.auth-note code {
+  font-size: 11.5px;
+}
+.cloud-facts {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.cloud-facts > div {
+  background: var(--surface-2);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.cloud-facts span {
+  font-size: 11px;
+  color: var(--text-soft);
+}
+.cloud-facts strong {
+  font-size: 13.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cloud-update {
+  border-top: 1px solid var(--border);
+  margin-top: 16px;
+  padding-top: 14px;
+}
+.cloud-update h4 {
+  font-size: 13.5px;
+  margin-bottom: 10px;
+}
+.num-warn {
+  color: #b45309;
+  font-weight: 600;
+}
+.cloud-tpl .select {
+  width: 100%;
+}
+.cloud-tpl-preview {
+  background: #e9fbe5;
+  border-radius: 4px 12px 12px 12px;
+  padding: 10px 12px;
+  margin: 10px 0 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  max-width: 460px;
+  box-shadow: var(--shadow-sm);
+}
+.cloud-tpl-media {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 8px;
+  padding: 18px 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--text-soft);
+}
+.cloud-tpl-media svg {
+  width: 16px;
+  height: 16px;
+}
+.cloud-tpl-footer {
+  font-size: 11.5px;
+  color: var(--text-soft);
+  margin-top: 6px;
+}
+.cloud-tpl-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+.cloud-tpl-buttons span {
+  background: #fff;
+  border-radius: 8px;
+  padding: 6px;
+  text-align: center;
+  color: #0b7bd6;
+  font-weight: 600;
+  font-size: 12.5px;
+}
+.cloud-vars {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0 12px;
+}
+.cloud-vars .hint {
+  grid-column: 1 / -1;
+  margin-top: -6px;
+}
+@media (max-width: 620px) {
+  .link-choices,
+  .cloud-facts {
+    grid-template-columns: 1fr 1fr;
+  }
+  .link-choices {
+    grid-template-columns: 1fr;
+  }
+}

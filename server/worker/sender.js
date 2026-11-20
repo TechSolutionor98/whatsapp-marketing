@@ -3,13 +3,15 @@ import { emit, bus } from '../events.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { isConnected, sendText, sendTyping, sendImage, checkOnWhatsApp } from '../whatsapp/client.js';
-import { isAccountConnected, sendFromTo, sendMediaFromTo, checkOnWhatsAppVia, accountRole, phoneOfAccount } from '../whatsapp/pool.js';
+import { isAccountConnected, sendFromTo, sendMediaFromTo, checkOnWhatsAppVia, accountRole, phoneOfAccount, accountKind, cloudAccountOf, poolState } from '../whatsapp/pool.js';
+import { sendCloudTemplate } from '../whatsapp/cloud-api.js';
+import { buildTemplateSend } from '../whatsapp/cloud.js';
 import { aiAvailable, rewriteMessage } from '../ai.js';
 import { UPLOADS_DIR } from '../routes/uploads.js';
 import { renderTemplate, randInt, nowInTz, withinWindow } from '../utils.js';
 import { hasMain, defaultSenderId } from '../numbers.js';
 import { DEFAULT_WS, currentWs, runInWs } from '../tenant.js';
-import { getLimits, campaignPacing, insidePlatformHours } from '../limits.js';
+import { getLimits, campaignPacing, insidePlatformHours, antiBanApplies } from '../limits.js';
 
 // The number a campaign sends from: its chosen number (sender_id), else the main Gateway
 // number — or, in a workspace without one, that workspace's default number (fallbackId).
@@ -66,8 +68,14 @@ const loopOf = (ws) => {
   return L;
 };
 
+// Is this campaign sending from an official WhatsApp API number right now?
+const isOfficial = (campaign, fallbackId) => accountKind(senderIdOf(campaign, fallbackId)) === 'cloud';
+
+// Today's outgoing messages of the QR-linked numbers (the warm-up ramp protects those; official
+// API numbers have Meta's own limits).
 async function globalSentToday() {
-  return db.messages().countDocuments({ direction: 'out', day_key: dayKey() });
+  const official = poolState().filter((a) => a.kind === 'cloud' && a.me?.phone).map((a) => a.me.phone);
+  return db.messages().countDocuments({ direction: 'out', day_key: dayKey(), ...(official.length ? { account_phone: { $nin: official } } : {}) });
 }
 
 async function daysSinceFirstSend() {
@@ -121,10 +129,13 @@ async function nextEligibleTarget(fallbackId) {
 
   const ceiling = await warmupCeiling();
   const globalSent = await globalSentToday();
-  if (globalSent >= ceiling) return { reason: 'global_cap', ceiling, globalSent };
+  const rampFull = globalSent >= ceiling;
 
   for (const c of campaigns) {
     await resetDaily(c);
+    const official = isOfficial(c, fallbackId);
+    const antiBan = antiBanApplies(official, L);
+    if (rampFull && antiBan) continue; // today's warm-up ramp is used up (QR-linked numbers)
     // Warm-up numbers are isolated — they can't send campaigns.
     if (c.sender_id && accountRole(c.sender_id) === 'warmup') {
       await db.campaigns().updateOne({ _id: c._id }, { $set: { status: 'paused', pause_reason: 'warmup_sender' } });
@@ -148,8 +159,14 @@ async function nextEligibleTarget(fallbackId) {
     if (!withinWindow(hhmm, c.window_start, c.window_end)) continue;
     // The super admin's rules apply on top of what the campaign says (even older campaigns).
     if (!insidePlatformHours(hhmm, L)) continue;
-    if (c.sent_today >= campaignPacing(c, L).daily) continue;
-    if (L.maxPerNumberDay) {
+    if (official && !c.cloud_template) {
+      await db.campaigns().updateOne({ _id: c._id }, { $set: { status: 'paused', pause_reason: 'needs_template' } });
+      audit('campaign', `Campaign "${c.name}" paused — it sends from an official WhatsApp API number, which needs an approved WhatsApp template. Edit the campaign and pick one.`, { level: 'warn' });
+      emit('campaign:update', { id: String(c._id) });
+      continue;
+    }
+    if (c.sent_today >= campaignPacing(c, L, { official }).daily) continue;
+    if (L.maxPerNumberDay && antiBan) {
       const phone = phoneOfAccount(senderIdOf(c, fallbackId) || 'main');
       if (!sentByNumber.has(phone)) {
         sentByNumber.set(phone, phone ? await db.messages().countDocuments({ direction: 'out', campaign_id: { $nin: [null, ''] }, account_phone: phone, day_key: dayKey() }) : 0);
@@ -187,10 +204,55 @@ async function nextEligibleTarget(fallbackId) {
       emit('campaign:update', { id: String(c._id) });
     }
   }
-  return null;
+  return rampFull ? { reason: 'global_cap', ceiling, globalSent } : null;
+}
+
+// From an official WhatsApp API number: an approved template, filled in for this person.
+async function sendOneCloud(campaign, target, contact, fromId) {
+  const tpl = campaign.cloud_template;
+  const acc = cloudAccountOf(fromId);
+  const { components, text } = buildTemplateSend(tpl, contact);
+  try {
+    const waId = await sendCloudTemplate(acc, contact.phone, { name: tpl.name, language: tpl.language, components });
+    await db.targets().updateOne({ _id: target._id }, { $set: { status: 'sent', sent_at: nowIso(), wa_message_id: waId } });
+    await db.messages().insertOne({
+      contact_id: String(contact._id),
+      campaign_id: String(campaign._id),
+      account_id: fromId,
+      account_phone: phoneOfAccount(fromId),
+      direction: 'out',
+      body: text,
+      template_name: tpl.name,
+      media_url: tpl.header_link && tpl.header?.format === 'IMAGE' ? tpl.header_link : null,
+      status: 'sent',
+      wa_message_id: waId,
+      created_at: nowIso(),
+      day_key: dayKey(),
+    });
+    await db.contacts().updateOne({ _id: contact._id }, { $set: { last_outbound_at: nowIso() } });
+    await db.campaigns().updateOne({ _id: campaign._id }, { $inc: { sent_today: 1 } });
+    audit('send', `Sent template "${tpl.name}" to ${contact.name || contact.phone}`, {
+      meta: { campaignId: String(campaign._id), contactId: String(contact._id) },
+    });
+    emit('message:out', { contactId: String(contact._id), campaignId: String(campaign._id) });
+    emit('stats:dirty', {});
+  } catch (err) {
+    await db.targets().updateOne({ _id: target._id }, { $set: { status: 'failed', error: err.message } });
+    audit('send', `Failed to ${contact.phone}: ${err.message}`, { level: 'error', meta: { contactId: String(contact._id) } });
+    emit('stats:dirty', {});
+    // The whole account is unusable (token, payment, block) → stop instead of failing everyone.
+    if ([190, 10, 200, 131031, 131042, 368, 133010, 132001, 132015, 132016].includes(err.code)) {
+      await db.campaigns().updateOne({ _id: campaign._id }, { $set: { status: 'paused', pause_reason: 'meta_error' } });
+      audit('campaign', `Campaign "${campaign.name}" paused: ${err.message}`, { level: 'warn' });
+      emit('campaign:update', { id: String(campaign._id) });
+    }
+  }
 }
 
 async function sendOne(campaign, target, contact, fallbackId) {
+  const fromCloud = senderIdOf(campaign, fallbackId);
+  if (accountKind(fromCloud) === 'cloud') return sendOneCloud(campaign, target, contact, fromCloud);
+
   const template = campaign.template_id
     ? await db.templates().findOne({ _id: oid(campaign.template_id) })
     : null;
@@ -276,7 +338,8 @@ export async function tick() {
     const next = await nextEligibleTarget(fallbackId);
     if (!next || !next.target) return { idle: true, info: next };
     await sendOne(next.campaign, next.target, next.contact, fallbackId);
-    const { min, max } = campaignPacing(next.campaign); // never faster than the super admin allows
+    // never faster than the super admin allows (official API numbers: Meta's limits, unless the rules say otherwise)
+    const { min, max } = campaignPacing(next.campaign, undefined, { official: isOfficial(next.campaign, fallbackId) });
     return { sent: true, delayMs: randInt(min, max) * 1000 };
   } catch (err) {
     audit('system', `Worker tick error: ${err.message}`, { level: 'error' });

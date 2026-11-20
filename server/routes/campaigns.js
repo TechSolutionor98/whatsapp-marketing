@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { db, audit, getSetting, oid, pub, nowIso } from '../db/mongo.js';
 import { isConnected } from '../whatsapp/client.js';
-import { isAccountConnected, accountRole } from '../whatsapp/pool.js';
+import { isAccountConnected, accountRole, accountKind } from '../whatsapp/pool.js';
+import { prepareCloudTemplate } from '../whatsapp/cloud.js';
 import { hasMain, defaultSenderId } from '../numbers.js';
 import { clampCampaign } from '../limits.js';
 
@@ -19,6 +20,28 @@ async function validSender(id) {
   if (!id) return true;
   const _id = oid(id);
   return !!(_id && (await db.warmupAccounts().findOne({ _id }, { projection: { _id: 1 } })));
+}
+
+// The number a campaign really sends from (its own, else — in a workspace without the main
+// number — the default one) and whether that's an official WhatsApp API number.
+async function senderInfo(senderId) {
+  const id = senderId || (hasMain() ? null : await defaultSenderId());
+  return { id, official: accountKind(id) === 'cloud' };
+}
+
+// Official numbers send Meta-approved templates: check the choice with Meta and keep a clean copy.
+// QR numbers send the app's own templates (no Meta template kept).
+async function applySenderRules(d, body, senderId, { senderChanged = false } = {}) {
+  const { id, official } = await senderInfo(senderId);
+  d.official = official;
+  if (!official) {
+    if (body.cloud_template !== undefined || d.cloud_template) d.cloud_template = null;
+    return;
+  }
+  // A new choice, or the kept one checked again when the campaign moves to another number.
+  const input = body.cloud_template || (senderChanged ? d.cloud_template : null);
+  if (input) d.cloud_template = await prepareCloudTemplate(id, input);
+  d.ai_rewrite = false; // approved templates can't be reworded
 }
 
 function esc(s) {
@@ -100,6 +123,7 @@ campaigns.get('/', async (_req, res) => {
         template_name = t?.name || null;
       }
     }
+    if (c.official && c.cloud_template) template_name = `${c.cloud_template.name} (WhatsApp template)`;
     let sender = null;
     if (c.sender_id) {
       const sd = await db.warmupAccounts().findOne({ _id: oid(c.sender_id) });
@@ -125,6 +149,7 @@ async function namesFor(c) {
     const _tid = oid(c.template_id);
     if (_tid) template_name = (await db.templates().findOne({ _id: _tid }, { projection: { name: 1 } }))?.name || null;
   }
+  if (c.official && c.cloud_template) template_name = `${c.cloud_template.name} (WhatsApp template)`;
   let sender = null;
   if (c.sender_id) {
     const sd = await db.warmupAccounts().findOne({ _id: oid(c.sender_id) });
@@ -189,7 +214,7 @@ campaigns.get('/:id/detail', async (req, res) => {
 });
 
 campaigns.post('/', async (req, res) => {
-  const d = clampCampaign({
+  const raw = {
     name: req.body.name,
     template_id: req.body.template_id ? String(req.body.template_id) : null,
     status: 'draft',
@@ -202,15 +227,24 @@ campaigns.post('/', async (req, res) => {
     audience_filter: req.body.audience_filter ?? '',
     audience_list_id: req.body.audience_list_id ? String(req.body.audience_list_id) : null,
     sender_id: req.body.sender_id ? String(req.body.sender_id) : null, // null = main Gateway number
+    cloud_template: null, // official numbers: the approved WhatsApp template (set below)
     ai_rewrite: req.body.ai_rewrite ?? getSetting('aiEnabled', false),
     ai_tone: req.body.ai_tone ?? getSetting('aiTone', 'friendly'),
     scheduled_at: null,
     sent_today: 0,
     sent_today_date: null,
     created_at: nowIso(),
-  }); // pacing kept inside the super admin's rules
-  if (!d.name) return res.status(400).json({ error: 'Campaign name required' });
-  if (!(await validSender(d.sender_id))) return res.status(400).json({ error: 'Pick one of your numbers to send from' });
+  };
+  if (!raw.name) return res.status(400).json({ error: 'Campaign name required' });
+  if (!(await validSender(raw.sender_id))) return res.status(400).json({ error: 'Pick one of your numbers to send from' });
+  try {
+    await applySenderRules(raw, req.body, raw.sender_id);
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  if (raw.official && !raw.cloud_template) return res.status(400).json({ error: 'This number is an official WhatsApp API number: pick one of its approved WhatsApp templates' });
+  if (!raw.official && !raw.template_id) return res.status(400).json({ error: 'Pick a template' });
+  const d = clampCampaign(raw, undefined, { official: raw.official }); // pacing kept inside the super admin's rules
 
   // Optional: schedule it to auto-start at a future time.
   const when = req.body.scheduled_at ? new Date(req.body.scheduled_at) : null;
@@ -252,10 +286,20 @@ campaigns.put('/:id', async (req, res) => {
           : req.body[f];
 
   if (set.sender_id && !(await validSender(set.sender_id))) return res.status(400).json({ error: 'Pick one of your numbers to send from' });
-  Object.assign(set, clampCampaign(set)); // pacing kept inside the super admin's rules
   // Changing the audience list re-scans members into the queue.
   const existing = await db.campaigns().findOne({ _id });
   if (!existing) return res.status(404).json({ error: 'Not found' });
+  const senderId = set.sender_id !== undefined ? set.sender_id : existing.sender_id || null;
+  const probe = { cloud_template: existing.cloud_template || null };
+  try {
+    await applySenderRules(probe, req.body, senderId, { senderChanged: senderId !== (existing.sender_id || null) });
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  set.official = probe.official;
+  set.cloud_template = probe.cloud_template || null;
+  if (probe.official) set.ai_rewrite = false;
+  Object.assign(set, clampCampaign(set, undefined, { official: probe.official })); // pacing kept inside the super admin's rules
   let rebuild = false;
   if (req.body.audience_list_id !== undefined) {
     const newListId = req.body.audience_list_id ? String(req.body.audience_list_id) : null;
@@ -277,7 +321,9 @@ campaigns.post('/:id/start', async (req, res) => {
   if (!_id) return res.status(400).json({ error: 'Bad id' });
   const c = await db.campaigns().findOne({ _id });
   if (!c) return res.status(404).json({ error: 'Not found' });
-  if (!c.template_id) return res.status(400).json({ error: 'Attach a template before starting' });
+  const { official } = await senderInfo(c.sender_id);
+  if (official && !c.cloud_template) return res.status(400).json({ error: 'This campaign sends from an official WhatsApp API number — edit it and pick an approved WhatsApp template first' });
+  if (!official && !c.template_id) return res.status(400).json({ error: 'Attach a template before starting' });
   const queued = await db.targets().countDocuments({ campaign_id: String(_id), status: 'queued' });
   if (queued === 0) return res.status(400).json({ error: 'No queued recipients left' });
   if (c.sender_id && accountRole(c.sender_id) === 'warmup')

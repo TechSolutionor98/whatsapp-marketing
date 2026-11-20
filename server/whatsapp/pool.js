@@ -30,6 +30,7 @@ import { aiAvailable, conversationReply } from '../ai.js';
 import { productContext, catalogIdsForAccount } from '../catalog.js';
 import { getWaState } from './client.js';
 import { getWaVersion } from './version.js';
+import { sendCloudText, sendCloudImage } from './cloud-api.js';
 import { jidToPhone, normalizePhone, randInt } from '../utils.js';
 
 const POOL_DIR = path.join(DATA_DIR, 'wa_pool');
@@ -118,6 +119,7 @@ function wsAccounts(ws = currentWs()) {
 export function poolState(ws = currentWs()) {
   return wsAccounts(ws).map((a) => ({
     id: a.id,
+    kind: a.kind || 'qr', // 'qr' = linked by scanning; 'cloud' = official WhatsApp Cloud API
     label: a.label || '',
     role: a.role || 'warmup',
     auto_reply: !!a.autoReply,
@@ -142,6 +144,7 @@ function emitPool() {
 
 export function startPoolAccount(id, label = '', role, autoReply, ws) {
   const cur = accounts.get(id);
+  if (cur?.kind === 'cloud') return; // official API numbers have no WhatsApp Web session
   const home = cur?.ws || ws || currentWs() || DEFAULT_WS;
   if (cur && ws && cur.ws !== ws) return; // never move a number into another workspace
   return runInWs(home, () => startPoolAccountIn(home, id, label, role, autoReply));
@@ -413,9 +416,61 @@ export async function removePoolAccount(id) {
   emitPool();
 }
 
+// ---- Official WhatsApp Cloud API numbers ----
+// They live in the same list as QR-linked numbers (same tabs, AI toggle, catalog, campaigns),
+// but send through Meta's API with the business's own token instead of a WhatsApp Web session.
+// `a.cloud` holds the credentials in memory; they never go to the browser.
+export function registerCloudAccount(d) {
+  const id = String(d._id);
+  const ws = d.ws || DEFAULT_WS;
+  const a = accounts.get(id) || { id };
+  Object.assign(a, {
+    id,
+    ws,
+    kind: 'cloud',
+    label: d.label || '',
+    role: 'conversation',
+    autoReply: !!d.auto_reply,
+    status: d.cloud?.error ? 'error' : 'connected',
+    lastError: d.cloud?.error || null,
+    qr: null,
+    sock: null,
+    me: { phone: d.phone || null, name: d.name || d.cloud?.verified_name || '' },
+    cloud: {
+      phone_number_id: d.cloud?.phone_number_id,
+      waba_id: d.cloud?.waba_id,
+      token: d.cloud?.token,
+    },
+  });
+  accounts.set(id, a);
+  runInWs(ws, () => emitPool());
+  return a;
+}
+// 'cloud' for an official API number, 'qr' otherwise (main, scanned numbers, unknown ids).
+export function accountKind(id) {
+  return (id && id !== 'main' && ctxOf(id)?.kind) || 'qr';
+}
+// The credentials of an official number in this workspace (null for anything else).
+export function cloudAccountOf(id) {
+  const a = id === 'main' ? null : ctxOf(id);
+  return a?.kind === 'cloud' ? a.cloud : null;
+}
+// The official number that owns a Meta phone number id (any workspace — the webhook has none).
+export function accountByPhoneNumberId(pnid) {
+  return [...accounts.values()].find((a) => a.kind === 'cloud' && String(a.cloud?.phone_number_id) === String(pnid)) || null;
+}
+// Messages an official number receives (from the webhook) — same handling as linked numbers.
+export function ingestCloud(accountId, ev) {
+  return ingestPool(accountId, ev);
+}
+const jidPhone = (jid) => {
+  if (!isPn(jid)) throw new Error('Official API numbers can only message phone numbers (not groups)');
+  return jidToPhone(jid);
+};
+
 export function isAccountConnected(id) {
   const a = id === 'main' ? null : ctxOf(id);
-  return !!(a && a.status === 'connected' && a.sock);
+  return !!(a && a.status === 'connected' && (a.sock || a.kind === 'cloud'));
 }
 
 // Update a running account's display label (so poolState reflects it immediately).
@@ -442,6 +497,9 @@ export function accountWs(id) {
 
 export async function checkOnWhatsAppVia(fromId, phone) {
   const a = fromId === 'main' ? null : ctxOf(fromId);
+  // Meta's API has no "is this number on WhatsApp?" lookup: send, and a failed delivery comes
+  // back on the webhook.
+  if (a?.kind === 'cloud') return a.status === 'connected' ? { exists: true, unchecked: true } : { exists: false, reason: 'not_connected' };
   if (!a?.sock || a.status !== 'connected') return { exists: false, reason: 'not_connected' };
   try {
     const res = await a.sock.onWhatsApp(`${normalizePhone(phone)}@s.whatsapp.net`);
@@ -455,6 +513,10 @@ export async function checkOnWhatsAppVia(fromId, phone) {
 // Send to an exact jid (a group, an @lid contact, or a number jid) from one pool account.
 export async function sendJidFrom(fromId, jid, text) {
   const a = ctxOf(fromId);
+  if (a?.kind === 'cloud') {
+    if (a.status !== 'connected') throw new Error('Source number not connected');
+    return sendCloudText(a.cloud, jidPhone(jid), text);
+  }
   if (!a?.sock || a.status !== 'connected') throw new Error('Source number not connected');
   await a.sock.sendPresenceUpdate('composing', jid).catch(() => {});
   const sent = await a.sock.sendMessage(jid, { text });
@@ -463,6 +525,10 @@ export async function sendJidFrom(fromId, jid, text) {
 
 export async function sendFromTo(fromId, toPhone, text) {
   const a = fromId === 'main' ? null : ctxOf(fromId);
+  if (a?.kind === 'cloud') {
+    if (a.status !== 'connected') throw new Error('Source number not connected');
+    return sendCloudText(a.cloud, toPhone, text);
+  }
   if (!a?.sock || a.status !== 'connected') throw new Error('Source number not connected');
   const jid = `${normalizePhone(toPhone)}@s.whatsapp.net`;
   await a.sock.sendPresenceUpdate('composing', jid).catch(() => {});
@@ -470,8 +536,12 @@ export async function sendFromTo(fromId, toPhone, text) {
   return sent?.key?.id || null;
 }
 
-export async function sendMediaFromTo(fromId, toPhone, buffer, caption) {
+export async function sendMediaFromTo(fromId, toPhone, buffer, caption, mime) {
   const a = fromId === 'main' ? null : ctxOf(fromId);
+  if (a?.kind === 'cloud') {
+    if (a.status !== 'connected') throw new Error('Source number not connected');
+    return sendCloudImage(a.cloud, toPhone, buffer, caption, mime);
+  }
   if (!a?.sock || a.status !== 'connected') throw new Error('Source number not connected');
   const jid = `${normalizePhone(toPhone)}@s.whatsapp.net`;
   const sent = await a.sock.sendMessage(jid, { image: buffer, caption: caption || undefined });
@@ -1305,6 +1375,7 @@ async function poolAutoReply(accountId, contact) {
 // normal history import stores; the UI then loads them like any older page.
 export async function requestOlderMessages(id, { chatJid, msgId, fromMe, tsMs, count = 50 }) {
   const a = ctxOf(id);
+  if (a?.kind === 'cloud') throw new Error("Official API numbers can't load older messages — Meta only sends new messages to the app");
   if (!a?.sock || a.status !== 'connected') throw new Error('That number is not connected');
   await a.sock.fetchMessageHistory(count, { remoteJid: chatJid, fromMe: !!fromMe, id: msgId }, tsMs);
 }
@@ -1579,7 +1650,10 @@ export async function reconnectPoolAccounts() {
   await runInWs(DEFAULT_WS, () => migrateContactNames()).catch((e) => audit('system', `Contact-name cleanup failed: ${e.message}`, { level: 'error', ws: DEFAULT_WS }));
   try {
     const docs = await col('warmup_accounts').find().toArray();
-    for (const d of docs) startPoolAccount(String(d._id), d.label || '', d.role || 'warmup', !!d.auto_reply, d.ws || DEFAULT_WS);
+    for (const d of docs) {
+      if (d.kind === 'cloud') registerCloudAccount(d);
+      else startPoolAccount(String(d._id), d.label || '', d.role || 'warmup', !!d.auto_reply, d.ws || DEFAULT_WS);
+    }
   } catch {
     /* mongo not ready yet; caller retries */
   }

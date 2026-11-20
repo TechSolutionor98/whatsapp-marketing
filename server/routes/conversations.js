@@ -8,6 +8,8 @@ import { sendText, sendToJid, isConnected } from '../whatsapp/client.js';
 import { poolState, sendJidFrom, chatJidOf, isAccountConnected, startPoolAccount, removePoolAccount, setPoolLabel, setPoolAutoReply, downloadStoredMedia, canPostInGroup, phoneOfAccount, requestOlderMessages } from '../whatsapp/pool.js';
 import { accountGroup, tabPhone, listNumbers, hasMain } from '../numbers.js';
 import { canLinkNumber } from '../limits.js';
+import { accountKind } from '../whatsapp/pool.js';
+import { connectCloudNumber, updateCloudNumber, cloudDetails, templatesFor, downloadCloudStored, replyWindowOpen } from '../whatsapp/cloud.js';
 
 const MEDIA_DIR = path.join(DATA_DIR, 'media_cache');
 const mediaInflight = new Map(); // one download per file even if the page asks twice
@@ -101,6 +103,44 @@ conversations.post('/accounts', async (req, res) => {
   startPoolAccount(id, label, 'conversation');
   audit('connection', 'Conversation number added — awaiting QR scan');
   res.json({ id, label });
+});
+
+// Connect an official WhatsApp number (Meta WhatsApp Cloud API) with the business's own
+// details. They're checked with Meta first; the token and app secret never come back.
+conversations.post('/accounts/cloud', async (req, res) => {
+  const full = await canLinkNumber();
+  if (full) return res.status(400).json({ error: full });
+  try {
+    res.json(await connectCloudNumber(req.body || {}));
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// An official number's setup details (webhook verify token, status) for the Gateway page.
+conversations.get('/accounts/:id/cloud', async (req, res) => {
+  const d = await cloudDetails(req.params.id);
+  if (!d) return res.status(404).json({ error: 'Not found' });
+  res.json(d);
+});
+
+// New access token and/or app secret for an official number.
+conversations.put('/accounts/:id/cloud', async (req, res) => {
+  try {
+    res.json(await updateCloudNumber(req.params.id, req.body || {}));
+  } catch (e) {
+    res.status(e.message === 'Not found' ? 404 : 400).json({ error: e.message });
+  }
+});
+
+// An official number's approved message templates (what its campaigns can send).
+conversations.get('/accounts/:id/templates', async (req, res) => {
+  if (accountKind(req.params.id) !== 'cloud') return res.status(400).json({ error: 'Only official WhatsApp API numbers use approved templates' });
+  try {
+    res.json(await templatesFor(req.params.id));
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
 });
 
 // Poll a (connecting) conversation number's QR + status.
@@ -225,8 +265,8 @@ conversations.post('/:contactId/pin', async (req, res) => {
 conversations.get('/media/:messageId', async (req, res) => {
   const _id = oid(req.params.messageId);
   if (!_id) return res.status(400).json({ error: 'Bad id' });
-  const doc = await db.messages().findOne({ _id }, { projection: { media_raw: 1, mime: 1, account_phone: 1, file_name: 1, type: 1 } });
-  if (!doc?.media_raw) return res.status(404).json({ error: 'No media on this message' });
+  const doc = await db.messages().findOne({ _id }, { projection: { media_raw: 1, cloud_media_id: 1, account_id: 1, mime: 1, account_phone: 1, file_name: 1, type: 1 } });
+  if (!doc?.media_raw && !doc?.cloud_media_id) return res.status(404).json({ error: 'No media on this message' });
   const file = path.join(MEDIA_DIR, String(_id));
   try {
     if (!fs.existsSync(file)) {
@@ -234,7 +274,7 @@ conversations.get('/media/:messageId', async (req, res) => {
         mediaInflight.set(
           file,
           (async () => {
-            const buf = await downloadStoredMedia(doc);
+            const buf = doc.cloud_media_id ? await downloadCloudStored(doc) : await downloadStoredMedia(doc);
             await fs.promises.mkdir(MEDIA_DIR, { recursive: true });
             await fs.promises.writeFile(file, buf);
           })().finally(() => mediaInflight.delete(file))
@@ -300,6 +340,14 @@ conversations.post('/:contactId/reply', async (req, res) => {
   const useMain = hasMain() && ids.includes('main') && isConnected();
   const poolId = ids.find((id) => id !== 'main' && isAccountConnected(id));
   if (!useMain && !poolId) return res.status(400).json({ error: 'That number is not connected' });
+
+  // Official API numbers: free text only within 24 hours of the person's last message (Meta's rule).
+  if (!useMain && accountKind(poolId) === 'cloud' && !(await replyWindowOpen(_id, phoneOfAccount(poolId)))) {
+    return res.status(400).json({
+      error: "It's been more than 24 hours since this person last wrote to this number, so WhatsApp only allows an approved template now. Send one from a campaign, or wait for them to write again.",
+      window_closed: true,
+    });
+  }
 
   // Like WhatsApp: no posting in admins-only groups / community announcements unless admin.
   if (contact.is_group) {

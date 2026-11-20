@@ -63,6 +63,7 @@ export async function listNumbers() {
           auto_reply: !!getSetting('autoReplyEnabled', false),
           catalog_id: getSetting('mainCatalogId', null),
           syncing: !!wa.syncing,
+          kind: 'qr',
         },
       ]
     : [];
@@ -83,6 +84,10 @@ export async function listNumbers() {
       auto_reply: a ? !!a.auto_reply : !!d.auto_reply,
       catalog_id: d.catalog_id ?? null,
       syncing: !!a?.syncing,
+      kind: d.kind === 'cloud' ? 'cloud' : 'qr', // official WhatsApp API, or linked by QR
+      ...(d.kind === 'cloud'
+        ? { cloud: { verified_name: d.cloud?.verified_name || '', quality: d.cloud?.quality || '', webhook_ok: !!(d.cloud?.webhook_verified_at || d.cloud?.last_event_at), error: d.cloud?.error || '' } }
+        : {}),
     });
   }
 

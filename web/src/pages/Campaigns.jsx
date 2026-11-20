@@ -3,6 +3,7 @@ import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
 import { Modal, Empty, Loading, StatusBadge, timeAgo } from '../ui.jsx';
+import { CloudTemplatePicker, cloudTemplateMissing } from './OfficialNumber.jsx';
 
 export default function Campaigns() {
   const { toast, refreshStats } = useApp();
@@ -153,8 +154,17 @@ export default function Campaigns() {
 }
 
 // The super admin's rules for every workspace — the server keeps campaigns inside them.
-function PacingRules() {
+// Official API numbers follow Meta's limits instead of the gap/daily cap (unless the rules say so).
+function PacingRules({ official = false }) {
   const { limits: L = {} } = useApp();
+  if (official && !L.officialFollowRules) {
+    return (
+      <div className="st-rule" style={{ marginTop: -4, marginBottom: 12 }}>
+        <Icon.shield /> Official WhatsApp API number: Meta sets its sending limits, so the anti-ban gap and daily cap don't apply. Pick your own pace
+        {L.windowStart || L.windowEnd ? ` (sending hours ${L.windowStart || '00:00'}–${L.windowEnd || '23:59'} still apply)` : ''}.
+      </div>
+    );
+  }
   const parts = [
     L.minDelaySec > 0 && `at least ${L.minDelaySec} sec between messages`,
     L.maxPerNumberDay > 0 && `at most ${L.maxPerNumberDay} a day per number`,
@@ -176,10 +186,12 @@ function NewCampaign({ onClose, onSaved }) {
   const [settings, setSettings] = useState({});
   const [aiStatus, setAiStatus] = useState(null);
   const [senders, setSenders] = useState([]); // connected warm-up numbers usable as senders
+  const [accs, setAccs] = useState([]); // every number (to know what the default one is)
   const [estimate, setEstimate] = useState(null);
   const [f, setF] = useState({
     name: '',
     template_id: '',
+    cloud_template: null, // official API number: the approved WhatsApp template + its variables
     audience_filter: '',
     audience_list_id: '',
     sender_id: '',
@@ -221,7 +233,8 @@ function NewCampaign({ onClose, onSaved }) {
       try {
         // Senders = main + your linked conversation numbers (warm-up numbers are isolated).
         const accs = await api.get('/conversations/accounts');
-        setSenders((accs || []).filter((a) => a.id !== 'main' && a.connected).map((a) => ({ id: a.id, me: { phone: a.phone }, label: a.label })));
+        setAccs(accs || []);
+        setSenders((accs || []).filter((a) => a.id !== 'main' && a.connected).map((a) => ({ id: a.id, me: { phone: a.phone }, label: a.label, kind: a.kind })));
       } catch {}
     })();
   }, []);
@@ -238,10 +251,17 @@ function NewCampaign({ onClose, onSaved }) {
   const [step, setStep] = useState(1);
   const STEPS = ['Basics', 'Sending', 'Pacing'];
 
+  // The number it really sends from: the one picked, else (no main number here) the default.
+  const effId = f.sender_id || (hasMain ? '' : accs.find((a) => a.default)?.id || '');
+  const official = accs.find((a) => a.id === effId)?.kind === 'cloud';
+
   function validateStep(s) {
     if (s === 1) {
       if (!f.name.trim()) { toast('Name your campaign', 'error'); return false; }
-      if (!f.template_id) { toast('Pick a template', 'error'); return false; }
+      if (official) {
+        const miss = cloudTemplateMissing(f.cloud_template);
+        if (miss) { toast(miss, 'error'); return false; }
+      } else if (!f.template_id) { toast('Pick a template', 'error'); return false; }
     }
     if (s === 2) {
       if (f.schedule_when && new Date(f.schedule_when).getTime() <= Date.now()) {
@@ -257,7 +277,8 @@ function NewCampaign({ onClose, onSaved }) {
     if (!validateStep(1)) { setStep(1); return; }
     if (!validateStep(2)) { setStep(2); return; }
     try {
-      const payload = { ...f, template_id: f.template_id };
+      const payload = { ...f, template_id: official ? null : f.template_id, cloud_template: official ? f.cloud_template : null };
+      if (official) payload.ai_rewrite = false;
       delete payload.schedule_when;
       if (f.schedule_when) payload.scheduled_at = new Date(f.schedule_when).toISOString();
       await api.post('/campaigns', payload);
@@ -271,9 +292,29 @@ function NewCampaign({ onClose, onSaved }) {
     }
   }
 
-  const templateName = templates.find((t) => t.id === f.template_id)?.name || '—';
+  const templateName = official ? (f.cloud_template ? `${f.cloud_template.name} (WhatsApp template)` : '—') : templates.find((t) => t.id === f.template_id)?.name || '—';
   const senderObj = f.sender_id ? senders.find((a) => a.id === f.sender_id) : null;
-  const senderLabel = senderObj ? `+${senderObj.me.phone}` : 'Main number (Gateway)';
+  const senderLabel = (senderObj ? `+${senderObj.me.phone}` : hasMain ? 'Main number (Gateway)' : 'Default number (Gateway)') + (official ? ' · Official API' : '');
+  const senderSelect = (
+    <div className="field">
+      <label>Send from</label>
+      <select className="select" value={f.sender_id} onChange={(e) => setF({ ...f, sender_id: e.target.value, cloud_template: null })}>
+        <option value="">{hasMain ? 'Main number (WhatsApp Gateway)' : 'Default number (WhatsApp Gateway)'}</option>
+        {senders.map((a) => (
+          <option key={a.id} value={a.id}>
+            +{a.me.phone}{a.label ? ` — ${a.label}` : ''}{a.kind === 'cloud' ? ' (Official API)' : ''}
+          </option>
+        ))}
+      </select>
+      <div className="hint">
+        {official
+          ? 'Official WhatsApp API number: Meta only lets a business start a chat with an approved template, so pick one below.'
+          : senders.length
+            ? `Send from your ${hasMain ? 'main' : 'default'} number or any linked number. (Warm-up numbers are separate and not used here.)`
+            : `Sends from your ${hasMain ? 'main' : 'default'} number. Link more numbers on the WhatsApp Gateway page to send from them.`}
+      </div>
+    </div>
+  );
   const listName = f.audience_list_id ? lists.find((l) => l.id === f.audience_list_id)?.name || '—' : 'All active contacts';
 
   return (
@@ -317,13 +358,20 @@ function NewCampaign({ onClose, onSaved }) {
             <label>Campaign name</label>
             <input className="input" value={f.name} autoFocus onChange={(e) => setF({ ...f, name: e.target.value })} placeholder="October outreach" />
           </div>
+          {senderSelect}
           <div className="field">
-            <label>Template</label>
-            <select className="select" value={f.template_id} onChange={(e) => setF({ ...f, template_id: e.target.value })}>
-              <option value="">Select a template…</option>
-              {templates.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-            </select>
-            {templates.length === 0 && <div className="hint">Create a template first.</div>}
+            <label>{official ? 'WhatsApp template (approved by Meta)' : 'Template'}</label>
+            {official ? (
+              <CloudTemplatePicker accountId={effId} value={f.cloud_template} onChange={(v) => setF((x) => ({ ...x, cloud_template: v }))} />
+            ) : (
+              <>
+                <select className="select" value={f.template_id} onChange={(e) => setF({ ...f, template_id: e.target.value })}>
+                  <option value="">Select a template…</option>
+                  {templates.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+                {templates.length === 0 && <div className="hint">Create a template first.</div>}
+              </>
+            )}
           </div>
           <div className="field">
             <label>Send to list</label>
@@ -341,23 +389,6 @@ function NewCampaign({ onClose, onSaved }) {
       {step === 2 && (
         <>
           <div className="field">
-            <label>Send from</label>
-            <select className="select" value={f.sender_id} onChange={(e) => setF({ ...f, sender_id: e.target.value })}>
-              <option value="">{hasMain ? 'Main number (WhatsApp Gateway)' : 'Default number (WhatsApp Gateway)'}</option>
-              {senders.map((a) => (
-                <option key={a.id} value={a.id}>
-                  +{a.me.phone}{a.label ? ` — ${a.label}` : ''}
-                </option>
-              ))}
-            </select>
-            <div className="hint">
-              {senders.length
-                ? `Send from your ${hasMain ? 'main' : 'default'} number or any linked number. (Warm-up numbers are separate and not used here.)`
-                : `Sends from your ${hasMain ? 'main' : 'default'} number. Link more numbers on the WhatsApp Gateway page to send from them.`}
-            </div>
-          </div>
-
-          <div className="field">
             <label><Icon.clock style={{ width: 13, verticalAlign: '-2px' }} /> Schedule start (optional)</label>
             <input type="datetime-local" className="input" value={f.schedule_when} onChange={(e) => setF({ ...f, schedule_when: e.target.value })} />
             <div className="hint">
@@ -365,6 +396,9 @@ function NewCampaign({ onClose, onSaved }) {
             </div>
           </div>
 
+          {official ? (
+            <div className="st-rule"><Icon.shield /> AI rewriting is off for official numbers: Meta only delivers the approved wording of a template.</div>
+          ) : (
           <div className="card" style={{ background: 'var(--surface-2)', padding: 16, marginBottom: 6, border: 'none' }}>
             <div className="flex between" style={{ marginBottom: f.ai_rewrite ? 12 : 0 }}>
               <div className="flex" style={{ gap: 8 }}>
@@ -398,10 +432,11 @@ function NewCampaign({ onClose, onSaved }) {
             )}
             {!aiStatus?.available && (
               <div className="muted" style={{ fontSize: 11.5, marginTop: 8 }}>
-                Connect an Anthropic API key in <strong>Settings → AI</strong> to enable this.
+                Add an AI key in <strong>Settings → AI</strong> to enable this.
               </div>
             )}
           </div>
+          )}
         </>
       )}
 
@@ -413,15 +448,15 @@ function NewCampaign({ onClose, onSaved }) {
             <div><span>Audience</span><strong>{listName + (estimate != null ? ` · ≈${estimate}` : '')}</strong></div>
             <div><span>Send from</span><strong>{senderLabel}</strong></div>
             <div><span>Start</span><strong>{f.schedule_when ? new Date(f.schedule_when).toLocaleString() : 'Manual'}</strong></div>
-            <div><span>AI rewrite</span><strong>{f.ai_rewrite && aiStatus?.available ? `On · ${f.ai_tone}` : 'Off'}</strong></div>
+            <div><span>AI rewrite</span><strong>{official ? 'Not used (approved template)' : f.ai_rewrite && aiStatus?.available ? `On · ${f.ai_tone}` : 'Off'}</strong></div>
           </div>
 
           <div className="card" style={{ background: 'var(--surface-2)', padding: 16, margin: '0 0 6px', border: 'none' }}>
             <div className="flex" style={{ gap: 8, marginBottom: 12 }}>
               <Icon.shield style={{ width: 16, color: 'var(--brand-700)' }} />
-              <strong style={{ fontSize: 13 }}>Safe pacing (anti-ban)</strong>
+              <strong style={{ fontSize: 13 }}>{official ? 'Pacing' : 'Safe pacing (anti-ban)'}</strong>
             </div>
-            <PacingRules />
+            <PacingRules official={official} />
             <div className="row">
               <div className="field" style={{ margin: 0 }}>
                 <label>Daily limit</label>
@@ -608,6 +643,7 @@ function EditCampaignModal({ id, onClose, onSaved }) {
   const [templates, setTemplates] = useState([]);
   const [lists, setLists] = useState([]);
   const [senders, setSenders] = useState([]);
+  const [accs, setAccs] = useState([]);
   const [aiStatus, setAiStatus] = useState(null);
   const [f, setF] = useState(null);
 
@@ -623,6 +659,9 @@ function EditCampaignModal({ id, onClose, onSaved }) {
       setF({
         name: c.name || '',
         template_id: c.template_id || '',
+        cloud_template: c.cloud_template
+          ? { name: c.cloud_template.name, language: c.cloud_template.language, body_params: c.cloud_template.body_params || [], header_params: c.cloud_template.header_params || [], header_link: c.cloud_template.header_link || '' }
+          : null,
         audience_list_id: c.audience_list_id || '',
         sender_id: c.sender_id || '',
         daily_limit: c.daily_limit,
@@ -637,15 +676,23 @@ function EditCampaignModal({ id, onClose, onSaved }) {
       try { setAiStatus(await api.get('/ai/status')); } catch {}
       try {
         const accs = await api.get('/conversations/accounts');
-        setSenders((accs || []).filter((a) => a.id !== 'main' && a.connected).map((a) => ({ id: a.id, me: { phone: a.phone }, label: a.label })));
+        setAccs(accs || []);
+        setSenders((accs || []).filter((a) => a.id !== 'main' && a.connected).map((a) => ({ id: a.id, me: { phone: a.phone }, label: a.label, kind: a.kind })));
       } catch {}
     })();
   }, [id]);
 
+  const effId = f ? f.sender_id || (hasMain ? '' : accs.find((a) => a.default)?.id || '') : '';
+  const official = accs.find((a) => a.id === effId)?.kind === 'cloud';
+
   async function save() {
     if (!f.name.trim()) return toast('Name your campaign', 'error');
+    if (official) {
+      const miss = cloudTemplateMissing(f.cloud_template);
+      if (miss) return toast(miss, 'error');
+    }
     try {
-      await api.put(`/campaigns/${id}`, f);
+      await api.put(`/campaigns/${id}`, { ...f, cloud_template: official ? f.cloud_template : null, ...(official ? { ai_rewrite: false } : {}) });
       toast('Campaign updated — changing the list re-scans recipients', 'success');
       onSaved();
     } catch (e) {
@@ -668,14 +715,29 @@ function EditCampaignModal({ id, onClose, onSaved }) {
             <label>Campaign name</label>
             <input className="input" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} />
           </div>
-          <div className="row">
+          <div className="field">
+            <label>Send from</label>
+            <select className="select" value={f.sender_id} onChange={(e) => setF({ ...f, sender_id: e.target.value, cloud_template: null })}>
+              <option value="">{hasMain ? 'Main number (WhatsApp Gateway)' : 'Default number (WhatsApp Gateway)'}</option>
+              {senders.map((a) => <option key={a.id} value={a.id}>+{a.me.phone}{a.label ? ` — ${a.label}` : ''}{a.kind === 'cloud' ? ' (Official API)' : ''}</option>)}
+            </select>
+          </div>
+          {official && (
             <div className="field">
-              <label>Template</label>
-              <select className="select" value={f.template_id} onChange={(e) => setF({ ...f, template_id: e.target.value })}>
-                <option value="">Select a template…</option>
-                {templates.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-              </select>
+              <label>WhatsApp template (approved by Meta)</label>
+              <CloudTemplatePicker accountId={effId} value={f.cloud_template} onChange={(v) => setF((x) => ({ ...x, cloud_template: v }))} />
             </div>
+          )}
+          <div className="row">
+            {!official && (
+              <div className="field">
+                <label>Template</label>
+                <select className="select" value={f.template_id} onChange={(e) => setF({ ...f, template_id: e.target.value })}>
+                  <option value="">Select a template…</option>
+                  {templates.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </div>
+            )}
             <div className="field">
               <label>Send to list</label>
               <select className="select" value={f.audience_list_id} onChange={(e) => setF({ ...f, audience_list_id: e.target.value })}>
@@ -684,20 +746,12 @@ function EditCampaignModal({ id, onClose, onSaved }) {
               </select>
             </div>
           </div>
-          <div className="field">
-            <label>Send from</label>
-            <select className="select" value={f.sender_id} onChange={(e) => setF({ ...f, sender_id: e.target.value })}>
-              <option value="">{hasMain ? 'Main number (WhatsApp Gateway)' : 'Default number (WhatsApp Gateway)'}</option>
-              {senders.map((a) => <option key={a.id} value={a.id}>+{a.me.phone}{a.label ? ` — ${a.label}` : ''}</option>)}
-            </select>
-          </div>
-
           <div className="card" style={{ background: 'var(--surface-2)', padding: 16, margin: '6px 0 16px', border: 'none' }}>
             <div className="flex" style={{ gap: 8, marginBottom: 12 }}>
               <Icon.shield style={{ width: 16, color: 'var(--brand-700)' }} />
-              <strong style={{ fontSize: 13 }}>Safe pacing (anti-ban)</strong>
+              <strong style={{ fontSize: 13 }}>{official ? 'Pacing' : 'Safe pacing (anti-ban)'}</strong>
             </div>
-            <PacingRules />
+            <PacingRules official={official} />
             <div className="row">
               <div className="field" style={{ margin: 0 }}><label>Daily limit</label><input type="number" className="input" value={f.daily_limit} onChange={(e) => setF({ ...f, daily_limit: +e.target.value })} /></div>
               <div className="field" style={{ margin: 0 }}><label>Min gap (sec)</label><input type="number" className="input" value={f.min_delay_sec} onChange={(e) => setF({ ...f, min_delay_sec: +e.target.value })} /></div>
@@ -710,6 +764,7 @@ function EditCampaignModal({ id, onClose, onSaved }) {
             </div>
           </div>
 
+          {!official && (
           <div className="card" style={{ background: 'var(--surface-2)', padding: 16, marginBottom: 6, border: 'none' }}>
             <div className="flex between" style={{ marginBottom: f.ai_rewrite ? 12 : 0 }}>
               <div className="flex" style={{ gap: 8 }}>
@@ -737,6 +792,7 @@ function EditCampaignModal({ id, onClose, onSaved }) {
               </div>
             )}
           </div>
+          )}
         </>
       )}
     </Modal>

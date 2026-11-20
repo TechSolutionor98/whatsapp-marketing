@@ -3,6 +3,7 @@ import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
 import { Modal, Loading } from '../ui.jsx';
+import { LinkChoiceModal, OfficialNumberModal, OfficialSetupModal } from './OfficialNumber.jsx';
 
 // All WhatsApp numbers are linked, unlinked and renamed here, and one is picked as the
 // default (Conversations opens on it). The Conversations page only shows their tabs.
@@ -13,7 +14,10 @@ export default function Gateway() {
   const hasMain = workspace?.main !== false;
   const [busy, setBusy] = useState(false);
   const [numbers, setNumbers] = useState(null); // every number with a Conversations tab
-  const [adding, setAdding] = useState(false);
+  const [adding, setAdding] = useState(false); // QR link window
+  const [choosing, setChoosing] = useState(false); // QR or official API?
+  const [official, setOfficial] = useState(false); // official API connect window
+  const [setupFor, setSetupFor] = useState(null); // an official number's setup window
 
   const loadNumbers = async () => {
     try {
@@ -75,7 +79,8 @@ export default function Gateway() {
   }
   async function unlink(a) {
     if (a.id === 'main') return logout();
-    if (!confirm(`Unlink ${nameOf(a)}${a.label && a.phone ? ` (+${a.phone})` : ''} from the app? You can link it again any time by scanning its QR code.`)) return;
+    const again = a.kind === 'cloud' ? 'Its messages stop arriving here. It stays registered with Meta, and you can connect it again with its details.' : 'You can link it again any time by scanning its QR code.';
+    if (!confirm(`Unlink ${nameOf(a)}${a.label && a.phone ? ` (+${a.phone})` : ''} from the app? ${again}`)) return;
     try {
       await api.del(`/conversations/accounts/${a.id}`);
       toast('Number unlinked');
@@ -100,11 +105,12 @@ export default function Gateway() {
               <div className="emoji"><Icon.gateway /></div>
               <h3>No WhatsApp number linked yet</h3>
               <p style={{ maxWidth: 440, margin: '0 auto' }}>
-                Link {workspace?.name ? `${workspace.name}'s` : 'your'} WhatsApp by scanning a QR code — just like WhatsApp Web. The first
-                number becomes the default: campaigns send from it and Conversations opens on it.
+                Link {workspace?.name ? `${workspace.name}'s` : 'your'} WhatsApp by scanning a QR code (free, like WhatsApp Web), or connect an
+                official WhatsApp Business number through Meta's API. The first number becomes the default: campaigns send from it and
+                Conversations opens on it.
               </p>
               <div style={{ marginTop: 18 }}>
-                <button className="btn primary" onClick={() => setAdding(true)}>
+                <button className="btn primary" onClick={() => setChoosing(true)}>
                   <Icon.link /> Connect WhatsApp
                 </button>
               </div>
@@ -126,7 +132,7 @@ export default function Gateway() {
                   unless you pick another number, and Conversations opens on it.
                 </p>
                 <div className="flex" style={{ marginTop: 20 }}>
-                  <button className="btn" onClick={() => setAdding(true)}><Icon.plus /> Link another number</button>
+                  <button className="btn" onClick={() => setChoosing(true)}><Icon.plus /> Link another number</button>
                 </div>
               </div>
             </div>
@@ -210,7 +216,7 @@ export default function Gateway() {
               Link, unlink or rename numbers here. Conversations opens on the default number{hasMain ? '' : ', and campaigns send from it unless you pick another'}.
             </div>
           </div>
-          <button className="btn primary sm" onClick={() => setAdding(true)}>
+          <button className="btn primary sm" onClick={() => setChoosing(true)}>
             <Icon.plus /> Link another number
           </button>
         </div>
@@ -220,8 +226,9 @@ export default function Gateway() {
           <div className="num-list">
             {numbers.map((a) => {
               const isMain = a.id === 'main';
+              const isCloud = a.kind === 'cloud';
               const conn = isMain ? mainLinked : a.connected; // main: same status as the card above
-              const state = conn ? 'Connected' : isMain ? 'Not linked' : 'Reconnecting…';
+              const state = conn ? 'Connected' : isMain ? 'Not linked' : isCloud ? 'Check its setup' : 'Reconnecting…';
               const name = nameOf(a);
               return (
                 <div key={a.id} className={`num-row ${a.default ? 'is-default' : ''}`}>
@@ -230,16 +237,24 @@ export default function Gateway() {
                     <div className="num-name">
                       <span className="num-label">{name}</span>
                       {a.default && <span className="badge green num-default">Default</span>}
+                      {isCloud && <span className="badge blue" title="Connected through Meta's WhatsApp Cloud API">Official API</span>}
+                      {isCloud && a.cloud?.quality && <span className="chip" title="Meta's quality rating for this number">quality: {a.cloud.quality.toLowerCase()}</span>}
                     </div>
                     <div className="num-sub">
                       {a.phone && name !== `+${a.phone}` ? `+${a.phone} · ` : ''}{state} ·{' '}
                       {isMain ? 'campaigns, warm-up and chats' : !hasMain && a.default ? 'campaigns, chats and AI replies' : 'chats and AI replies'}
+                      {isCloud && !a.cloud?.webhook_ok && <span className="num-warn"> · webhook not set up yet (no incoming messages)</span>}
                     </div>
                   </div>
                   <div className="num-actions">
                     {!a.default && a.phone && (
                       <button className="btn sm" onClick={() => makeDefault(a)} title="Open Conversations on this number">
                         Make default
+                      </button>
+                    )}
+                    {isCloud && (
+                      <button className="btn sm" onClick={() => setSetupFor(a.id)} title="Webhook, token and status">
+                        <Icon.settings /> Setup
                       </button>
                     )}
                     <button className="btn sm ghost" onClick={() => rename(a)} title="Rename">
@@ -258,6 +273,19 @@ export default function Gateway() {
         )}
       </div>
       )}
+
+      {choosing && (
+        <LinkChoiceModal
+          onClose={() => setChoosing(false)}
+          onPick={(how) => {
+            setChoosing(false);
+            if (how === 'cloud') setOfficial(true);
+            else setAdding(true);
+          }}
+        />
+      )}
+      {official && <OfficialNumberModal onClose={() => { setOfficial(false); loadNumbers(); }} onDone={loadNumbers} />}
+      {setupFor && <OfficialSetupModal id={setupFor} onClose={() => { setSetupFor(null); loadNumbers(); }} onChanged={loadNumbers} />}
 
       {adding && (
         <AddNumberModal

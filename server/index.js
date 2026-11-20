@@ -21,6 +21,7 @@ import { ai } from './routes/ai.js';
 import { warmup } from './routes/warmup.js';
 import { uploads } from './routes/uploads.js';
 import { system } from './routes/system.js';
+import { cloudWebhook } from './routes/cloud-webhook.js';
 import { connectWhatsApp } from './whatsapp/client.js';
 import { startCatalogSync } from './catalog.js';
 import { catalogs } from './routes/catalogs.js';
@@ -33,6 +34,8 @@ process.on('unhandledRejection', (e) => console.error('  Unhandled error (server
 
 const app = express();
 app.use(cors({ origin: true, credentials: true }));
+// Meta's webhook for official WhatsApp numbers: public, and read raw (its signature is over the exact bytes).
+app.use('/api/cloud/webhook', express.raw({ type: '*/*', limit: '5mb' }), cloudWebhook);
 app.use(express.json({ limit: '15mb' })); // room for base64 image uploads
 app.use(cookieParser());
 

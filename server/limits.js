@@ -20,6 +20,10 @@ export const LIMIT_DEFAULTS = {
   maxTeam: 0, // people in one workspace (0 = unlimited)
   allowAi: true, // workspaces may use AI (message variation, auto-reply, warm-up chats)
   sharePlatformKey: false, // workspaces without their own AI key may use the server's (.env) key
+  // Official WhatsApp API numbers (Meta Cloud API) can't be banned for volume the way QR-linked
+  // numbers can — Meta sets their limits. Off: the minimum gap and per-number daily cap above
+  // don't apply to them. On: they follow these rules too.
+  officialFollowRules: false,
 };
 
 const hhmm = (v) => (/^([01]\d|2[0-3]):[0-5]\d$/.test(String(v || '')) ? String(v) : '');
@@ -35,7 +39,7 @@ export function cleanLimits(b = {}) {
   const out = { ...cur };
   for (const k of ['minDelaySec', 'maxPerNumberDay', 'warmupMaxPerDay', 'warmupMinGap', 'maxNumbers', 'maxTeam']) if (k in b) out[k] = nonNeg(b[k]);
   for (const k of ['windowStart', 'windowEnd']) if (k in b) out[k] = hhmm(b[k]);
-  for (const k of ['forceTyping', 'forceRamp', 'allowAi', 'sharePlatformKey']) if (k in b) out[k] = !!b[k];
+  for (const k of ['forceTyping', 'forceRamp', 'allowAi', 'sharePlatformKey', 'officialFollowRules']) if (k in b) out[k] = !!b[k];
   if (out.windowStart && out.windowEnd && out.windowStart >= out.windowEnd) throw new Error('Sending hours: the start must be before the end');
   return out;
 }
@@ -74,9 +78,18 @@ export function clampSettings(s, L = getLimits()) {
   return { settings: out, notes: [...new Set(notes)] };
 }
 
-// A campaign's own pacing fields → inside the rules.
-export function clampCampaign(c, L = getLimits()) {
+// Do the anti-ban gap and daily cap apply to this campaign? (Not to official API numbers,
+// unless the super admin says so.)
+export const antiBanApplies = (official, L = getLimits()) => !official || !!L.officialFollowRules;
+
+// A campaign's own pacing fields → inside the rules. Sending hours apply to every number.
+export function clampCampaign(c, L = getLimits(), { official = false } = {}) {
   const out = { ...c };
+  if (!antiBanApplies(official, L)) {
+    if ('window_start' in out && L.windowStart && String(out.window_start) < L.windowStart) out.window_start = L.windowStart;
+    if ('window_end' in out && L.windowEnd && String(out.window_end) > L.windowEnd) out.window_end = L.windowEnd;
+    return out;
+  }
   if ('daily_limit' in out && L.maxPerNumberDay) out.daily_limit = Math.min(Number(out.daily_limit) || 0, L.maxPerNumberDay);
   if ('min_delay_sec' in out) out.min_delay_sec = Math.max(Number(out.min_delay_sec) || 0, L.minDelaySec || 0);
   if ('max_delay_sec' in out) out.max_delay_sec = Math.max(Number(out.max_delay_sec) || 0, Number(out.min_delay_sec ?? L.minDelaySec) || 0, L.minDelaySec || 0);
@@ -86,7 +99,11 @@ export function clampCampaign(c, L = getLimits()) {
 }
 
 // What the sender actually uses for a campaign (stored values, then the rules on top).
-export function campaignPacing(c, L = getLimits()) {
+export function campaignPacing(c, L = getLimits(), { official = false } = {}) {
+  if (!antiBanApplies(official, L)) {
+    const min = Math.max(1, Number(c.min_delay_sec) || getSetting('minDelaySec', 35));
+    return { min, max: Math.max(Number(c.max_delay_sec) || getSetting('maxDelaySec', 90), min), daily: Number(c.daily_limit) || 0 };
+  }
   const min = Math.max(Number(c.min_delay_sec) || getSetting('minDelaySec', 35), L.minDelaySec || 0);
   const max = Math.max(Number(c.max_delay_sec) || getSetting('maxDelaySec', 90), min);
   const daily = L.maxPerNumberDay ? Math.min(Number(c.daily_limit) || 0, L.maxPerNumberDay) : Number(c.daily_limit) || 0;
@@ -117,10 +134,11 @@ export async function enforceEverywhere(L = getLimits()) {
   }
   const C = col('campaigns');
   let n = 0;
-  if (L.maxPerNumberDay) n += (await C.updateMany({ daily_limit: { $gt: L.maxPerNumberDay } }, { $set: { daily_limit: L.maxPerNumberDay } })).modifiedCount;
+  const qr = L.officialFollowRules ? {} : { official: { $ne: true } }; // official-number campaigns follow Meta's limits
+  if (L.maxPerNumberDay) n += (await C.updateMany({ ...qr, daily_limit: { $gt: L.maxPerNumberDay } }, { $set: { daily_limit: L.maxPerNumberDay } })).modifiedCount;
   if (L.minDelaySec) {
-    n += (await C.updateMany({ min_delay_sec: { $lt: L.minDelaySec } }, { $set: { min_delay_sec: L.minDelaySec } })).modifiedCount;
-    n += (await C.updateMany({ max_delay_sec: { $lt: L.minDelaySec } }, { $set: { max_delay_sec: L.minDelaySec } })).modifiedCount;
+    n += (await C.updateMany({ ...qr, min_delay_sec: { $lt: L.minDelaySec } }, { $set: { min_delay_sec: L.minDelaySec } })).modifiedCount;
+    n += (await C.updateMany({ ...qr, max_delay_sec: { $lt: L.minDelaySec } }, { $set: { max_delay_sec: L.minDelaySec } })).modifiedCount;
   }
   if (L.windowStart) n += (await C.updateMany({ window_start: { $lt: L.windowStart } }, { $set: { window_start: L.windowStart } })).modifiedCount;
   if (L.windowEnd) n += (await C.updateMany({ window_end: { $gt: L.windowEnd } }, { $set: { window_end: L.windowEnd } })).modifiedCount;

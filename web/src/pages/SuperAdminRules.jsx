@@ -89,6 +89,12 @@ export function RulesPanel({ onSaved }) {
         <Row label="Maximum messages a day, per number" desc="Campaign messages one WhatsApp number may send in a day. Replies to chats don't count.">
           <Num label="Maximum a day" value={L.maxPerNumberDay} onChange={(v) => set('maxPerNumberDay', v)} suffix="msgs/day" />
         </Row>
+        <Row
+          label="Official WhatsApp API numbers follow these two rules too"
+          desc={L.officialFollowRules ? 'On: numbers connected through the official API also keep the minimum gap and daily maximum above.' : "Off: the gap and daily maximum protect QR-linked numbers from bans. Official API numbers follow Meta's own sending limits instead."}
+        >
+          <Toggle label="Official numbers follow the gap and daily maximum" checked={!!L.officialFollowRules} onChange={(v) => set('officialFollowRules', v)} />
+        </Row>
         <Row label="Allowed sending hours" desc="Campaigns never send outside these hours (in each campaign's time zone).">
           <div className="flex" style={{ gap: 8 }}>
             <input type="time" aria-label="Earliest" className="input" style={{ width: 120 }} value={L.windowStart || ''} onChange={(e) => set('windowStart', e.target.value)} />

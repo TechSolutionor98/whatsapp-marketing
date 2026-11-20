@@ -74,6 +74,7 @@ const RULES = [
   ['GET', /^\/conversations\/accounts$/, ['conversations', 'gateway', 'campaigns']],
   [ANY, /^\/conversations\/accounts\/[^/]+\/label$/, ['conversations', 'gateway']],
   [ANY, /^\/conversations\/accounts\/[^/]+\/(autoreply|catalog)$/, ['conversations']],
+  ['GET', /^\/conversations\/accounts\/[^/]+\/templates$/, ['campaigns', 'gateway']], // an official number's approved templates
   [ANY, /^\/conversations\/accounts(\/|$)/, ['gateway']], // link, unlink, default, QR
   [ANY, /^\/conversations(\/|$)/, ['conversations']],
   [ANY, /^\/wa\/check\//, ['gateway', 'campaigns', 'contacts']],
