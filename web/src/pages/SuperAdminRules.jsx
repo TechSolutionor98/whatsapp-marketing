@@ -120,6 +120,15 @@ export function RulesPanel({ onSaved }) {
         </Row>
       </Section>
 
+      <Section icon="code" title="Developer API" sub="A POS, website or other software sending through a workspace's number">
+        <Row label="Workspaces may use the Developer API" desc={L.allowApi ? 'On: each workspace can create API keys on its Developer page and send from its own software.' : 'Off: no workspace can create keys, and every API request is refused.'}>
+          <Toggle label="Allow the Developer API" checked={L.allowApi} onChange={(v) => set('allowApi', v)} />
+        </Row>
+        <Row label="API messages a day, per QR-linked number" desc="Keeps a scanned number safe from bans when software sends a lot. Official WhatsApp API numbers follow Meta's own limits.">
+          <Num label="API messages a day" value={L.apiMaxPerNumberDay} onChange={(v) => set('apiMaxPerNumberDay', v)} suffix="msgs/day" />
+        </Row>
+      </Section>
+
       <Section icon="briefcase" title="Workspace size" sub="What one business may have">
         <Row label="WhatsApp numbers per workspace" desc="Including warm-up numbers. Linking one more is refused once reached.">
           <Num label="Numbers per workspace" value={L.maxNumbers} onChange={(v) => set('maxNumbers', v)} suffix="numbers" />

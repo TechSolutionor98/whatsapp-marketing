@@ -265,11 +265,13 @@ conversations.post('/:contactId/pin', async (req, res) => {
 conversations.get('/media/:messageId', async (req, res) => {
   const _id = oid(req.params.messageId);
   if (!_id) return res.status(400).json({ error: 'Bad id' });
-  const doc = await db.messages().findOne({ _id }, { projection: { media_raw: 1, cloud_media_id: 1, account_id: 1, mime: 1, account_phone: 1, file_name: 1, type: 1 } });
-  if (!doc?.media_raw && !doc?.cloud_media_id) return res.status(404).json({ error: 'No media on this message' });
+  const doc = await db.messages().findOne({ _id }, { projection: { media_raw: 1, cloud_media_id: 1, account_id: 1, mime: 1, account_phone: 1, file_name: 1, type: 1, local_media: 1 } });
+  // local_media: a file this app sent (Developer API receipts) — kept here, not on WhatsApp's servers.
+  if (!doc?.media_raw && !doc?.cloud_media_id && !doc?.local_media) return res.status(404).json({ error: 'No media on this message' });
   const file = path.join(MEDIA_DIR, String(_id));
   try {
     if (!fs.existsSync(file)) {
+      if (!doc.media_raw && !doc.cloud_media_id) throw new Error('the file was removed from this server');
       if (!mediaInflight.has(file)) {
         mediaInflight.set(
           file,

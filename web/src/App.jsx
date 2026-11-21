@@ -16,6 +16,7 @@ import Settings from './pages/Settings.jsx';
 import Authentication from './pages/Authentication.jsx';
 import SuperAdmin from './pages/SuperAdmin.jsx';
 import Team from './pages/Team.jsx';
+import Developer from './pages/Developer.jsx';
 
 const NAV = [
   { id: 'overview', label: 'Overview', icon: 'grid', group: 'Operations' },
@@ -25,6 +26,7 @@ const NAV = [
   { id: 'warmup', label: 'Warmup', icon: 'flame', group: 'Operations' },
   { id: 'conversations', label: 'Conversations', icon: 'chat', group: 'Operations' },
   { id: 'gateway', label: 'WhatsApp Gateway', icon: 'gateway', group: 'System' },
+  { id: 'developer', label: 'Developer', icon: 'code', group: 'System' },
   { id: 'audit', label: 'Audit Logs', icon: 'logs', group: 'System' },
   { id: 'settings', label: 'Settings', icon: 'settings', group: 'System' },
   { id: 'team', label: 'Team', icon: 'users', group: 'System' },
@@ -40,6 +42,7 @@ const PAGES = {
   warmup: Warmup,
   conversations: Conversations,
   gateway: Gateway,
+  developer: Developer,
   audit: Audit,
   settings: Settings,
   auth: Authentication,
@@ -55,6 +58,7 @@ const TITLES = {
   warmup: ['Number Warmup', 'Build organic activity before cold outreach'],
   conversations: ['Conversations', 'Replies and human handoffs'],
   gateway: ['WhatsApp Gateway', 'Link, unlink and choose your default number'],
+  developer: ['Developer', 'API keys and guides to send WhatsApp messages from your own software'],
   audit: ['Audit Logs', 'Every action, send and reply'],
   settings: ['Settings', 'Pacing, limits and safety controls'],
   auth: ['Authentication', 'Your account'],

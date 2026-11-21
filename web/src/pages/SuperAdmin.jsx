@@ -26,6 +26,7 @@ const PAGE_LIST = [
   ['warmup', 'Warmup'],
   ['conversations', 'Conversations'],
   ['gateway', 'WhatsApp Gateway'],
+  ['developer', 'Developer'],
   ['audit', 'Audit Logs'],
   ['settings', 'Settings'],
 ];

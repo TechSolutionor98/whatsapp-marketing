@@ -259,6 +259,14 @@ export async function sendToJid(jid, text) {
   return sent?.key?.id || null;
 }
 
+// Any Baileys message content (text, image, document) — used by the Developer API.
+export async function sendContent(phone, content) {
+  if (!isConnected()) throw new Error('WhatsApp is not connected');
+  const jid = `${normalizePhone(phone)}@s.whatsapp.net`;
+  const sent = await sock.sendMessage(jid, content);
+  return sent?.key?.id || null;
+}
+
 export async function sendImage(phone, buffer, caption) {
   if (!isConnected()) throw new Error('WhatsApp is not connected');
   const jid = `${normalizePhone(phone)}@s.whatsapp.net`;

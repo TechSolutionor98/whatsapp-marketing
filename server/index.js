@@ -22,6 +22,8 @@ import { warmup } from './routes/warmup.js';
 import { uploads } from './routes/uploads.js';
 import { system } from './routes/system.js';
 import { cloudWebhook } from './routes/cloud-webhook.js';
+import { publicApi } from './routes/public-api.js';
+import { developer } from './routes/developer.js';
 import { connectWhatsApp } from './whatsapp/client.js';
 import { startCatalogSync } from './catalog.js';
 import { catalogs } from './routes/catalogs.js';
@@ -36,6 +38,9 @@ const app = express();
 app.use(cors({ origin: true, credentials: true }));
 // Meta's webhook for official WhatsApp numbers: public, and read raw (its signature is over the exact bytes).
 app.use('/api/cloud/webhook', express.raw({ type: '*/*', limit: '5mb' }), cloudWebhook);
+// Developer API: software (a POS, a website) sends with an API key, not a session. Reads its own
+// body (room for a base64 PDF receipt).
+app.use('/api/v1', publicApi);
 app.use(express.json({ limit: '15mb' })); // room for base64 image uploads
 app.use(cookieParser());
 
@@ -58,6 +63,7 @@ app.use('/api/ai', ai);
 app.use('/api/catalogs', catalogs);
 app.use('/api/warmup', warmup);
 app.use('/api/uploads', uploads);
+app.use('/api/developer', developer); // Developer page: API keys, test send, request log
 app.use('/api', system);
 
 // Serve the built frontend in production (web/dist), if present.

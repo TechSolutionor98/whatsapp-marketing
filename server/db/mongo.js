@@ -103,6 +103,13 @@ async function ensureIndexes() {
     { name: 'product_search', weights: productWeights, default_language: 'none' }
   );
   await col('audit_logs').createIndex({ created_at: -1 });
+  // Developer API: keys are found by their hash (the key itself is never stored); request logs
+  // are kept 30 days; a POS's own reference (receipt number) finds its message.
+  await col('api_keys').createIndex({ hash: 1 }, { unique: true });
+  await col('api_keys').createIndex({ ws: 1, created_at: -1 });
+  await col('api_logs').createIndex({ ws: 1, at: -1 });
+  await col('api_logs').createIndex({ at: 1 }, { expireAfterSeconds: 30 * 24 * 3600 });
+  await col('messages').createIndex({ ws: 1, api_ref: 1, created_at: -1 }, { partialFilterExpression: { api_ref: { $type: 'string' } } });
   await col('warmup_log').createIndex({ day_key: 1 });
   await col('warmup_log').createIndex({ created_at: -1 });
 }
@@ -136,7 +143,7 @@ export function isMongoUp() {
 // Collections whose documents belong to one workspace (field `ws`).
 export const TENANT_COLLECTIONS = [
   'contacts', 'lists', 'templates', 'campaigns', 'campaign_targets', 'messages',
-  'audit_logs', 'warmup_accounts', 'warmup_log', 'catalogs', 'products',
+  'audit_logs', 'warmup_accounts', 'warmup_log', 'catalogs', 'products', 'api_keys', 'api_logs',
 ];
 
 // One-time move to workspaces: everything that existed before belongs to the default
@@ -291,6 +298,8 @@ export const db = {
   lidMap: () => col('lid_map'),
   products: () => scoped('products'), // catalog products for AI replies (catalog.js)
   catalogs: () => scoped('catalogs'), // product catalogs: API-synced or manual
+  apiKeys: () => scoped('api_keys'), // Developer page: keys software uses to send (developer.js)
+  apiLogs: () => scoped('api_logs'), // Developer page: recent API requests
 };
 
 // Kept for routes/auth.js which imports `users`.

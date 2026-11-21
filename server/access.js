@@ -4,7 +4,7 @@
 import { ObjectId } from 'mongodb';
 import { users } from './db/mongo.js';
 
-export const PAGES = ['overview', 'contacts', 'templates', 'campaigns', 'warmup', 'conversations', 'gateway', 'audit', 'settings'];
+export const PAGES = ['overview', 'contacts', 'templates', 'campaigns', 'warmup', 'conversations', 'gateway', 'developer', 'audit', 'settings'];
 const PAGE_NAMES = {
   overview: 'Overview',
   contacts: 'Contacts & Leads',
@@ -13,6 +13,7 @@ const PAGE_NAMES = {
   warmup: 'Warmup',
   conversations: 'Conversations',
   gateway: 'WhatsApp Gateway',
+  developer: 'Developer',
   audit: 'Audit Logs',
   settings: 'Settings',
 };
@@ -83,6 +84,7 @@ const RULES = [
   [ANY, /^\/catalogs(\/|$)/, ['settings']],
   [ANY, /^\/warmup(\/|$)/, ['warmup']],
   ['GET', /^\/audit(\/|$)/, ['audit', 'overview']],
+  [ANY, /^\/developer(\/|$)/, ['developer']], // API keys for a POS / website, and the API guide
 ];
 
 export function pagesFor(method, path) {

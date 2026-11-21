@@ -548,6 +548,17 @@ export async function sendMediaFromTo(fromId, toPhone, buffer, caption, mime) {
   return sent?.key?.id || null;
 }
 
+// Any Baileys message content ({ text } / { image, caption } / { document, mimetype, fileName,
+// caption }) from a QR-linked number of this workspace — the Developer API sends receipts with it.
+export async function sendContentFromTo(fromId, toPhone, content) {
+  const a = fromId === 'main' ? null : ctxOf(fromId);
+  if (a?.kind === 'cloud') throw new Error('Official API numbers send through cloud-api.js');
+  if (!a?.sock || a.status !== 'connected') throw new Error('Source number not connected');
+  const jid = `${normalizePhone(toPhone)}@s.whatsapp.net`;
+  const sent = await a.sock.sendMessage(jid, content);
+  return sent?.key?.id || null;
+}
+
 // ---- Per-account inbound: capture chats for this pool number (not warm-up traffic) ----
 // Text to show for a message. Unwraps disappearing / view-once / edited / captioned-document
 // wrappers (Baileys normalizeMessageContent) — before, those came back empty and the message

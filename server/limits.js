@@ -24,6 +24,9 @@ export const LIMIT_DEFAULTS = {
   // numbers can — Meta sets their limits. Off: the minimum gap and per-number daily cap above
   // don't apply to them. On: they follow these rules too.
   officialFollowRules: false,
+  // Developer API (POS buttons, websites, other software sending through a workspace's number).
+  allowApi: true, // workspaces may create API keys and send through the API
+  apiMaxPerNumberDay: 500, // API messages one QR-linked number may send a day (0 = no cap; official numbers: Meta's limits)
 };
 
 const hhmm = (v) => (/^([01]\d|2[0-3]):[0-5]\d$/.test(String(v || '')) ? String(v) : '');
@@ -37,9 +40,9 @@ export function getLimits() {
 export function cleanLimits(b = {}) {
   const cur = getLimits();
   const out = { ...cur };
-  for (const k of ['minDelaySec', 'maxPerNumberDay', 'warmupMaxPerDay', 'warmupMinGap', 'maxNumbers', 'maxTeam']) if (k in b) out[k] = nonNeg(b[k]);
+  for (const k of ['minDelaySec', 'maxPerNumberDay', 'warmupMaxPerDay', 'warmupMinGap', 'maxNumbers', 'maxTeam', 'apiMaxPerNumberDay']) if (k in b) out[k] = nonNeg(b[k]);
   for (const k of ['windowStart', 'windowEnd']) if (k in b) out[k] = hhmm(b[k]);
-  for (const k of ['forceTyping', 'forceRamp', 'allowAi', 'sharePlatformKey', 'officialFollowRules']) if (k in b) out[k] = !!b[k];
+  for (const k of ['forceTyping', 'forceRamp', 'allowAi', 'sharePlatformKey', 'officialFollowRules', 'allowApi']) if (k in b) out[k] = !!b[k];
   if (out.windowStart && out.windowEnd && out.windowStart >= out.windowEnd) throw new Error('Sending hours: the start must be before the end');
   return out;
 }

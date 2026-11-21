@@ -119,19 +119,31 @@ export async function sendCloudText(acc, to, text) {
   return sentId(j);
 }
 
-// Upload the file to Meta first (our uploads aren't public), then send it by media id.
-export async function sendCloudImage(acc, to, buffer, caption, mime = 'image/jpeg') {
+// Upload a file to Meta (our files aren't public) → its media id, to send by id.
+export async function uploadCloudMedia(acc, buffer, mime, filename) {
   const form = new FormData();
   form.append('messaging_product', 'whatsapp');
   form.append('type', mime);
-  form.append('file', new Blob([buffer], { type: mime }), mime === 'image/png' ? 'image.png' : 'image.jpg');
+  form.append('file', new Blob([buffer], { type: mime }), filename || (mime === 'image/png' ? 'image.png' : mime === 'image/jpeg' ? 'image.jpg' : 'file'));
   const up = await call(acc.token, 'POST', `${encodeURIComponent(acc.phone_number_id)}/media`, { form });
-  const image = { id: up.id };
-  if (caption) image.caption = String(caption);
+  if (!up?.id) throw new Error("Meta didn't accept the file");
+  return up.id;
+}
+
+// Send an image or a document (e.g. a PDF receipt) that was uploaded first.
+export async function sendCloudMedia(acc, to, kind, { id, caption, filename }) {
+  const media = { id };
+  if (caption) media.caption = String(caption);
+  if (kind === 'document' && filename) media.filename = String(filename);
   const j = await call(acc.token, 'POST', `${encodeURIComponent(acc.phone_number_id)}/messages`, {
-    json: { messaging_product: 'whatsapp', recipient_type: 'individual', to: digits(to), type: 'image', image },
+    json: { messaging_product: 'whatsapp', recipient_type: 'individual', to: digits(to), type: kind, [kind]: media },
   });
   return sentId(j);
+}
+
+export async function sendCloudImage(acc, to, buffer, caption, mime = 'image/jpeg') {
+  const id = await uploadCloudMedia(acc, buffer, mime);
+  return sendCloudMedia(acc, to, 'image', { id, caption });
 }
 
 export async function sendCloudTemplate(acc, to, { name, language, components }) {
