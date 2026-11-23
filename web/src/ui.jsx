@@ -1,4 +1,20 @@
+import { useState } from 'react';
 import { Icon } from './icons.jsx';
+
+// A password (or secret key) field with a Show / Hide button, so people can check what they typed.
+export function PasswordInput({ value, onChange, className = 'input', show: shown, onShow, ...rest }) {
+  const [own, setOwn] = useState(false);
+  const show = shown ?? own;
+  const toggle = () => (onShow ? onShow(!show) : setOwn(!show));
+  return (
+    <div className="pw-wrap">
+      <input {...rest} className={className} type={show ? 'text' : 'password'} value={value} onChange={onChange} spellCheck={false} autoCapitalize="off" autoCorrect="off" />
+      <button type="button" className="pw-toggle" onClick={toggle} aria-label={show ? 'Hide password' : 'Show password'} aria-pressed={show} title={show ? 'Hide' : 'Show'}>
+        {show ? <Icon.eyeOff /> : <Icon.eye />}
+      </button>
+    </div>
+  );
+}
 
 export function Modal({ title, onClose, children, footer, wide }) {
   return (

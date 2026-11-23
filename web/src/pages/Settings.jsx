@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
-import { Loading, Modal } from '../ui.jsx';
+import { Loading, Modal, PasswordInput } from '../ui.jsx';
 
 // picking a provider fills in its model (a Groq model name on Gemini fails with 404)
 const DEFAULT_MODEL = { groq: 'openai/gpt-oss-20b', gemini: 'gemini-3.1-flash-lite', ollama: 'llama3.2', custom: '' };
@@ -540,9 +540,7 @@ function KeyField({ provider, label, desc, status, onChanged }) {
         </div>
       ) : (
         <div className="flex" style={{ gap: 8 }}>
-          <input
-            className="input"
-            type="password"
+          <PasswordInput
             autoComplete="off"
             aria-label={label}
             style={{ width: 240 }}

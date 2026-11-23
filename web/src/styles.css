@@ -3404,3 +3404,167 @@ tbody tr:hover {
   .dev-facts, .dev-test-grid { grid-template-columns: 1fr; }
   .dev-row-act { justify-content: flex-start; }
 }
+
+/* ---- Password field with Show / Hide ---- */
+.pw-wrap {
+  position: relative;
+}
+.pw-wrap .input {
+  padding-right: 44px;
+}
+.pw-toggle {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+}
+.pw-toggle:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.pw-toggle:focus-visible {
+  outline: 2px solid var(--brand-700);
+  outline-offset: -2px;
+}
+.pw-toggle svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* ---- Sign-in: forgot password, email codes ---- */
+.auth-label-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.auth-label-row .auth-link {
+  font-size: 12.5px;
+}
+.auth-code {
+  text-align: center;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 12px;
+  padding: 12px 10px 12px 22px;
+}
+.auth-sent {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  background: var(--surface-2);
+  border-radius: 12px;
+  padding: 14px 16px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-soft);
+  margin-bottom: 16px;
+}
+.auth-sent svg {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  color: var(--brand-700);
+  margin-top: 1px;
+}
+.auth-sent strong {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.auth-row-links {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  font-size: 13px;
+}
+.auth-row-links .auth-link:disabled {
+  color: var(--text-faint);
+  cursor: default;
+  text-decoration: none;
+}
+.auth-ok {
+  background: var(--brand-soft);
+  color: var(--brand-700);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  margin-bottom: 14px;
+}
+
+/* ---- Super Admin: email ---- */
+.mail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 16px;
+}
+.mail-grid .full {
+  grid-column: 1 / -1;
+}
+.mail-status .badge {
+  text-transform: none;
+}
+.mail-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+.mail-test {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.mail-test .field {
+  flex: 1 1 240px;
+  margin-bottom: 0;
+}
+.mail-help {
+  font-size: 12.5px;
+  color: var(--text-soft);
+  line-height: 1.6;
+}
+.mail-help code {
+  font-size: 12px;
+}
+@media (max-width: 640px) {
+  .mail-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.chip-btn {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-soft);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.chip-btn:hover {
+  color: var(--text);
+  border-color: var(--text-faint);
+}
+.chip-btn.on {
+  background: var(--brand-soft);
+  border-color: var(--brand-700);
+  color: var(--brand-700);
+}

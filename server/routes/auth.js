@@ -20,6 +20,8 @@ import {
   signupMode,
 } from '../auth.js';
 import { pagesOf, cleanPages, forgetUser } from '../access.js';
+import { mailReady } from '../mail.js';
+import { sendCode, useCode, pendingCode, CodeError, CODE_MINUTES } from '../email-codes.js';
 
 export const auth = Router();
 
@@ -58,7 +60,8 @@ auth.get('/status', async (_req, res) => {
   }
   try {
     const count = await users().countDocuments();
-    res.json({ mongoConnected: true, hasUsers: count > 0, signup: signupMode() });
+    // mail: whether "Forgot password?" can email a code; verify: sign-ups confirm their email.
+    res.json({ mongoConnected: true, hasUsers: count > 0, signup: signupMode(), mail: mailReady(), verify: verifyOn() });
   } catch (e) {
     res.json({ mongoConnected: false, hasUsers: false, error: e.message });
   }
@@ -128,11 +131,69 @@ function signupLimited(req) {
   return tries.length > 10 || signupsDone.length >= 50;
 }
 
-auth.post('/signup', async (req, res) => {
-  if (!isMongoUp()) return res.status(503).json({ error: 'Database unavailable — try again shortly' });
+// New sign-ups confirm their email with a code, when email is set up and the super admin
+// hasn't switched that off.
+export const verifyOn = () => mailReady() && getPlatform('verifyEmail', true) !== false;
+
+function signupClosed(res) {
   const mode = signupMode();
   if (mode === 'off') return res.status(403).json({ error: 'New sign-ups are closed right now.' });
   if (getPlatform('teamLocked', false)) return res.status(403).json({ error: 'Sign-up is paused right now. Please try again later.' });
+  return null;
+}
+// The business name and email are still free (checked again when the code is entered).
+async function signupTaken(business, email) {
+  if (listWorkspaces().some((w) => w.name.toLowerCase() === business.toLowerCase()))
+    return 'A business with that name is already on the platform. Ask its admin to add you to their team, or use a different name.';
+  if (await users().findOne({ email })) return 'An account with that email already exists — sign in instead.';
+  return null;
+}
+const codeFail = (res, e) => {
+  if (e instanceof CodeError) {
+    if (e.wait) res.set('Retry-After', String(e.wait));
+    return res.status(e.status).json({ error: e.message, code: e.code, ...(e.wait ? { wait: e.wait } : {}) });
+  }
+  if (e?.mail) return res.status(502).json({ error: `We couldn't send the email right now. ${e.message}`, code: 'mail_failed' });
+  res.status(500).json({ error: e?.message || 'Something went wrong' });
+};
+
+// The workspace and its admin, once everything is checked (and the email confirmed, if asked).
+async function createSignup(req, res, { business, name, email, passwordHash, verified }) {
+  const mode = signupMode();
+  const w = await createWorkspace(business, getWsDefaults()); // the super admin's defaults
+  await updateWorkspace(w.id, { signup_email: email, ...(mode === 'approval' ? { suspended: true, pending: true } : {}) });
+  const doc = {
+    name,
+    email,
+    passwordHash,
+    role: 'admin',
+    ws: w.id,
+    signup: true,
+    ...(verified ? { emailVerified: true, emailVerifiedAt: new Date().toISOString() } : {}),
+    createdAt: new Date().toISOString(),
+    lastLoginAt: mode === 'open' ? new Date().toISOString() : null,
+  };
+  try {
+    doc._id = (await users().insertOne(doc)).insertedId;
+  } catch (e) {
+    await deleteWorkspaceData(w.id).catch(() => {}); // the same email signed up a moment ago
+    if (e.code === 11000) return res.status(409).json({ error: 'An account with that email already exists — sign in instead.' });
+    throw e;
+  }
+  signupsDone.push(Date.now());
+  audit('admin', `New sign-up: "${business}" by ${name} (${email})${verified ? ', email confirmed' : ''}${mode === 'approval' ? ' — waiting for your approval' : ''}`, { level: 'success', ws: w.id });
+  emit('admin:update', {}, { ws: null });
+
+  if (mode === 'approval') {
+    return res.json({ pending: true, message: `Thanks, ${name}! ${business} is waiting for approval. You can sign in as soon as it's approved.` });
+  }
+  setAuthCookie(res, signToken(doc));
+  res.json({ ...session(req, doc), created: true });
+}
+
+auth.post('/signup', async (req, res) => {
+  if (!isMongoUp()) return res.status(503).json({ error: 'Database unavailable — try again shortly' });
+  if (signupClosed(res)) return;
   const b = req.body || {};
   if (b.website) return res.status(400).json({ error: 'Something went wrong. Please try again.' }); // hidden field only bots fill in
   if (signupLimited(req)) return res.status(429).json({ error: 'Too many sign-ups from here. Please try again in an hour.' });
@@ -148,40 +209,118 @@ auth.post('/signup', async (req, res) => {
   if (password.length > 200) return res.status(400).json({ error: 'That password is too long' });
 
   try {
-    if (listWorkspaces().some((w) => w.name.toLowerCase() === business.toLowerCase()))
-      return res.status(409).json({ error: 'A business with that name is already on the platform. Ask its admin to add you to their team, or use a different name.' });
-    if (await users().findOne({ email })) return res.status(409).json({ error: 'An account with that email already exists — sign in instead.' });
-
-    const w = await createWorkspace(business, getWsDefaults()); // the super admin's defaults
-    await updateWorkspace(w.id, { signup_email: email, ...(mode === 'approval' ? { suspended: true, pending: true } : {}) });
-    const doc = {
-      name,
-      email,
-      passwordHash: await hashPassword(password),
-      role: 'admin',
-      ws: w.id,
-      signup: true,
-      createdAt: new Date().toISOString(),
-      lastLoginAt: mode === 'open' ? new Date().toISOString() : null,
-    };
-    try {
-      doc._id = (await users().insertOne(doc)).insertedId;
-    } catch (e) {
-      await deleteWorkspaceData(w.id).catch(() => {}); // the same email signed up a moment ago
-      if (e.code === 11000) return res.status(409).json({ error: 'An account with that email already exists — sign in instead.' });
-      throw e;
+    const taken = await signupTaken(business, email);
+    if (taken) return res.status(409).json({ error: taken });
+    const passwordHash = await hashPassword(password);
+    if (verifyOn()) {
+      // Nothing is created yet: the details wait (24 h) with the code we email them.
+      await sendCode('signup', email, { data: { business, name, passwordHash }, mail: { name, business } });
+      return res.json({ verify: true, email, minutes: CODE_MINUTES, message: `We sent a 6-digit code to ${email}. Enter it to finish.` });
     }
-    signupsDone.push(Date.now());
-    audit('admin', `New sign-up: "${business}" by ${name} (${email})${mode === 'approval' ? ' — waiting for your approval' : ''}`, { level: 'success', ws: w.id });
-    emit('admin:update', {}, { ws: null });
-
-    if (mode === 'approval') {
-      return res.json({ pending: true, message: `Thanks, ${name}! ${business} is waiting for approval. You can sign in as soon as it's approved.` });
-    }
-    setAuthCookie(res, signToken(doc));
-    res.json({ ...session(req, doc), created: true });
+    await createSignup(req, res, { business, name, email, passwordHash, verified: false });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    codeFail(res, e);
+  }
+});
+
+// The code from the email → the account is created (as a plain sign-up would have been).
+auth.post('/signup/verify', async (req, res) => {
+  if (!isMongoUp()) return res.status(503).json({ error: 'Database unavailable — try again shortly' });
+  if (signupClosed(res)) return;
+  if (tooManyTries(req)) return res.status(429).json({ error: 'Too many tries from here. Please wait 15 minutes.' });
+  const email = String(req.body?.email || '').toLowerCase().trim();
+  if (!emailRe.test(email)) return res.status(400).json({ error: 'Enter a valid email' });
+  try {
+    const d = await useCode('signup', email, req.body?.code);
+    const { business, name, passwordHash } = d.data || {};
+    if (!business || !passwordHash) return res.status(400).json({ error: 'This sign-up has run out. Please sign up again.' });
+    const taken = await signupTaken(business, email);
+    if (taken) return res.status(409).json({ error: taken });
+    await createSignup(req, res, { business, name, email, passwordHash, verified: true });
+  } catch (e) {
+    codeFail(res, e);
+  }
+});
+
+// "Send a new code" on the sign-up's code screen.
+auth.post('/signup/resend', async (req, res) => {
+  if (!isMongoUp()) return res.status(503).json({ error: 'Database unavailable — try again shortly' });
+  if (signupClosed(res)) return;
+  const email = String(req.body?.email || '').toLowerCase().trim();
+  try {
+    const d = emailRe.test(email) ? await pendingCode('signup', email) : null;
+    if (!d?.data) return res.status(400).json({ error: 'This sign-up has run out. Please sign up again.', code: 'no_code' });
+    await sendCode('signup', email, { data: d.data, mail: { name: d.data.name, business: d.data.business } });
+    res.json({ ok: true, minutes: CODE_MINUTES, message: `We sent a new code to ${email}.` });
+  } catch (e) {
+    codeFail(res, e);
+  }
+});
+
+// ---- Forgot password: a code by email, then a new password ----
+const TRY_WINDOW = 15 * 60 * 1000;
+const tryTimes = new Map(); // client address -> code / forgot attempts in the last 15 min
+function tooManyTries(req, max = 30) {
+  const now = Date.now();
+  const ip = clientOf(req);
+  const t = (tryTimes.get(ip) || []).filter((x) => now - x < TRY_WINDOW);
+  t.push(now);
+  tryTimes.set(ip, t);
+  if (tryTimes.size > 5000) tryTimes.clear();
+  return t.length > max;
+}
+
+auth.post('/forgot', async (req, res) => {
+  if (!isMongoUp()) return res.status(503).json({ error: 'Database unavailable — try again shortly' });
+  if (!mailReady()) return res.status(503).json({ error: "Password reset by email isn't set up yet. Ask your admin to set a new password for you.", code: 'mail_off' });
+  if (tooManyTries(req, 10)) return res.status(429).json({ error: 'Too many requests from here. Please wait 15 minutes.' });
+  const email = String(req.body?.email || '').toLowerCase().trim();
+  if (!emailRe.test(email)) return res.status(400).json({ error: 'Enter a valid email' });
+  // The same answer whether or not an account uses this email (nobody can check who has one).
+  const answer = { ok: true, minutes: CODE_MINUTES, message: `If an account uses ${email}, we sent it a 6-digit code. Check your inbox (and spam).` };
+  try {
+    const u = await users().findOne({ email });
+    if (!u) return res.json(answer);
+    await sendCode('reset', email, { mail: { name: u.name } });
+    audit('system', `Password reset code emailed to ${email}`, { ws: u.role === 'owner' ? null : u.ws || DEFAULT_WS });
+    res.json(answer);
+  } catch (e) {
+    // "Wait before a new code" would tell a stranger that this email has an account: answer
+    // the same as always (the code sent moments ago still works).
+    if (e instanceof CodeError && e.code === 'wait') return res.json(answer);
+    codeFail(res, e);
+  }
+});
+
+auth.post('/reset', async (req, res) => {
+  if (!isMongoUp()) return res.status(503).json({ error: 'Database unavailable — try again shortly' });
+  if (tooManyTries(req)) return res.status(429).json({ error: 'Too many tries from here. Please wait 15 minutes.' });
+  const email = String(req.body?.email || '').toLowerCase().trim();
+  const password = String(req.body?.password || '');
+  if (!emailRe.test(email)) return res.status(400).json({ error: 'Enter a valid email' });
+  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  if (password.length > 200) return res.status(400).json({ error: 'That password is too long' });
+  try {
+    await useCode('reset', email, req.body?.code);
+    const u = await users().findOne({ email });
+    if (!u) return res.status(400).json({ error: 'This code has run out. Ask for a new one.', code: 'no_code' });
+    // New password → every device is signed out; the person proved they own the email.
+    const tokenVersion = (u.tokenVersion || 0) + 1;
+    const now = new Date().toISOString();
+    await users().updateOne(
+      { _id: u._id },
+      { $set: { passwordHash: await hashPassword(password), tokenVersion, passwordResetAt: now, ...(u.emailVerified ? {} : { emailVerified: true, emailVerifiedAt: now }) } }
+    );
+    forgetUser(u._id);
+    audit('system', `Password reset by email: ${u.email} (signed out everywhere)`, { level: 'warn', ws: u.role === 'owner' ? null : u.ws || DEFAULT_WS });
+    const fresh = { ...u, tokenVersion };
+    const blocked = blockedReason(fresh);
+    if (blocked) return res.json({ ok: true, signedIn: false, message: `Your password is changed. ${blocked}` });
+    await users().updateOne({ _id: u._id }, { $set: { lastLoginAt: now } });
+    setAuthCookie(res, signToken(fresh));
+    res.json({ ...session(req, fresh), reset: true });
+  } catch (e) {
+    codeFail(res, e);
   }
 });
 

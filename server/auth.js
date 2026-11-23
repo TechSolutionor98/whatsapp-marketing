@@ -31,6 +31,9 @@ function loadSecret() {
 
 const SECRET = loadSecret();
 
+// A hash only this server can make (for the one-time email codes).
+export const keyedHash = (text) => crypto.createHmac('sha256', SECRET).update(String(text)).digest('hex');
+
 export async function hashPassword(plain) {
   return bcrypt.hash(plain, 10);
 }

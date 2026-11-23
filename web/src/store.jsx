@@ -84,6 +84,28 @@ export function AppProvider({ children }) {
     return r;
   }, [applySession]);
 
+  // The code from the sign-up email → the account is created (and signed in, unless it
+  // waits for the super admin's approval).
+  const verifySignup = useCallback(async (email, code) => {
+    const r = await api.post('/auth/signup/verify', { email, code });
+    if (r.user) {
+      window.location.hash = '/overview';
+      applySession(r);
+    }
+    return r;
+  }, [applySession]);
+
+  // Forgot password: the emailed code + a new password → signed in (unless the account or
+  // its workspace can't be used right now).
+  const resetPassword = useCallback(async (email, code, password) => {
+    const r = await api.post('/auth/reset', { email, code, password });
+    if (r.user) {
+      window.location.hash = '/overview';
+      applySession(r);
+    }
+    return r;
+  }, [applySession]);
+
   // Super admin: open another workspace. A fresh load guarantees nothing from the previous
   // workspace stays on screen.
   const switchWorkspace = useCallback((id, page = 'overview') => {
@@ -194,6 +216,8 @@ export function AppProvider({ children }) {
         authStatus,
         login,
         signup,
+        verifySignup,
+        resetPassword,
         register,
         logout,
         refreshAuth,

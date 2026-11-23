@@ -41,6 +41,7 @@ If MongoDB isn't running, the login screen says so and tells you how to start it
 | `MONGODB_DB` | `pulse_wa` | Database name |
 | `JWT_SECRET` | auto-generated in `data/.jwt_secret` | Signs session cookies |
 | `PORT` | `4000` | API/server port |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM`, `MAIL_FROM_NAME` | — | Email for sign-up codes and "Forgot password?" (or set it on Super Admin → Rules & controls → Email, which wins) |
 
 Example with Atlas:
 ```bash

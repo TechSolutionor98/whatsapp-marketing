@@ -5,6 +5,7 @@ import { Icon } from '../icons.jsx';
 import { Modal, Loading, timeAgo, initials } from '../ui.jsx';
 import { roleName } from './Authentication.jsx';
 import { RulesPanel, DefaultsPanel } from './SuperAdminRules.jsx';
+import { MailPanel } from './SuperAdminMail.jsx';
 
 const TABS = [
   ['workspaces', 'Workspaces', 'briefcase'],
@@ -282,6 +283,19 @@ export default function SuperAdmin() {
           </div>
           <div className="setting-row">
             <div>
+              <div className="st-label">Confirm email on sign-up</div>
+              <div className="st-desc">
+                {!state.mail?.ready
+                  ? 'Needs email set up (below). Until then, new sign-ups start without confirming their email.'
+                  : platform.verifyEmail
+                    ? 'On — a new sign-up gets a 6-digit code by email. Their account is only created once they enter it.'
+                    : 'Off — new sign-ups start without confirming their email.'}
+              </div>
+            </div>
+            <Toggle label="Confirm email on sign-up" checked={!!platform.verifyEmail} disabled={busy === 'plat'} onChange={(on) => setPlatform({ verifyEmail: on }, on ? 'New sign-ups now confirm their email' : 'New sign-ups no longer confirm their email')} />
+          </div>
+          <div className="setting-row">
+            <div>
               <div className="st-label">Sign-in — everyone</div>
               <div className="st-desc">{platform.teamLocked ? 'Paused — only you can use the app. Everyone else, in every workspace, was signed out.' : 'Open — people can sign in to their workspace.'}</div>
             </div>
@@ -308,6 +322,7 @@ export default function SuperAdmin() {
       </div>
 
       )}
+      {tab === 'rules' && <MailPanel mail={state.mail} onChanged={load} />}
 
       {/* People */}
       {tab === 'people' && (

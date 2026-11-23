@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
-import { Modal, Loading } from '../ui.jsx';
+import { Modal, Loading, PasswordInput } from '../ui.jsx';
 
 // Two ways to link a WhatsApp number: scan a QR code (free, like WhatsApp Web) or connect an
 // official WhatsApp Business number through Meta's WhatsApp Cloud API.
@@ -175,11 +175,11 @@ export function OfficialNumberModal({ onClose, onDone }) {
         </div>
         <div className="field">
           <label>Access token</label>
-          <input className="input" type="password" value={f.token} onChange={set('token')} placeholder="EAAG…" autoComplete="off" required />
+          <PasswordInput value={f.token} onChange={set('token')} placeholder="EAAG…" autoComplete="off" required />
         </div>
         <div className="field">
           <label>App secret</label>
-          <input className="input" type="password" value={f.appSecret} onChange={set('appSecret')} placeholder="32 letters and numbers" autoComplete="off" required />
+          <PasswordInput value={f.appSecret} onChange={set('appSecret')} placeholder="32 letters and numbers" autoComplete="off" required />
           <div className="hint">Used only to check that incoming messages really come from Meta. The token and secret are never shown again.</div>
         </div>
       </form>
@@ -237,11 +237,11 @@ export function OfficialSetupModal({ id, onClose, onChanged }) {
             <div className="row">
               <div className="field">
                 <label>New access token</label>
-                <input className="input" type="password" value={f.token} onChange={(e) => setF({ ...f, token: e.target.value })} autoComplete="off" placeholder="Leave empty to keep" />
+                <PasswordInput value={f.token} onChange={(e) => setF({ ...f, token: e.target.value })} autoComplete="off" placeholder="Leave empty to keep" />
               </div>
               <div className="field">
                 <label>New app secret</label>
-                <input className="input" type="password" value={f.appSecret} onChange={(e) => setF({ ...f, appSecret: e.target.value })} autoComplete="off" placeholder="Leave empty to keep" />
+                <PasswordInput value={f.appSecret} onChange={(e) => setF({ ...f, appSecret: e.target.value })} autoComplete="off" placeholder="Leave empty to keep" />
               </div>
             </div>
             <button className="btn" onClick={save} disabled={busy || (!f.token && !f.appSecret)}>{busy ? 'Checking with Meta…' : 'Save and check'}</button>

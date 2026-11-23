@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
-import { initials } from '../ui.jsx';
+import { initials, PasswordInput } from '../ui.jsx';
 
 export const roleName = (role) => (role === 'owner' ? 'Super admin' : role === 'admin' ? 'Admin' : 'Member');
 
@@ -66,16 +66,16 @@ export default function Authentication({ go }) {
         <div className="card-pad">
           <div className="field">
             <label>Current password</label>
-            <input className="input" type="password" value={pw.currentPassword} onChange={(e) => setPw({ ...pw, currentPassword: e.target.value })} />
+            <PasswordInput value={pw.currentPassword} onChange={(e) => setPw({ ...pw, currentPassword: e.target.value })} autoComplete="current-password" />
           </div>
           <div className="row">
             <div className="field">
               <label>New password</label>
-              <input className="input" type="password" value={pw.newPassword} onChange={(e) => setPw({ ...pw, newPassword: e.target.value })} />
+              <PasswordInput value={pw.newPassword} onChange={(e) => setPw({ ...pw, newPassword: e.target.value })} autoComplete="new-password" />
             </div>
             <div className="field">
               <label>Confirm new</label>
-              <input className="input" type="password" value={pw.confirm} onChange={(e) => setPw({ ...pw, confirm: e.target.value })} />
+              <PasswordInput value={pw.confirm} onChange={(e) => setPw({ ...pw, confirm: e.target.value })} autoComplete="new-password" />
             </div>
           </div>
           <div className="flex" style={{ justifyContent: 'flex-end' }}>

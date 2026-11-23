@@ -109,6 +109,8 @@ async function ensureIndexes() {
   await col('api_keys').createIndex({ ws: 1, created_at: -1 });
   await col('api_logs').createIndex({ ws: 1, at: -1 });
   await col('api_logs').createIndex({ at: 1 }, { expireAfterSeconds: 30 * 24 * 3600 });
+  // Email codes (sign-up confirmation, password reset): the database removes them once run out.
+  await col('auth_codes').createIndex({ expires_at: 1 }, { expireAfterSeconds: 0 });
   await col('messages').createIndex({ ws: 1, api_ref: 1, created_at: -1 }, { partialFilterExpression: { api_ref: { $type: 'string' } } });
   await col('warmup_log').createIndex({ day_key: 1 });
   await col('warmup_log').createIndex({ created_at: -1 });
