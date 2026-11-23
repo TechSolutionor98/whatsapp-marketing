@@ -60,8 +60,7 @@ auth.get('/status', async (_req, res) => {
   }
   try {
     const count = await users().countDocuments();
-    // mail: whether "Forgot password?" can email a code; verify: sign-ups confirm their email.
-    res.json({ mongoConnected: true, hasUsers: count > 0, signup: signupMode(), mail: mailReady(), verify: verifyOn() });
+    res.json({ mongoConnected: true, hasUsers: count > 0, signup: signupMode() });
   } catch (e) {
     res.json({ mongoConnected: false, hasUsers: false, error: e.message });
   }
@@ -131,10 +130,6 @@ function signupLimited(req) {
   return tries.length > 10 || signupsDone.length >= 50;
 }
 
-// New sign-ups confirm their email with a code, when email is set up and the super admin
-// hasn't switched that off.
-export const verifyOn = () => mailReady() && getPlatform('verifyEmail', true) !== false;
-
 function signupClosed(res) {
   const mode = signupMode();
   if (mode === 'off') return res.status(403).json({ error: 'New sign-ups are closed right now.' });
@@ -157,8 +152,11 @@ const codeFail = (res, e) => {
   res.status(500).json({ error: e?.message || 'Something went wrong' });
 };
 
-// The workspace and its admin, once everything is checked (and the email confirmed, if asked).
-async function createSignup(req, res, { business, name, email, passwordHash, verified }) {
+// Codes can't go out: the server's .env has no mail account (see server/mail.js).
+const mailOff = (res, error) => res.status(503).json({ error, code: 'mail_off' });
+
+// The workspace and its admin, once everything is checked and the email is confirmed.
+async function createSignup(req, res, { business, name, email, passwordHash }) {
   const mode = signupMode();
   const w = await createWorkspace(business, getWsDefaults()); // the super admin's defaults
   await updateWorkspace(w.id, { signup_email: email, ...(mode === 'approval' ? { suspended: true, pending: true } : {}) });
@@ -169,7 +167,8 @@ async function createSignup(req, res, { business, name, email, passwordHash, ver
     role: 'admin',
     ws: w.id,
     signup: true,
-    ...(verified ? { emailVerified: true, emailVerifiedAt: new Date().toISOString() } : {}),
+    emailVerified: true,
+    emailVerifiedAt: new Date().toISOString(),
     createdAt: new Date().toISOString(),
     lastLoginAt: mode === 'open' ? new Date().toISOString() : null,
   };
@@ -181,7 +180,7 @@ async function createSignup(req, res, { business, name, email, passwordHash, ver
     throw e;
   }
   signupsDone.push(Date.now());
-  audit('admin', `New sign-up: "${business}" by ${name} (${email})${verified ? ', email confirmed' : ''}${mode === 'approval' ? ' — waiting for your approval' : ''}`, { level: 'success', ws: w.id });
+  audit('admin', `New sign-up: "${business}" by ${name} (${email}), email confirmed${mode === 'approval' ? ' — waiting for your approval' : ''}`, { level: 'success', ws: w.id });
   emit('admin:update', {}, { ws: null });
 
   if (mode === 'approval') {
@@ -197,6 +196,7 @@ auth.post('/signup', async (req, res) => {
   const b = req.body || {};
   if (b.website) return res.status(400).json({ error: 'Something went wrong. Please try again.' }); // hidden field only bots fill in
   if (signupLimited(req)) return res.status(429).json({ error: 'Too many sign-ups from here. Please try again in an hour.' });
+  if (!mailReady()) return mailOff(res, "We can't send the email that confirms your address right now, so sign-up is paused. Please try again later.");
 
   const business = String(b.business || '').trim().replace(/\s+/g, ' ').slice(0, 80);
   const name = String(b.name || '').trim().slice(0, 80);
@@ -212,12 +212,9 @@ auth.post('/signup', async (req, res) => {
     const taken = await signupTaken(business, email);
     if (taken) return res.status(409).json({ error: taken });
     const passwordHash = await hashPassword(password);
-    if (verifyOn()) {
-      // Nothing is created yet: the details wait (24 h) with the code we email them.
-      await sendCode('signup', email, { data: { business, name, passwordHash }, mail: { name, business } });
-      return res.json({ verify: true, email, minutes: CODE_MINUTES, message: `We sent a 6-digit code to ${email}. Enter it to finish.` });
-    }
-    await createSignup(req, res, { business, name, email, passwordHash, verified: false });
+    // Nothing is created yet: the details wait (24 h) with the code we email them.
+    await sendCode('signup', email, { data: { business, name, passwordHash }, mail: { name, business } });
+    res.json({ verify: true, email, minutes: CODE_MINUTES, message: `We sent a 6-digit code to ${email}. Enter it to finish.` });
   } catch (e) {
     codeFail(res, e);
   }
@@ -236,7 +233,7 @@ auth.post('/signup/verify', async (req, res) => {
     if (!business || !passwordHash) return res.status(400).json({ error: 'This sign-up has run out. Please sign up again.' });
     const taken = await signupTaken(business, email);
     if (taken) return res.status(409).json({ error: taken });
-    await createSignup(req, res, { business, name, email, passwordHash, verified: true });
+    await createSignup(req, res, { business, name, email, passwordHash });
   } catch (e) {
     codeFail(res, e);
   }
@@ -272,7 +269,7 @@ function tooManyTries(req, max = 30) {
 
 auth.post('/forgot', async (req, res) => {
   if (!isMongoUp()) return res.status(503).json({ error: 'Database unavailable — try again shortly' });
-  if (!mailReady()) return res.status(503).json({ error: "Password reset by email isn't set up yet. Ask your admin to set a new password for you.", code: 'mail_off' });
+  if (!mailReady()) return mailOff(res, "We can't send email right now. Please try again later, or ask your admin to set a new password for you.");
   if (tooManyTries(req, 10)) return res.status(429).json({ error: 'Too many requests from here. Please wait 15 minutes.' });
   const email = String(req.body?.email || '').toLowerCase().trim();
   if (!emailRe.test(email)) return res.status(400).json({ error: 'Enter a valid email' });

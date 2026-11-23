@@ -16,7 +16,6 @@ import { poolState, setPoolAutoReply, removePoolAccount } from '../whatsapp/pool
 import { listNumbers, accountGroup } from '../numbers.js';
 import { keySource, aiProviderName } from '../ai.js';
 import { emit } from '../events.js';
-import { mailPublic, saveMail, clearMail, testMail } from '../mail.js';
 import { DEFAULT_WS, runInWs } from '../tenant.js';
 import { getLimits, cleanLimits, enforceEverywhere, getWsDefaults, saveWsDefaults, defaultsOf, canAddPerson, clampSettings, DEFAULT_KEYS, LIMIT_DEFAULTS } from '../limits.js';
 
@@ -69,9 +68,7 @@ admin.get('/state', async (req, res) => {
       sendingPaused: !!getPlatform('sendingPaused', false),
       teamLocked: !!getPlatform('teamLocked', false),
       signup: signupMode(),
-      verifyEmail: getPlatform('verifyEmail', true) !== false, // new sign-ups confirm their email (needs email set up)
     },
-    mail: mailPublic(),
     current: req.ws,
   });
 });
@@ -333,46 +330,12 @@ admin.put('/system', async (req, res) => {
     const said = { open: 'open — new businesses start at once', approval: 'open with your approval', off: 'closed' }[b.signup];
     audit(null, `Public sign-up set to ${said} by ${by(req)}`);
   }
-  if ('verifyEmail' in b) {
-    await setPlatform('verifyEmail', !!b.verifyEmail);
-    audit(null, `Email confirmation for new sign-ups ${b.verifyEmail ? 'switched on' : 'switched off'} by ${by(req)}`, b.verifyEmail ? 'info' : 'warn');
-  }
   if ('teamLocked' in b) {
     await setPlatform('teamLocked', !!b.teamLocked);
     forgetUser();
     audit(null, b.teamLocked ? `Sign-in paused for everyone by ${by(req)} — only the super admin can use the app` : `Sign-in re-opened for everyone by ${by(req)}`, b.teamLocked ? 'warn' : 'info');
   }
   res.json({ ok: true });
-});
-
-// ---- Email (sign-up codes, password resets) ----
-admin.get('/mail', (_req, res) => res.json(mailPublic()));
-
-admin.put('/mail', async (req, res) => {
-  try {
-    const m = await saveMail(req.body || {});
-    audit(null, `Email settings saved by ${by(req)}: ${m.host}:${m.port}, sent from ${m.fromEmail}`);
-    res.json(m);
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
-
-admin.delete('/mail', async (req, res) => {
-  await clearMail();
-  audit(null, `Email settings removed by ${by(req)} — sign-ups no longer confirm their email, and "Forgot password" is off`, 'warn');
-  res.json(mailPublic());
-});
-
-admin.post('/mail/test', async (req, res) => {
-  const to = String(req.body?.to || req.user.email || '').trim().toLowerCase();
-  if (!emailRe.test(to)) return res.status(400).json({ error: 'Enter the email address to send the test to' });
-  try {
-    await testMail(to);
-    res.json({ ok: true, mail: mailPublic() });
-  } catch (e) {
-    res.status(502).json({ error: e.message, mail: mailPublic() });
-  }
 });
 
 // Emergency stop for the whole platform: every workspace stops sending automatically.

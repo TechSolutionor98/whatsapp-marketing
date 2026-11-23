@@ -1,15 +1,14 @@
 // Email: the codes that confirm a new account's email and reset a forgotten password.
-// Sent through the super admin's own mail account (SMTP: Gmail, Zoho, Outlook, Hostinger,
-// Brevo…), set on the Super Admin page. SMTP_* in .env work too, when nothing is saved there.
-// The password is stored on the server only and is never sent back to the browser.
-import { getPlatform, setPlatform } from './db/mongo.js';
+// Always on: every sign-up confirms its email, and "Forgot password?" always emails a code.
+// The mail account (SMTP: Hostinger, Gmail, Zoho…) is set in the server's .env only
+// (SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS, MAIL_FROM, MAIL_FROM_NAME).
 
 export const APP_NAME = process.env.APP_NAME || 'Tech Watsapi';
 const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const hostRe = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i;
-export const SECURITY = ['ssl', 'starttls', 'plain']; // port 465 / 587 / a local relay without encryption
+const SECURITY = ['ssl', 'starttls', 'plain']; // port 465 / 587 / a local relay without encryption
 
-function fromEnv() {
+// The mail account from .env, or null.
+export function mailConfig() {
   const e = process.env;
   if (!e.SMTP_HOST) return null;
   const port = Number(e.SMTP_PORT) || 587;
@@ -23,65 +22,10 @@ function fromEnv() {
     fromName: e.MAIL_FROM_NAME || APP_NAME,
   };
 }
-
-// The settings in use (saved on the Super Admin page, else .env), or null.
-export function mailConfig() {
-  const saved = getPlatform('mail', null);
-  if (saved?.host) return { ...saved, source: 'saved' };
-  const env = fromEnv();
-  return env ? { ...env, source: 'env' } : null;
-}
 export const mailReady = () => {
   const c = mailConfig();
   return !!(c?.host && emailRe.test(c.fromEmail || ''));
 };
-
-// What the Super Admin page sees (never the password).
-export function mailPublic() {
-  const c = mailConfig();
-  const test = getPlatform('mailTest', null);
-  return {
-    ready: mailReady(),
-    source: c?.source || null,
-    host: c?.host || '',
-    port: c?.port || 587,
-    security: c?.security || 'starttls',
-    user: c?.user || '',
-    hasPassword: !!c?.pass,
-    fromEmail: c?.fromEmail || '',
-    fromName: c?.fromName || APP_NAME,
-    lastTest: test || null,
-  };
-}
-
-// Clean what the Super Admin page sent. An empty password keeps the saved one.
-export function cleanMail(b = {}) {
-  const old = getPlatform('mail', null) || {};
-  const host = String(b.host || '').trim().toLowerCase();
-  if (!hostRe.test(host) || host.length > 253) throw new Error('Enter the mail server, e.g. smtp.gmail.com');
-  const port = Math.floor(Number(b.port));
-  if (!(port >= 1 && port <= 65535)) throw new Error('Enter the port, e.g. 587 or 465');
-  const security = SECURITY.includes(b.security) ? b.security : port === 465 ? 'ssl' : 'starttls';
-  const user = String(b.user || '').trim().slice(0, 254);
-  const pass = b.pass ? String(b.pass).slice(0, 500) : old.host && old.user === user ? old.pass || '' : '';
-  const fromEmail = String(b.fromEmail || user).trim().toLowerCase();
-  if (!emailRe.test(fromEmail)) throw new Error('Enter the email address the codes are sent from');
-  const fromName = String(b.fromName || '').trim().replace(/[\r\n"<>]/g, '').slice(0, 60) || APP_NAME;
-  return { host, port, security, user, pass, fromEmail, fromName };
-}
-
-export async function saveMail(b) {
-  const clean = cleanMail(b);
-  await setPlatform('mail', clean);
-  await setPlatform('mailTest', null); // the old test result was for the old settings
-  transport = null;
-  return mailPublic();
-}
-export async function clearMail() {
-  await setPlatform('mail', null);
-  await setPlatform('mailTest', null);
-  transport = null;
-}
 
 let transport = null; // { key, t }
 async function transportFor(c) {
@@ -120,7 +64,7 @@ const mailFail = (message) => Object.assign(new Error(message), { mail: true });
 
 export async function sendMail({ to, subject, text, html }) {
   const c = mailConfig();
-  if (!c || !mailReady()) throw mailFail("Email isn't set up yet (Super Admin → Rules & controls → Email).");
+  if (!c || !mailReady()) throw mailFail('Email is not set up on the server yet.');
   let t;
   try {
     t = await transportFor(c);
@@ -135,21 +79,21 @@ export async function sendMail({ to, subject, text, html }) {
   }
 }
 
-// Super admin: "Send a test email".
-export async function testMail(to) {
-  const at = new Date().toISOString();
+// On start-up: log in to the mail server once, so a wrong .env shows in the server log
+// (pm2 logs) straight away. Sends nothing.
+export async function checkMail() {
+  const c = mailConfig();
+  if (!c || !mailReady()) {
+    console.warn('  [mail] NOT SET UP: sign-ups and "Forgot password?" can\'t send their codes. Add SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS and MAIL_FROM to .env, then restart.');
+    return false;
+  }
   try {
-    await sendMail({
-      to,
-      subject: `${APP_NAME}: test email`,
-      text: `This is a test from ${APP_NAME}. Email works: sign-up codes and password resets will be sent from this address.`,
-      html: layout('Email works', `<p style="margin:0 0 12px">This is a test from ${esc(APP_NAME)}.</p><p style="margin:0">Sign-up codes and password resets will be sent from this address.</p>`),
-    });
-    await setPlatform('mailTest', { ok: true, at, to });
-    return { ok: true };
+    await (await transportFor(c)).verify();
+    console.log(`  [mail] ready: codes are sent from ${c.fromEmail} via ${c.host}:${c.port}`);
+    return true;
   } catch (e) {
-    await setPlatform('mailTest', { ok: false, at, to, error: e.message });
-    throw e;
+    console.error(`  [mail] PROBLEM with ${c.host}:${c.port}: ${e?.message?.includes('npm install') ? e.message : mailError(e)}`);
+    return false;
   }
 }
 

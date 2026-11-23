@@ -153,7 +153,7 @@ function LoginForm({ signupMode, onSignup, onForgot, email: startEmail, notice }
 }
 
 // Forgot password, step 1: the email to send a code to.
-function ForgotForm({ email: startEmail, mail, onBack, onSent }) {
+function ForgotForm({ email: startEmail, onBack, onSent }) {
   const [email, setEmail] = useState(startEmail || '');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
@@ -172,15 +172,6 @@ function ForgotForm({ email: startEmail, mail, onBack, onSent }) {
   }
 
   const back = <button type="button" className="auth-link" onClick={() => onBack(email)}>Back to sign in</button>;
-  if (!mail) {
-    return (
-      <Shell title="Forgot your password?" subtitle="We can't email a reset code yet" footer={back}>
-        <div className="auth-note">
-          Password reset by email isn't set up on this platform yet. Ask your workspace admin (or the super admin) to set a new password for you. They can do it from the Team or Super Admin page.
-        </div>
-      </Shell>
-    );
-  }
   return (
     <Shell title="Forgot your password?" subtitle="Enter your email and we'll send you a 6-digit code to set a new one" footer={back}>
       <form onSubmit={submit}>
@@ -267,8 +258,8 @@ function ResetForm({ email, onBack, onOtherEmail, onDone }) {
 }
 
 // Public sign-up: a new business gets its own workspace and the person becomes its admin.
-// Linkable as <app>/#signup (e.g. from the landing page). When email is set up, the account
-// is only created once the code we email is entered.
+// Linkable as <app>/#signup (e.g. from the landing page). The account is only created once
+// the code we email is entered.
 function SignupForm({ mode, onLogin }) {
   const { signup, verifySignup, toast } = useApp();
   const [f, setF] = useState({ business: '', name: '', email: '', password: '', website: '' });
@@ -448,7 +439,7 @@ export default function AuthGate() {
   if (!authStatus.mongoConnected) return <DbDown status={authStatus} onRetry={fetchStatus} />;
   const mode = authStatus.signup || 'off';
   if (view === 'signup' && mode !== 'off') return <SignupForm mode={mode} onLogin={(m) => go('login', m)} />;
-  if (view === 'forgot') return <ForgotForm email={email} mail={!!authStatus.mail} onBack={(m) => go('login', m)} onSent={(m) => go('reset', m)} />;
+  if (view === 'forgot') return <ForgotForm email={email} onBack={(m) => go('login', m)} onSent={(m) => go('reset', m)} />;
   if (view === 'reset' && email)
     return (
       <ResetForm

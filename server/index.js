@@ -29,6 +29,7 @@ import { startCatalogSync } from './catalog.js';
 import { catalogs } from './routes/catalogs.js';
 import { startWorker } from './worker/sender.js';
 import { startWarmupWorker } from './worker/warmup.js';
+import { checkMail } from './mail.js';
 
 // An error inside one request (Express 4 doesn't catch async ones) must not restart the whole
 // server — that would drop every linked WhatsApp number for a moment.
@@ -82,6 +83,7 @@ app.listen(PORT, () => {
     console.log('  (dev) frontend runs separately on Vite — open its URL');
   }
   connectMongo(); // auth store (self-retries if not up yet)
+  checkMail(); // logs whether sign-up / password reset emails can go out
   startWorker();
   startWarmupWorker();
   startCatalogSync(); // product catalog for AI replies (if a product URL is set)
