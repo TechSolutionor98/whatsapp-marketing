@@ -37,7 +37,7 @@ async function req(method, path, body) {
   }
   // 403 "no access" → the super admin changed this user's pages; re-read them.
   if (res.status === 403 && data.noAccess) window.dispatchEvent(new Event('auth:changed'));
-  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  if (!res.ok) throw Object.assign(new Error(data.error || `Request failed (${res.status})`), { status: res.status, code: data.code });
   return data;
 }
 

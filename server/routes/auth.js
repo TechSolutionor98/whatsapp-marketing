@@ -152,6 +152,9 @@ const codeFail = (res, e) => {
   res.status(500).json({ error: e?.message || 'Something went wrong' });
 };
 
+// An email with no account on the platform: say so plainly, so a typo is spotted at once.
+const noAccount = (email) => `No account found for ${email}. Check the spelling${signupMode() === 'off' ? '' : ', or create an account'}.`;
+
 // Codes can't go out: the server's .env has no mail account (see server/mail.js).
 const mailOff = (res, error) => res.status(503).json({ error, code: 'mail_off' });
 
@@ -273,18 +276,17 @@ auth.post('/forgot', async (req, res) => {
   if (tooManyTries(req, 10)) return res.status(429).json({ error: 'Too many requests from here. Please wait 15 minutes.' });
   const email = String(req.body?.email || '').toLowerCase().trim();
   if (!emailRe.test(email)) return res.status(400).json({ error: 'Enter a valid email' });
-  // The same answer whether or not an account uses this email (nobody can check who has one).
-  const answer = { ok: true, minutes: CODE_MINUTES, message: `If an account uses ${email}, we sent it a 6-digit code. Check your inbox (and spam).` };
   try {
     const u = await users().findOne({ email });
-    if (!u) return res.json(answer);
+    if (!u) return res.status(404).json({ error: noAccount(email), code: 'no_account' });
     await sendCode('reset', email, { mail: { name: u.name } });
     audit('system', `Password reset code emailed to ${email}`, { ws: u.role === 'owner' ? null : u.ws || DEFAULT_WS });
-    res.json(answer);
+    res.json({ ok: true, minutes: CODE_MINUTES, message: `We sent a 6-digit code to ${email}. Check your inbox (and spam).` });
   } catch (e) {
-    // "Wait before a new code" would tell a stranger that this email has an account: answer
-    // the same as always (the code sent moments ago still works).
-    if (e instanceof CodeError && e.code === 'wait') return res.json(answer);
+    // Asked again within the minute (a double click, or Back then send): the code that just
+    // went out still works, so carry on to the code screen.
+    if (e instanceof CodeError && e.code === 'wait' && e.wait <= 60)
+      return res.json({ ok: true, minutes: CODE_MINUTES, message: `We sent a code to ${email} a moment ago. Use that one.` });
     codeFail(res, e);
   }
 });
@@ -325,9 +327,10 @@ auth.post('/login', async (req, res) => {
   if (!isMongoUp()) return res.status(503).json({ error: 'Database unavailable — start MongoDB' });
   const { email = '', password = '' } = req.body || {};
   try {
-    const u = await users().findOne({ email: email.toLowerCase().trim() });
-    if (!u || !(await verifyPassword(password, u.passwordHash))) {
-      return res.status(401).json({ error: 'Invalid email or password' });
+    const u = await users().findOne({ email: String(email).toLowerCase().trim() });
+    if (!u) return res.status(401).json({ error: noAccount(String(email).toLowerCase().trim()), code: 'no_account' });
+    if (!(await verifyPassword(password, u.passwordHash))) {
+      return res.status(401).json({ error: 'Wrong password. Try again, or use "Forgot password?".', code: 'wrong_password' });
     }
     const blocked = blockedReason(u);
     if (blocked) return res.status(403).json({ error: blocked });

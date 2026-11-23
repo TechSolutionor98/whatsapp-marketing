@@ -83,14 +83,12 @@ function CodeInput({ value, onChange, autoFocus = true }) {
   );
 }
 
-function Sent({ email, maybe }) {
+function Sent({ email }) {
   return (
     <div className="auth-sent">
       <Icon.mail />
       <div>
-        {maybe ? 'If an account uses ' : 'We sent a 6-digit code to '}
-        <strong>{email}</strong>
-        {maybe ? ', we sent it a 6-digit code.' : '.'} Check your inbox, and the spam folder if it isn't there in a minute.
+        We sent a 6-digit code to <strong>{email}</strong>. Check your inbox, and the spam folder if it isn't there in a minute.
       </div>
     </div>
   );
@@ -153,20 +151,23 @@ function LoginForm({ signupMode, onSignup, onForgot, email: startEmail, notice }
 }
 
 // Forgot password, step 1: the email to send a code to.
-function ForgotForm({ email: startEmail, onBack, onSent }) {
+function ForgotForm({ email: startEmail, onBack, onSent, onSignup }) {
   const [email, setEmail] = useState(startEmail || '');
   const [err, setErr] = useState('');
+  const [noAccount, setNoAccount] = useState(false);
   const [busy, setBusy] = useState(false);
 
   async function submit(e) {
     e.preventDefault();
     setErr('');
+    setNoAccount(false);
     setBusy(true);
     try {
       await api.post('/auth/forgot', { email });
       onSent(email.trim().toLowerCase());
     } catch (e) {
       setErr(e.message);
+      setNoAccount(e.code === 'no_account');
     }
     setBusy(false);
   }
@@ -175,7 +176,16 @@ function ForgotForm({ email: startEmail, onBack, onSent }) {
   return (
     <Shell title="Forgot your password?" subtitle="Enter your email and we'll send you a 6-digit code to set a new one" footer={back}>
       <form onSubmit={submit}>
-        {err && <div className="auth-error">{err}</div>}
+        {err && (
+          <div className="auth-error">
+            {err}
+            {noAccount && onSignup && (
+              <div style={{ marginTop: 6 }}>
+                <button type="button" className="auth-link" onClick={onSignup}>Create an account</button>
+              </div>
+            )}
+          </div>
+        )}
         <div className="field">
           <label htmlFor="forgot-email">Email</label>
           <input id="forgot-email" className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" autoComplete="username" autoFocus required />
@@ -234,7 +244,7 @@ function ResetForm({ email, onBack, onOtherEmail, onDone }) {
   return (
     <Shell title="Set a new password" subtitle="Enter the code from the email and choose a new password" footer={<button type="button" className="auth-link" onClick={onBack}>Back to sign in</button>}>
       <form onSubmit={submit}>
-        <Sent email={email} maybe />
+        <Sent email={email} />
         {info && !err && <div className="auth-ok">{info}</div>}
         {err && <div className="auth-error">{err}</div>}
         <div className="field">
@@ -439,7 +449,7 @@ export default function AuthGate() {
   if (!authStatus.mongoConnected) return <DbDown status={authStatus} onRetry={fetchStatus} />;
   const mode = authStatus.signup || 'off';
   if (view === 'signup' && mode !== 'off') return <SignupForm mode={mode} onLogin={(m) => go('login', m)} />;
-  if (view === 'forgot') return <ForgotForm email={email} onBack={(m) => go('login', m)} onSent={(m) => go('reset', m)} />;
+  if (view === 'forgot') return <ForgotForm email={email} onBack={(m) => go('login', m)} onSent={(m) => go('reset', m)} onSignup={mode !== 'off' ? () => go('signup') : undefined} />;
   if (view === 'reset' && email)
     return (
       <ResetForm
