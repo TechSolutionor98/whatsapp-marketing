@@ -621,7 +621,14 @@ export default function Conversations({ go }) {
     setPhoneOlder('');
     setReplyTo(null);
     setMenu(null);
-    loadThread(active, { reset: true });
+    // Opening a chat marks it read on this number — refresh the red counters on the tabs.
+    loadThread(active, { reset: true })
+      .then(() => {
+        if (!active) return;
+        loadAccounts();
+        loadThreads();
+      })
+      .catch(() => {});
   }, [active]);
 
   // Live refresh on inbound/outbound events.
@@ -814,6 +821,15 @@ export default function Conversations({ go }) {
               {a.phone ? ` · +${a.phone}` : ''}
             </span>
             {a.default && <span className="wa-tab-default" title="Default number — Conversations opens here. Change it on the WhatsApp Gateway page.">Default</span>}
+            {a.unread_chats > 0 && (
+              <span
+                className="wa-tab-unread"
+                title={`${a.unread_chats} unread chat${a.unread_chats === 1 ? '' : 's'}${a.unread_messages ? ` · ${a.unread_messages} new message${a.unread_messages === 1 ? '' : 's'}` : ''}`}
+                aria-label={`${a.unread_chats} unread chats`}
+              >
+                {a.unread_chats > 99 ? '99+' : a.unread_chats}
+              </span>
+            )}
             {a.sync && (
               <span className="wa-tab-sync-text">
                 {a.sync.fetching && a.sync.progress != null ? `${a.sync.progress}%` : a.sync.fetching ? 'Syncing…' : 'Saving…'}

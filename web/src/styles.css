@@ -4160,3 +4160,20 @@ tbody tr:hover {
 .wa-fwd-row.on { background: #eaf8ee; }
 .wa-fwd-row input { flex: none; width: 18px; height: 18px; accent-color: var(--wa-green); }
 .wa-fwd-name { min-width: 0; font-size: 15px; color: var(--wa-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Red unread counter on a number's tab: chats with new messages on that number. */
+.wa-tab-unread {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: #e5243b;
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 20px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 0 0 2px var(--surface-2);
+}
+.wa-tab.active .wa-tab-unread { box-shadow: 0 0 0 2px var(--surface); }

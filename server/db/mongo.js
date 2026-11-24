@@ -87,6 +87,8 @@ async function ensureIndexes() {
   // WhatsApp @lid identities: contacts keep their lid, and lid_map remembers lid -> real number/name.
   await col('contacts').createIndex({ lid: 1 }, { sparse: true });
   await col('contacts').createIndex({ jid: 1 }, { sparse: true });
+  // Unread chats per number (the red counter on each Conversations tab).
+  await col('contacts').createIndex({ ws: 1, unread: 1 });
   // Sending looks up a number's @lid (pool.js sendAddress).
   await col('lid_map').createIndex({ pn: 1 }, { sparse: true });
   // Product catalog (AI replies look products up by name/brand/category/sku).

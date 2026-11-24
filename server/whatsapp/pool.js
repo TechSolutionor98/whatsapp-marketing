@@ -819,6 +819,12 @@ export async function chatModifyOn(accountId, mod, jid) {
   }
 }
 
+// One more unread message in a chat — in total (unread) and on the number it came to
+// (unread_by.<phone>), so each number's tab can show its own red counter.
+function unreadInc(myPhone) {
+  return /^\d+$/.test(String(myPhone || '')) ? { unread: 1, [`unread_by.${myPhone}`]: 1 } : { unread: 1 };
+}
+
 // A reaction (👍 on a message) updates the message it points at, like WhatsApp shows it.
 async function applyReaction(msg) {
   const r = normalizeMessageContent(msg?.message)?.reactionMessage;
@@ -1057,7 +1063,9 @@ function reconcileContact(e, byPhone, byLid, w, ownerPhone) {
     if (push && push !== pnC.push_name) set.push_name = push;
     if (!pnC.name && lidC.name) set.name = lidC.name; // a name the user gave in this app (import/edit)
     if (lidC.pinned) set.pinned = 1;
-    w.update(pnC, { set, unset: { lid_only: '' }, inc: lidC.unread ? { unread: lidC.unread } : {} });
+    const inc = lidC.unread ? { unread: lidC.unread } : {};
+    for (const [ph, n] of Object.entries(lidC.unread_by || {})) if (n > 0) inc[`unread_by.${ph}`] = n; // per-number unread moves too
+    w.update(pnC, { set, unset: { lid_only: '' }, inc });
     w.remove(lidC);
     applySet(pnC, set);
     delete pnC.lid_only;
@@ -1709,7 +1717,7 @@ async function ingestPool(accountId, { messages, type }) {
           { upsert: true }
         );
         if (r.upsertedCount) {
-          await db.contacts().updateOne({ _id: gc._id }, { $set: msg.key.fromMe ? { last_outbound_at: nowIso() } : { last_inbound_at: nowIso() }, ...(msg.key.fromMe ? {} : { $inc: { unread: 1 } }) });
+          await db.contacts().updateOne({ _id: gc._id }, { $set: msg.key.fromMe ? { last_outbound_at: nowIso() } : { last_inbound_at: nowIso() }, ...(msg.key.fromMe ? {} : { $inc: unreadInc(myPhone) }) });
           emit(msg.key.fromMe ? 'message:out' : 'message:in', { contactId: String(gc._id) });
         }
         continue;
@@ -1763,7 +1771,7 @@ async function ingestPool(accountId, { messages, type }) {
         { upsert: true }
       );
       if (!r.upsertedCount) continue; // already stored
-      await db.contacts().updateOne({ _id: contact._id }, { $set: { last_inbound_at: nowIso() }, $inc: { unread: 1 } });
+      await db.contacts().updateOne({ _id: contact._id }, { $set: { last_inbound_at: nowIso() }, $inc: unreadInc(myPhone) });
       if (type !== 'notify') {
         // Caught-up offline message: show it, but don't fire auto-replies/handoffs for backlog.
         emit('message:in', { contactId: String(contact._id) });

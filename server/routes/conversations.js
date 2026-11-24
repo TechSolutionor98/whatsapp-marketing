@@ -40,8 +40,35 @@ async function accountMatch(account) {
 
 // The WhatsApp numbers that own conversation tabs — one tab per unique phone (numbers.js).
 conversations.get('/accounts', async (_req, res) => {
-  res.json(await listNumbers());
+  const [list, unread] = await Promise.all([listNumbers(), unreadByNumber().catch(() => ({}))]);
+  res.json(list.map((a) => ({ ...a, unread_chats: unread[a.phone]?.chats || 0, unread_messages: unread[a.phone]?.messages || 0 })));
 });
+
+// Unread chats per number — the red counter on each tab. A chat counts on the number it was
+// messaged on (unread_by.<phone>); an unread chat from before that was tracked counts on the
+// number of its newest incoming message.
+async function unreadByNumber() {
+  const out = {};
+  const add = (phone, n) => {
+    if (!phone || !(n > 0)) return;
+    out[phone] ||= { chats: 0, messages: 0 };
+    out[phone].chats += 1;
+    out[phone].messages += n;
+  };
+  const list = await db.contacts().find({ unread: { $gt: 0 } }, { projection: { unread: 1, unread_by: 1 } }).limit(3000).toArray();
+  for (const c of list) {
+    const per = Object.entries(c.unread_by || {}).filter(([, n]) => n > 0);
+    if (per.length) {
+      for (const [phone, n] of per) add(phone, n);
+      continue;
+    }
+    const [last] = await db.messages().find({ contact_id: String(c._id), direction: 'in' }, { projection: { account_phone: 1 } }).sort({ created_at: -1 }).limit(1).toArray();
+    add(last?.account_phone, c.unread);
+  }
+  return out;
+}
+// This chat's unread count on one number (older chats without per-number counts: their total).
+const unreadOn = (c, phone) => (c.unread_by && Object.keys(c.unread_by).length ? c.unread_by[phone] || 0 : c.unread || 0);
 
 // Make a number the default one (Conversations opens on its tab).
 conversations.put('/accounts/:id/default', async (req, res) => {
@@ -218,7 +245,7 @@ conversations.get('/', async (req, res) => {
   const byId = new Map(contactsList.map((c) => [String(c._id), c]));
   const counts = { all: 0, unread: 0, groups: 0, handoff: 0 };
   const passes = (c, handoff) =>
-    filter === 'handoff' ? !!handoff : filter === 'groups' ? !!c.is_group : filter === 'unread' ? (c.unread || 0) > 0 : true;
+    filter === 'handoff' ? !!handoff : filter === 'groups' ? !!c.is_group : filter === 'unread' ? unreadOn(c, phoneOfTab) > 0 : true;
 
   const rows = [];
   for (const s of summaries) {
@@ -226,7 +253,7 @@ conversations.get('/', async (req, res) => {
     if (!c) continue;
     const handoff = handoffFor(c, phoneOfTab); // only when THIS number's chat needs a person
     counts.all++;
-    if ((c.unread || 0) > 0) counts.unread++;
+    if (unreadOn(c, phoneOfTab) > 0) counts.unread++;
     if (c.is_group) counts.groups++;
     if (handoff) counts.handoff++;
     if (!passes(c, handoff) || rows.length >= 300) continue;
@@ -242,7 +269,7 @@ conversations.get('/', async (req, res) => {
       is_group: c.is_group ? 1 : 0,
       lid_only: c.lid_only ? 1 : 0, // WhatsApp hid this contact's number (@lid) — don't show the lid as a phone
       pinned: c.pinned ? 1 : 0,
-      unread: c.unread || 0,
+      unread: unreadOn(c, phoneOfTab),
       last_inbound_at: c.last_inbound_at,
       last_outbound_at: c.last_outbound_at,
       last_message: s.last_message,
@@ -322,7 +349,20 @@ conversations.get('/:contactId', async (req, res) => {
   const has_more = page.length > limit;
   const messages = page.slice(0, limit).reverse();
   // Opening a thread marks it read.
-  if (contact.unread && !req.query.before) db.contacts().updateOne({ _id }, { $set: { unread: 0 } }).catch(() => {});
+  const readPhone = accountGroup(account).phone || (await tabPhone(account));
+  if (contact.unread && !req.query.before) {
+    if (/^\d+$/.test(String(readPhone || ''))) {
+      // Read on THIS number: its counter goes to 0; the chat stays unread on other numbers.
+      await db.contacts()
+        .updateOne({ _id }, [
+          { $set: { unread_by: { $mergeObjects: [{ $ifNull: ['$unread_by', {}] }, { [readPhone]: 0 }] } } },
+          { $set: { unread: { $sum: { $map: { input: { $objectToArray: '$unread_by' }, in: '$$this.v' } } } } },
+        ])
+        .catch(() => {});
+    } else {
+      await db.contacts().updateOne({ _id }, { $set: { unread: 0 } }).catch(() => {});
+    }
+  }
   // Admins-only group (or a community itself) for THIS linked number → UI shows WhatsApp's
   // "Only admins can send messages" instead of the message box.
   const { phone } = accountGroup(account);
