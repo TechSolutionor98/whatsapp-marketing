@@ -14,7 +14,7 @@
     "setup": "npm install && npm --prefix web install"
   },
   "dependencies": {
-    "baileys": "^6.7.9",
+    "baileys": "7.0.0-rc14",
     "bcryptjs": "^2.4.3",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",

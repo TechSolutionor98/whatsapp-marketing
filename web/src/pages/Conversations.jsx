@@ -128,6 +128,30 @@ const PinIcon = () => (
 );
 
 // Get the header's action slot so page-specific controls render up in the top bar.
+// History sync for one number, shown as a loading line under its tab: first WhatsApp sends
+// the history (its own %), then the server saves what arrived (can take minutes on a big phone).
+function syncLabel(s) {
+  if (!s) return '';
+  if (s.fetching) return s.progress != null ? `Syncing chats from WhatsApp… ${s.progress}%` : 'Syncing chats from WhatsApp…';
+  const saved = s.saved ? ` · ${s.saved.toLocaleString()} messages so far` : '';
+  return `Saving synced chats…${s.pending > 1 ? ` ${s.pending} batches left` : ''}${saved}`;
+}
+function TabSync({ sync }) {
+  const pct = sync.fetching && sync.progress != null ? sync.progress : null;
+  return (
+    <span
+      className="wa-tab-sync"
+      role="progressbar"
+      aria-label={syncLabel(sync)}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={pct ?? undefined}
+    >
+      <span className={`wa-tab-sync-bar${pct == null ? ' indeterminate' : ''}`} style={pct == null ? undefined : { width: `${Math.max(3, pct)}%` }} />
+    </span>
+  );
+}
+
 function useHeaderSlot() {
   const [node, setNode] = useState(null);
   useEffect(() => {
@@ -489,10 +513,10 @@ export default function Conversations({ go }) {
         {[...accounts].sort((a, b) => (b.default ? 1 : 0) - (a.default ? 1 : 0)).map((a) => (
           <button
             key={a.id}
-            className={`wa-tab ${account === a.id ? 'active' : ''} ${a.connected ? '' : 'off'}`}
+            className={`wa-tab ${account === a.id ? 'active' : ''} ${a.connected ? '' : 'off'}${a.sync ? ' syncing' : ''}`}
             onClick={() => setAccount(a.id)}
             onDoubleClick={() => renameTab(a)}
-            title={`${a.phone ? '+' + a.phone : 'Not linked'} · double-click to rename`}
+            title={`${a.phone ? '+' + a.phone : 'Not linked'}${a.sync ? ` · ${syncLabel(a.sync)}` : ''} · double-click to rename`}
           >
             <span className={`wa-tab-dot ${a.connected ? 'on' : 'connecting'}`} title={a.connected ? 'Connected' : 'Connecting…'} />
             <span className="wa-tab-label">
@@ -500,7 +524,12 @@ export default function Conversations({ go }) {
               {a.phone ? ` · +${a.phone}` : ''}
             </span>
             {a.default && <span className="wa-tab-default" title="Default number — Conversations opens here. Change it on the WhatsApp Gateway page.">Default</span>}
-            {a.syncing && <span className="wa-spin" title="Syncing chats…" />}
+            {a.sync && (
+              <span className="wa-tab-sync-text">
+                {a.sync.fetching && a.sync.progress != null ? `${a.sync.progress}%` : a.sync.fetching ? 'Syncing…' : 'Saving…'}
+              </span>
+            )}
+            {a.sync && <TabSync sync={a.sync} />}
           </button>
         ))}
         {can('gateway') && <button
@@ -523,8 +552,8 @@ export default function Conversations({ go }) {
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
-          {activeAcct?.syncing && threads.length > 0 && (
-            <div className="sync-banner"><span className="wa-spin" /> Syncing more chats…</div>
+          {activeAcct?.sync && threads.length > 0 && (
+            <div className="sync-banner"><span className="wa-spin" /> {syncLabel(activeAcct.sync)}</div>
           )}
           {!threadsLoaded ? (
             <Loading label="Loading chats…" minHeight={200} />

@@ -1,14 +1,14 @@
 import fs from 'node:fs';
 import QRCode from 'qrcode';
-import pino from 'pino';
 import makeWASocket, {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   DisconnectReason,
   Browsers,
+  isJidStatusBroadcast,
 } from 'baileys';
 import { getWaVersion } from './version.js';
-import { registerMainNumber, attachConversationHandlers, onConversationOpen, historyHook, ingestMain } from './pool.js';
+import { registerMainNumber, attachConversationHandlers, onConversationOpen, historyHook, ingestMain, waLogger, storedMessageFor } from './pool.js';
 
 import { WA_AUTH_DIR } from '../config.js';
 import { db, audit, getSetting, setSetting } from '../db/mongo.js';
@@ -20,8 +20,6 @@ import { DEFAULT_WS, runInWs, inWs } from '../tenant.js';
 // The original main number belongs to the default workspace (the business that used the app
 // before workspaces). Other workspaces link their numbers on their own Gateway page (pool.js).
 const WS = DEFAULT_WS;
-
-const logger = pino({ level: 'silent' });
 
 const state = {
   status: 'disconnected', // disconnected | connecting | qr | connected
@@ -95,7 +93,8 @@ async function connectMain() {
     sock = makeWASocket({
       version,
       auth: authState,
-      logger,
+      // Errors go to Audit Logs tagged with this number (it logged nothing before: 'silent').
+      logger: waLogger('main'),
       // Same settings as linked conversation numbers (pool.js): pinned 'Ubuntu' identity —
       // with history sync on, WhatsApp closes Mac OS/Windows-named clients with 428 before the QR.
       browser: Browsers.ubuntu('Desktop'),
@@ -105,14 +104,10 @@ async function connectMain() {
       // read WhatsApp's number table + inline recent-chats batch from each notification.
       syncFullHistory: true,
       shouldSyncHistoryMessage: historyHook('main', WS),
+      // Contacts' Status updates: never shown here; decrypting them only filled the error log.
+      shouldIgnoreJid: (jid) => isJidStatusBroadcast(jid),
       // Answer recipients' retry requests so our messages decrypt (avoids "Waiting for this message").
-      getMessage: inWs(WS, async (key) => {
-        try {
-          const m = await db.messages().findOne({ wa_message_id: key?.id });
-          if (m?.body) return { conversation: m.body };
-        } catch {}
-        return undefined;
-      }),
+      getMessage: inWs(WS, storedMessageFor),
     });
 
     sock.ev.on('creds.update', saveCreds);

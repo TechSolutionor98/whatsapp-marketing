@@ -2060,6 +2060,44 @@ tbody tr:hover {
 /* Tab dot: connecting state */
 .wa-tab-dot.connecting { background: var(--warn); }
 
+/* History-sync loading line along the bottom of a number's tab (+ its % / "Saving…"). */
+.wa-tab { position: relative; }
+.wa-tab-sync-text {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--brand-700);
+  font-variant-numeric: tabular-nums;
+}
+.wa-tab-sync {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 4px;
+  height: 3px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+  pointer-events: none;
+}
+.wa-tab-sync-bar {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--brand);
+  transition: width 0.6s ease;
+}
+.wa-tab-sync-bar.indeterminate {
+  width: 35%;
+  animation: wa-tab-sync-slide 1.3s ease-in-out infinite;
+}
+@keyframes wa-tab-sync-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(290%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wa-tab-sync-bar.indeterminate { animation: none; width: 100%; opacity: 0.55; }
+}
+
 /* ---- WhatsApp Gateway: every linked number, with the default one ---- */
 .num-card { margin-top: 18px; }
 .num-card .card-head { flex-wrap: wrap; }

@@ -4,7 +4,7 @@
 // conversation numbers (pool.js) and one of them is its default.
 import { db, oid, getSetting } from './db/mongo.js';
 import { getWaState } from './whatsapp/client.js';
-import { poolState, isAccountConnected } from './whatsapp/pool.js';
+import { poolState, isAccountConnected, syncStateOf } from './whatsapp/pool.js';
 import { DEFAULT_WS, currentWs } from './tenant.js';
 
 // Does this workspace have the original main number?
@@ -62,7 +62,7 @@ export async function listNumbers() {
           role: 'main',
           auto_reply: !!getSetting('autoReplyEnabled', false),
           catalog_id: getSetting('mainCatalogId', null),
-          syncing: !!wa.syncing,
+          sync: syncStateOf('main'), // history-sync progress → the loading line under the tab
           kind: 'qr',
         },
       ]
@@ -83,7 +83,7 @@ export async function listNumbers() {
       role,
       auto_reply: a ? !!a.auto_reply : !!d.auto_reply,
       catalog_id: d.catalog_id ?? null,
-      syncing: !!a?.syncing,
+      sync: a?.sync || null,
       kind: d.kind === 'cloud' ? 'cloud' : 'qr', // official WhatsApp API, or linked by QR
       ...(d.kind === 'cloud'
         ? { cloud: { verified_name: d.cloud?.verified_name || '', quality: d.cloud?.quality || '', webhook_ok: !!(d.cloud?.webhook_verified_at || d.cloud?.last_event_at), error: d.cloud?.error || '' } }
@@ -99,7 +99,7 @@ export async function listNumbers() {
     if (!cur) { byPhone.set(key, acc); continue; }
     const merged = {
       auto_reply: cur.auto_reply || acc.auto_reply,
-      syncing: cur.syncing || acc.syncing,
+      sync: cur.sync || acc.sync || null,
       connected: cur.connected || acc.connected,
     };
     let rep = cur;
@@ -113,7 +113,8 @@ export async function listNumbers() {
   const list = [...byPhone.values()];
   const defPhone = getSetting('defaultConvPhone', null);
   const def = list.find((a) => defPhone && a.phone === defPhone) || list[0];
-  return list.map((a) => ({ ...a, default: a === def }));
+  // `syncing` (older pages): true while WhatsApp is sending history OR it's still being saved.
+  return list.map((a) => ({ ...a, syncing: !!a.sync, default: a === def }));
 }
 
 // The linked session a workspace without a main number sends from when nothing else is
