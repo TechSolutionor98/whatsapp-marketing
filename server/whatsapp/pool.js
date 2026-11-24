@@ -738,6 +738,87 @@ function mediaFieldsOf(msg) {
   return {};
 }
 
+// What WhatsApp shows around a message besides its content: the message it replies to
+// (quoted, above the text), "Forwarded", and in groups who sent it (its jid is also needed to
+// reply to / react to / pin that message). From the message's contextInfo.
+function extrasOf(msg, myPhone, accountId) {
+  const m = normalizeMessageContent(msg?.message);
+  const out = {};
+  if (msg?.key?.participant) out.sender_jid = msg.key.participant;
+  if (!m) return out;
+  const holder = Object.values(m).find((v) => v && typeof v === 'object' && v.contextInfo);
+  const ctx = holder?.contextInfo;
+  if (!ctx) return out;
+  if (ctx.isForwarded) out.forwarded = 1;
+  if (ctx.stanzaId && ctx.quotedMessage) {
+    const who = String(ctx.participant || '');
+    const meLid = ctxOf(accountId)?.sock?.user?.lid;
+    const mine = !!who && ((myPhone && jidToPhone(who) === myPhone) || (meLid && jidToPhone(who) === jidToPhone(meLid)));
+    out.quoted = { id: ctx.stanzaId, body: textOf({ message: ctx.quotedMessage }).slice(0, 300), participant: who, from_me: mine ? 1 : 0 };
+  }
+  return out;
+}
+
+// "Pin for everyone" / "Unpin" from either side (the phone, the contact, or this app) →
+// the pinned message shows in a bar under the chat header until it expires.
+async function applyPin(msg) {
+  const p = normalizeMessageContent(msg?.message)?.pinInChatMessage;
+  if (!p?.key?.id) return false;
+  const secs = Number(normalizeMessageContent(msg.message)?.messageContextInfo?.messageAddOnDurationInSecs) || 7 * 86400;
+  if (p.type === 1) {
+    await db.messages().updateOne({ wa_message_id: p.key.id }, { $set: { pinned_at: nowIso(), pinned_until: new Date(Date.now() + secs * 1000).toISOString() } });
+  } else {
+    await db.messages().updateOne({ wa_message_id: p.key.id }, { $unset: { pinned_at: '', pinned_until: '' } });
+  }
+  return true;
+}
+
+// The WhatsApp key of a stored message: needed to reply to it, react, pin, star or delete it.
+// Incoming group messages also need the sender (stored as sender_jid since 2026-11-24);
+// older ones without it get null for actions that need it.
+export function messageKeyOf(doc, contact) {
+  const remoteJid = doc.chat_jid || chatJidOf(contact);
+  const key = { remoteJid, fromMe: doc.direction === 'out', id: doc.wa_message_id };
+  if (remoteJid.endsWith('@g.us') && doc.direction === 'in') {
+    if (!doc.sender_jid) return null;
+    key.participant = doc.sender_jid;
+  }
+  return key;
+}
+// The stored message as WhatsApp content (photo/document: the original media; else its text).
+export async function contentOf(doc) {
+  if (doc.media_raw) {
+    try {
+      const w = JSON.parse(doc.media_raw, BufferJSON.reviver);
+      if (w?.message && Object.keys(w.message).length) return w.message;
+    } catch {}
+  }
+  return doc.body ? { conversation: doc.body } : null;
+}
+// Send any content (text with a quote, a reaction, a pin, a delete, a forward) from one of this
+// workspace's QR-linked numbers into a chat. Returns the WhatsApp id and the address used.
+// `exact`: an action on an existing message (react, pin, delete) goes to that message's own
+// chat address, not re-resolved.
+export async function sendToChat(accountId, jid, content, { exact = false, ...options } = {}) {
+  const a = ctxOf(accountId);
+  if (!a?.sock || a.status !== 'connected') throw new Error('That number is not connected');
+  const to = exact ? jid : await sendAddress(accountId, jid);
+  if (content?.text) await a.sock.sendPresenceUpdate('composing', to).catch(() => {});
+  const sent = await a.sock.sendMessage(to, content, options);
+  return { id: sent?.key?.id || null, jid: to };
+}
+// Star / delete-for-me on the linked phone too (WhatsApp syncs these between your devices).
+export async function chatModifyOn(accountId, mod, jid) {
+  const a = ctxOf(accountId);
+  if (!a?.sock || a.status !== 'connected') return false;
+  try {
+    await a.sock.chatModify(mod, jid);
+    return true;
+  } catch {
+    return false; // app-state not synced yet — the change still applies in this app
+  }
+}
+
 // A reaction (👍 on a message) updates the message it points at, like WhatsApp shows it.
 async function applyReaction(msg) {
   const r = normalizeMessageContent(msg?.message)?.reactionMessage;
@@ -1610,6 +1691,10 @@ async function ingestPool(accountId, { messages, type }) {
         emit('message:status', {});
         continue;
       }
+      if (await applyPin(msg)) {
+        emit('message:status', {});
+        continue;
+      }
       const body = textOf(msg).trim();
 
       // Group message: store for the thread (conversation numbers only), no lead automation.
@@ -1620,7 +1705,7 @@ async function ingestPool(accountId, { messages, type }) {
         if (!gc || !body) continue;
         const r = await db.messages().updateOne(
           { wa_message_id: id },
-          { $set: { account_phone: myPhone, chat_jid: msg.key?.remoteJid || null, ...mediaFieldsOf(msg) }, $setOnInsert: { contact_id: String(gc._id), campaign_id: null, account_id: accountId, direction: msg.key.fromMe ? 'out' : 'in', body, sender: msg.key.fromMe ? '' : msg.pushName || '', status: msg.key.fromMe ? 'sent' : 'read', wa_message_id: id, synced: 1, created_at: msgTime(msg), day_key: dayKey() } },
+          { $set: { account_phone: myPhone, chat_jid: msg.key?.remoteJid || null, ...mediaFieldsOf(msg), ...extrasOf(msg, myPhone, accountId) }, $setOnInsert: { contact_id: String(gc._id), campaign_id: null, account_id: accountId, direction: msg.key.fromMe ? 'out' : 'in', body, sender: msg.key.fromMe ? '' : msg.pushName || '', status: msg.key.fromMe ? 'sent' : 'read', wa_message_id: id, synced: 1, created_at: msgTime(msg), day_key: dayKey() } },
           { upsert: true }
         );
         if (r.upsertedCount) {
@@ -1661,7 +1746,7 @@ async function ingestPool(accountId, { messages, type }) {
         if (!body) continue;
         const r = await db.messages().updateOne(
           { wa_message_id: id },
-          { $set: { account_phone: myPhone, chat_jid: msg.key?.remoteJid || null, ...mediaFieldsOf(msg) }, $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'out', body, status: 'sent', wa_message_id: id, created_at: msgTime(msg), day_key: dayKey() } },
+          { $set: { account_phone: myPhone, chat_jid: msg.key?.remoteJid || null, ...mediaFieldsOf(msg), ...extrasOf(msg, myPhone, accountId) }, $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'out', body, status: 'sent', wa_message_id: id, created_at: msgTime(msg), day_key: dayKey() } },
           { upsert: true }
         );
         if (r.upsertedCount) {
@@ -1674,7 +1759,7 @@ async function ingestPool(accountId, { messages, type }) {
       if (!body) continue;
       const r = await db.messages().updateOne(
         { wa_message_id: id },
-        { $set: { account_phone: myPhone, chat_jid: msg.key?.remoteJid || null, ...mediaFieldsOf(msg) }, $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'in', body, status: 'read', wa_message_id: id, created_at: msgTime(msg), day_key: dayKey() } },
+        { $set: { account_phone: myPhone, chat_jid: msg.key?.remoteJid || null, ...mediaFieldsOf(msg), ...extrasOf(msg, myPhone, accountId) }, $setOnInsert: { contact_id: String(contact._id), campaign_id: null, account_id: accountId, direction: 'in', body, status: 'read', wa_message_id: id, created_at: msgTime(msg), day_key: dayKey() } },
         { upsert: true }
       );
       if (!r.upsertedCount) continue; // already stored
@@ -1820,7 +1905,7 @@ async function ingestPoolHistory(accountId, { messages, chats }) {
         updateOne: {
           filter: { wa_message_id: id },
           update: {
-            $set: { account_phone: myPhone, chat_jid: msg.key?.remoteJid || null, ...mediaFieldsOf(msg) },
+            $set: { account_phone: myPhone, chat_jid: msg.key?.remoteJid || null, ...mediaFieldsOf(msg), ...extrasOf(msg, myPhone, accountId) },
             $setOnInsert: { contact_id: contactId, campaign_id: null, account_id: accountId, direction: dir, body, sender, status: dir === 'out' ? 'sent' : 'read', wa_message_id: id, synced: 1, created_at: ts, day_key: ts.slice(0, 10) },
           },
           upsert: true,

@@ -67,11 +67,31 @@ export async function applyReceipt(waId, status) {
   }
 }
 
+// "Delete for everyone" — by the contact, by you on the phone, or from this app (Baileys
+// emits REVOKE, stub type 1, with message: null). Like WhatsApp: the bubble stays and says the
+// message was deleted; its text and media are gone.
+export async function markDeleted(waId) {
+  if (!waId || !isMongoUp()) return;
+  try {
+    const r = await db.messages().updateOne(
+      { wa_message_id: waId, deleted: { $ne: 1 } },
+      { $set: { deleted: 1, deleted_at: new Date().toISOString(), body: '', caption: '' }, $unset: { media_raw: '', thumb: '', quoted: '', pinned_at: '', pinned_until: '', reactions: '' } }
+    );
+    if (r.modifiedCount) emit('message:status', { waId });
+  } catch {
+    /* ignore */
+  }
+}
+
 // Attach a messages.update listener to any Baileys socket (main or pool), inside the
 // workspace that number belongs to.
 export function attachReceipts(sock, ws) {
   sock.ev.on('messages.update', inWs(ws, (updates) => {
     for (const u of updates || []) {
+      if (u?.update?.messageStubType === 1 && u.update.message === null) {
+        markDeleted(u.key?.id);
+        continue;
+      }
       if (!u?.key?.fromMe) continue;
       const st = u.update?.status;
       if (st === undefined || st === null) continue;

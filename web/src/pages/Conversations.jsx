@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
@@ -202,6 +202,158 @@ const PinIcon = () => (
   </svg>
 );
 
+// ---- Message menu (WhatsApp's: react, reply, copy, forward, pin, star, delete) ----
+const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
+const MORE_REACTIONS = ['🔥', '🎉', '👏', '😍', '🤔', '😡', '👌', '✅', '💯', '🙌', '😊', '😅', '🤝', '💐', '⭐', '👀', '😎', '🥳', '🤣', '😇', '💪', '🙂', '👋', '😘'];
+const ico = { viewBox: '0 0 24 24', width: 20, height: 20, fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true };
+const ReplyIco = () => (<svg {...ico}><path d="M9 14 4 9l5-5" /><path d="M4 9h10a6 6 0 0 1 6 6v4" /></svg>);
+const ForwardIco = () => (<svg {...ico}><path d="m15 14 5-5-5-5" /><path d="M20 9H10a6 6 0 0 0-6 6v4" /></svg>);
+const SmileIco = () => (<svg {...ico}><circle cx="12" cy="12" r="9" /><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0" /><path d="M9 9.5h.01M15 9.5h.01" strokeWidth="2.6" /></svg>);
+const StarIco = ({ filled }) => (<svg {...ico} fill={filled ? 'currentColor' : 'none'}><path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z" /></svg>);
+const CaretIco = () => (<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="m6.7 9.3 5.3 5.3 5.3-5.3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>);
+const isPinnedNow = (m) => !!m?.pinned_until && new Date(m.pinned_until).getTime() > Date.now();
+// What a message says, as text (its caption for media; nothing once deleted).
+const msgText = (m) => (m?.deleted ? '' : (m?.media === 1 || m?.type === 'location' ? m?.caption : m?.body) || '');
+const msgLabel = (m) => msgText(m) || (m?.deleted ? 'Deleted message' : m?.body || 'Message');
+
+function MenuItem({ icon, label, onClick, danger }) {
+  return (
+    <button role="menuitem" className={`wa-menu-item${danger ? ' danger' : ''}`} onClick={onClick}>
+      <span className="wa-menu-ico">{icon}</span>
+      {label}
+    </button>
+  );
+}
+
+function MessageMenu({ at, m, can, myReaction, onReact, onAction, onClose }) {
+  const ref = useRef(null);
+  const [pos, setPos] = useState(null);
+  const [more, setMore] = useState(false);
+  const [pinStep, setPinStep] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const left = Math.max(8, Math.min(at.x, window.innerWidth - r.width - 8));
+    const top = at.y + r.height > window.innerHeight - 8 ? Math.max(8, at.top - r.height - 4) : at.y;
+    setPos({ left, top });
+  }, [at.x, at.y, at.top, more, pinStep]);
+  useEffect(() => {
+    const down = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose(); };
+    const key = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('mousedown', down);
+    document.addEventListener('keydown', key);
+    window.addEventListener('resize', onClose);
+    ref.current?.querySelector('button')?.focus();
+    return () => {
+      document.removeEventListener('mousedown', down);
+      document.removeEventListener('keydown', key);
+      window.removeEventListener('resize', onClose);
+    };
+  }, [onClose]);
+  const react = (e) => onReact(myReaction === e ? '' : e);
+  return (
+    <div ref={ref} className="wa-menu" role="menu" aria-label="Message options" style={pos ? { left: pos.left, top: pos.top } : { left: at.x, top: at.y, visibility: 'hidden' }}>
+      {can.react && (
+        <div className="wa-react-bar" role="group" aria-label="React">
+          {QUICK_REACTIONS.map((e) => (
+            <button key={e} className={`wa-react ${myReaction === e ? 'on' : ''}`} onClick={() => react(e)} aria-label={`React with ${e}`}>{e}</button>
+          ))}
+          <button className={`wa-react more ${more ? 'on' : ''}`} onClick={() => setMore((v) => !v)} aria-label="More reactions" aria-expanded={more}>
+            <Icon.plus />
+          </button>
+        </div>
+      )}
+      {can.react && more && (
+        <div className="wa-react-grid">
+          {MORE_REACTIONS.map((e) => (
+            <button key={e} className={`wa-react ${myReaction === e ? 'on' : ''}`} onClick={() => react(e)} aria-label={`React with ${e}`}>{e}</button>
+          ))}
+        </div>
+      )}
+      <div className="wa-menu-list">
+        {pinStep ? (
+          <>
+            <div className="wa-menu-label">Pin for everyone, for:</div>
+            {[[1, '24 hours'], [7, '7 days'], [30, '30 days']].map(([d, l]) => (
+              <MenuItem key={d} icon={<PinIcon />} label={l} onClick={() => onAction('pin', { pin: true, days: d })} />
+            ))}
+          </>
+        ) : (
+          <>
+            {can.reply && <MenuItem icon={<ReplyIco />} label="Reply" onClick={() => onAction('reply')} />}
+            {can.copy && <MenuItem icon={<Icon.copy />} label="Copy" onClick={() => onAction('copy')} />}
+            {can.react && <MenuItem icon={<SmileIco />} label="React" onClick={() => setMore(true)} />}
+            {can.forward && <MenuItem icon={<ForwardIco />} label="Forward" onClick={() => onAction('forward')} />}
+            {can.pin && (isPinnedNow(m)
+              ? <MenuItem icon={<PinIcon />} label="Unpin" onClick={() => onAction('pin', { pin: false })} />
+              : <MenuItem icon={<PinIcon />} label="Pin" onClick={() => setPinStep(true)} />)}
+            <MenuItem icon={<StarIco filled={!!m.starred} />} label={m.starred ? 'Unstar' : 'Star'} onClick={() => onAction('star', { star: !m.starred })} />
+            <div className="wa-menu-sep" />
+            <MenuItem icon={<Icon.trash />} label="Delete" danger onClick={() => onAction('delete')} />
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Forward a message to up to 5 chats of the same number.
+function ForwardModal({ account, contactId, m, onClose, onDone }) {
+  const { toast } = useApp();
+  const [list, setList] = useState(null);
+  const [q, setQ] = useState('');
+  const [picked, setPicked] = useState([]);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    api.get(`/conversations?account=${encodeURIComponent(account)}`)
+      .then((r) => setList(Array.isArray(r) ? r : r.rows || []))
+      .catch(() => setList([]));
+  }, [account]);
+  const needle = q.trim().toLowerCase();
+  const shown = (list || []).filter((t) => !needle || chatTitle(t).toLowerCase().includes(needle) || (t.phone || '').includes(q.trim()) || (t.push_name || '').toLowerCase().includes(needle));
+  const toggle = (id) => setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : p.length >= 5 ? p : [...p, id]));
+  async function send() {
+    setBusy(true);
+    try {
+      const r = await api.post(`/conversations/${contactId}/messages/${m.id}/forward`, { account, to: picked });
+      toast(`Forwarded to ${r.sent} chat${r.sent === 1 ? '' : 's'}${r.skipped?.length ? ` — not to ${r.skipped.join(', ')}` : ''}`, 'success');
+      onDone();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+    setBusy(false);
+  }
+  return (
+    <Modal
+      title="Forward message to"
+      onClose={onClose}
+      footer={
+        <>
+          <span className="muted" style={{ marginRight: 'auto' }}>{picked.length ? `${picked.length} selected` : 'Up to 5 chats'}</span>
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn primary" disabled={!picked.length || busy} onClick={send}><ForwardIco /> {busy ? 'Forwarding…' : 'Forward'}</button>
+        </>
+      }
+    >
+      <div className="wa-fwd-preview">{msgLabel(m)}</div>
+      <div className="wa-search" style={{ margin: '12px 0' }}>
+        <Icon.search />
+        <input placeholder="Search chats" aria-label="Search chats" value={q} onChange={(e) => setQ(e.target.value)} autoFocus />
+      </div>
+      <div className="wa-fwd-list">
+        {list === null ? <Loading label="Loading chats…" minHeight={120} /> : shown.length === 0 ? <div className="muted" style={{ padding: 16 }}>No chats</div> : shown.map((t) => (
+          <label key={t.id} className={`wa-fwd-row ${picked.includes(t.id) ? 'on' : ''}`}>
+            <input type="checkbox" checked={picked.includes(t.id)} onChange={() => toggle(t.id)} disabled={!picked.includes(t.id) && picked.length >= 5} />
+            <ChatAvatar c={t} size="md" />
+            <span className="wa-fwd-name">{chatTitle(t)}{pushName(t) ? <span className="wa-row-push"> {pushName(t)}</span> : null}</span>
+          </label>
+        ))}
+      </div>
+    </Modal>
+  );
+}
+
 // History sync for one number, shown as a loading line under its tab: first WhatsApp sends
 // the history (its own %), then the server saves what arrived (can take minutes on a big phone).
 function syncLabel(s) {
@@ -271,6 +423,13 @@ export default function Conversations({ go }) {
   const restoreRef = useRef(null); // scroll position to restore after prepending older messages
   const olderBusy = useRef(false);
   const [phoneOlder, setPhoneOlder] = useState(''); // '' | 'loading' | 'none'
+  const [menu, setMenu] = useState(null); // message menu: { m, at: { x, y, top } }
+  const [replyTo, setReplyTo] = useState(null); // the message being replied to (quoted)
+  const [delMsg, setDelMsg] = useState(null); // "Delete message?" dialog
+  const [fwdMsg, setFwdMsg] = useState(null); // forward picker
+  const [flash, setFlash] = useState(null); // briefly highlight a message we jumped to
+  const composeRef = useRef(null);
+  const closeMenu = useCallback(() => setMenu(null), []);
 
   // Numbers are linked/unlinked on the WhatsApp Gateway page; here they're only tabs. Opens on
   // the default number; if the open tab's number was unlinked, goes back to the default.
@@ -460,6 +619,8 @@ export default function Conversations({ go }) {
   }, [account]);
   useEffect(() => {
     setPhoneOlder('');
+    setReplyTo(null);
+    setMenu(null);
     loadThread(active, { reset: true });
   }, [active]);
 
@@ -502,8 +663,9 @@ export default function Conversations({ go }) {
     if (!draft.trim() || !thread) return;
     setSending(true);
     try {
-      await api.post(`/conversations/${thread.contact.id}/reply`, { body: draft, account });
+      await api.post(`/conversations/${thread.contact.id}/reply`, { body: draft, account, ...(replyTo ? { quoted_id: replyTo.id } : {}) });
       setDraft('');
+      setReplyTo(null);
       stickRef.current = true; // jump to the message just sent
       loadThread(thread.contact.id);
       loadThreads();
@@ -511,6 +673,94 @@ export default function Conversations({ go }) {
       toast(e.message, 'error');
     }
     setSending(false);
+  }
+
+  // ---- message menu actions ----
+  async function msgAction(m, action, payload = {}) {
+    try {
+      await api.post(`/conversations/${thread.contact.id}/messages/${m.id}/${action}`, { account, ...payload });
+      loadThread(thread.contact.id);
+      loadThreads();
+      return true;
+    } catch (e) {
+      toast(e.message, 'error');
+      return false;
+    }
+  }
+  // Who wrote a message, as WhatsApp labels it in a quote.
+  function authorOf(m) {
+    if (!m || m.direction === 'out') return 'You';
+    if (thread?.contact.is_group) return m.sender || (m.sender_jid ? fmtPhone(m.sender_jid.split('@')[0]) : 'Someone');
+    return chatTitle(thread?.contact);
+  }
+  function quoteAuthor(q) {
+    if (q.from_me) return 'You';
+    const orig = thread?.messages.find((x) => x.wa_message_id === q.id);
+    if (orig) return authorOf(orig);
+    if (thread?.contact.is_group) return q.participant && /^\d+@s\.whatsapp\.net$/.test(q.participant) ? fmtPhone(q.participant.split('@')[0]) : 'Someone';
+    return chatTitle(thread?.contact);
+  }
+  const isCloudTab = () => activeAcct?.kind === 'cloud'; // a function: activeAcct is defined further down
+  function capsOf(m) {
+    const keyed = !!m.wa_message_id && !(thread?.contact.is_group && m.direction === 'in' && !m.sender_jid);
+    const live = acctConnected && !isCloudTab();
+    const canPost = !thread?.contact.read_only;
+    return {
+      reply: !m.deleted && keyed && live && canPost,
+      copy: !!msgText(m),
+      react: !m.deleted && keyed && live,
+      forward: !m.deleted && live && !!(m.body || m.media === 1),
+      pin: !m.deleted && keyed && live && canPost,
+    };
+  }
+  const canDeleteForEveryone = (m) =>
+    m && m.direction === 'out' && !m.deleted && !!m.wa_message_id && acctConnected && !isCloudTab() && Date.now() - (asDate(m.created_at)?.getTime() || 0) < 60 * 3600e3;
+  function openMenu(e, m) {
+    e.stopPropagation();
+    const b = (e.currentTarget.closest('.bubble') || e.currentTarget).getBoundingClientRect();
+    setMenu({ m, at: { x: m.direction === 'out' ? b.right - 240 : b.left, y: b.bottom + 4, top: b.top } });
+  }
+  async function onMenuAction(kind, payload) {
+    const m = menu?.m;
+    setMenu(null);
+    if (!m) return;
+    if (kind === 'reply') {
+      setReplyTo(m);
+      setTimeout(() => composeRef.current?.focus(), 0);
+    } else if (kind === 'copy') {
+      try {
+        await navigator.clipboard.writeText(msgText(m));
+        toast('Message copied', 'success');
+      } catch {
+        toast("Couldn't copy — select the text instead", 'error');
+      }
+    } else if (kind === 'forward') setFwdMsg(m);
+    else if (kind === 'delete') setDelMsg(m);
+    else if (kind === 'pin') {
+      if (await msgAction(m, 'pin', payload)) toast(payload.pin ? 'Pinned for everyone in this chat' : 'Unpinned', 'success');
+    } else if (kind === 'star') await msgAction(m, 'star', payload);
+  }
+  async function reactTo(emoji) {
+    const m = menu?.m;
+    setMenu(null);
+    if (m) await msgAction(m, 'react', { emoji });
+  }
+  async function deleteMsg(scope) {
+    const m = delMsg;
+    setDelMsg(null);
+    if (m && (await msgAction(m, 'delete', { scope }))) toast(scope === 'everyone' ? 'Deleted for everyone' : 'Deleted for you', 'success');
+  }
+  // Scroll to a message (a quote or the pinned bar) and flash it, like WhatsApp.
+  function jumpTo(waId) {
+    const el = waId && msgsRef.current?.querySelector(`[data-wa="${CSS.escape(waId)}"]`);
+    if (!el) {
+      toast('That message is further up — scroll up to load it', 'info');
+      return;
+    }
+    stickRef.current = false;
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    setFlash(waId);
+    setTimeout(() => setFlash(null), 1600);
   }
 
   async function resolve() {
@@ -684,7 +934,11 @@ export default function Conversations({ go }) {
                       {t.is_group === 1 && t.last_direction === 'in' && t.last_sender ? (
                         <span className="wa-row-sender">{t.last_sender}: </span>
                       ) : null}
-                      {t.last_message}
+                      {t.last_deleted ? (
+                        <span className="wa-row-deleted">⊘ {t.last_direction === 'out' ? 'You deleted this message' : 'This message was deleted'}</span>
+                      ) : (
+                        t.last_message
+                      )}
                     </span>
                     <span className="wa-row-end">
                       {t.handoff === 1 && (
@@ -772,6 +1026,20 @@ export default function Conversations({ go }) {
                 )}
               </div>
 
+              {thread.pinned?.length ? (
+                <div className="wa-pinbar">
+                  <span className="wa-pinbar-ico"><PinIcon /></span>
+                  <button className="wa-pinbar-text" onClick={() => jumpTo(thread.pinned[0].wa_message_id)} title="Go to the pinned message">
+                    {msgLabel(thread.pinned[0])}
+                  </button>
+                  {thread.pinned.length > 1 ? <span className="wa-pinbar-n">+{thread.pinned.length - 1} more</span> : null}
+                  {acctConnected && !isCloudTab() && !thread.contact.read_only ? (
+                    <button className="wa-icon-btn sm" onClick={() => msgAction(thread.pinned[0], 'pin', { pin: false })} aria-label="Unpin" title="Unpin for everyone">
+                      <Icon.x />
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
               <div className="chat-msgs" ref={msgsRef} onScroll={onMsgsScroll}>
                 {thread.has_more ? <div className="chat-older"><span className="wa-spin" /> Loading older messages…</div> : null}
                 {!thread.has_more && thread.messages.length > 0 ? (
@@ -798,26 +1066,52 @@ export default function Conversations({ go }) {
                       {showDay && (
                         <div className="chat-day"><span>{dayDivider(m.created_at)}</span></div>
                       )}
-                      <div className={`bubble ${m.direction}${m.type === 'sticker' && m.media ? ' sticker' : ''}${rich ? ' rich' : ''}${reacts.length ? ' has-reacts' : ''}`}>
+                      <div
+                        className={`bubble ${m.direction}${m.type === 'sticker' && m.media && !m.deleted ? ' sticker' : ''}${rich && !m.deleted ? ' rich' : ''}${reacts.length ? ' has-reacts' : ''}${m.deleted ? ' deleted' : ''}${flash && flash === m.wa_message_id ? ' flash' : ''}${menu?.m.id === m.id ? ' menu-open' : ''}`}
+                        data-wa={m.wa_message_id || undefined}
+                      >
                         {thread.contact.is_group === 1 && m.direction === 'in' && m.sender ? (
                           <div className="bubble-sender">{m.sender}</div>
                         ) : null}
-                        {m.media_url && (
-                          <img src={m.media_url} alt="" onLoad={onMediaLoad} style={{ width: '100%', borderRadius: 8, marginBottom: m.body ? 6 : 0, display: 'block' }} />
+                        {m.forwarded && !m.deleted ? <div className="wa-fwd"><ForwardIco /> Forwarded</div> : null}
+                        {m.quoted && !m.deleted ? (
+                          <button className="wa-quote" onClick={() => jumpTo(m.quoted.id)} title="Go to the original message">
+                            <span className="wa-quote-who">{quoteAuthor(m.quoted)}</span>
+                            <span className="wa-quote-text">{m.quoted.body || 'Message'}</span>
+                          </button>
+                        ) : null}
+                        {m.deleted ? (
+                          <div className="bubble-text wa-deleted">⊘ {m.direction === 'out' ? 'You deleted this message' : 'This message was deleted'}</div>
+                        ) : (
+                          <>
+                            {m.media_url && (
+                              <img src={m.media_url} alt="" onLoad={onMediaLoad} style={{ width: '100%', borderRadius: 8, marginBottom: m.body ? 6 : 0, display: 'block' }} />
+                            )}
+                            {rich && <MessageMedia m={m} onLoad={onMediaLoad} />}
+                            {text ? <div className="bubble-text">{formatWa(text)}</div> : null}
+                          </>
                         )}
-                        {rich && <MessageMedia m={m} onLoad={onMediaLoad} />}
-                        {text ? <div className="bubble-text">{formatWa(text)}</div> : null}
                         {m.ai_auto && (
                           <span className="chip" style={{ marginLeft: 6, fontSize: 9.5, padding: '0 6px' }}>AI</span>
                         )}
                         <div className="time">
-                          {msgTime(m.created_at)} {m.direction === 'out' && <Ticks status={m.status} />}
+                          {m.starred ? <span className="wa-time-ico" title="Starred"><StarIco filled /></span> : null}
+                          {isPinnedNow(m) ? <span className="wa-time-ico" title="Pinned"><PinIcon /></span> : null}
+                          {msgTime(m.created_at)} {m.direction === 'out' && !m.deleted && <Ticks status={m.status} />}
                         </div>
                         {reacts.length ? (
                           <div className="bubble-reacts" title={reacts.map((r) => r.emoji).join(' ')}>
                             {[...new Set(reacts.map((r) => r.emoji))].slice(0, 3).join('')}
                             {reacts.length > 1 ? <span>{reacts.length}</span> : null}
                           </div>
+                        ) : null}
+                        <button className="wa-caret" onClick={(e) => openMenu(e, m)} aria-label="Message options" aria-haspopup="menu" title="Message options">
+                          <CaretIco />
+                        </button>
+                        {capsOf(m).react ? (
+                          <button className="wa-react-btn" onClick={(e) => openMenu(e, m)} aria-label="React" title="React">
+                            <SmileIco />
+                          </button>
                         ) : null}
                       </div>
                     </Fragment>
@@ -828,8 +1122,21 @@ export default function Conversations({ go }) {
               {thread.contact.read_only ? (
                 <div className="chat-compose chat-readonly">Only admins can send messages</div>
               ) : (
+              <>
+              {replyTo && (
+                <div className="wa-replybar">
+                  <div className="wa-quote static">
+                    <span className="wa-quote-who">{authorOf(replyTo)}</span>
+                    <span className="wa-quote-text">{msgLabel(replyTo)}</span>
+                  </div>
+                  <button className="wa-icon-btn" onClick={() => setReplyTo(null)} aria-label="Cancel reply" title="Cancel reply">
+                    <Icon.x />
+                  </button>
+                </div>
+              )}
               <div className="chat-compose">
                 <textarea
+                  ref={composeRef}
                   className="compose-input"
                   rows={1}
                   value={draft}
@@ -838,6 +1145,8 @@ export default function Conversations({ go }) {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
                       send();
+                    } else if (e.key === 'Escape' && replyTo) {
+                      setReplyTo(null);
                     }
                   }}
                   placeholder={acctConnected ? 'Type a message' : 'This number is not connected'}
@@ -847,11 +1156,60 @@ export default function Conversations({ go }) {
                   <Icon.send />
                 </button>
               </div>
+              </>
               )}
             </>
           )}
         </div>
       </div>
+
+      {menu && thread && (
+        <MessageMenu
+          at={menu.at}
+          m={menu.m}
+          can={capsOf(menu.m)}
+          myReaction={(menu.m.reactions || []).find((r) => r.from === 'me')?.emoji || ''}
+          onReact={reactTo}
+          onAction={onMenuAction}
+          onClose={closeMenu}
+        />
+      )}
+      {delMsg && (
+        <Modal
+          title="Delete message?"
+          onClose={() => setDelMsg(null)}
+          footer={
+            <>
+              <button className="btn" onClick={() => setDelMsg(null)}>Cancel</button>
+              <button className="btn" onClick={() => deleteMsg('me')}>Delete for me</button>
+              {canDeleteForEveryone(delMsg) && (
+                <button className="btn danger" onClick={() => deleteMsg('everyone')}>Delete for everyone</button>
+              )}
+            </>
+          }
+        >
+          <div className="wa-fwd-preview">{msgLabel(delMsg)}</div>
+          <p className="muted" style={{ margin: '12px 0 0', fontSize: 14 }}>
+            {canDeleteForEveryone(delMsg)
+              ? 'Delete for everyone removes it from the chat on their phone too — they’ll see “This message was deleted”. Delete for me removes it only from this app and your phone.'
+              : delMsg.direction === 'out' && !delMsg.deleted
+                ? 'It’s too old to delete for everyone (WhatsApp allows about 2 days), or this number isn’t connected. Delete for me removes it from this app and your phone.'
+                : 'This removes it from this app and your phone. The other person still has it.'}
+          </p>
+        </Modal>
+      )}
+      {fwdMsg && thread && (
+        <ForwardModal
+          account={account}
+          contactId={thread.contact.id}
+          m={fwdMsg}
+          onClose={() => setFwdMsg(null)}
+          onDone={() => {
+            setFwdMsg(null);
+            loadThreads();
+          }}
+        />
+      )}
     </>
   );
 }

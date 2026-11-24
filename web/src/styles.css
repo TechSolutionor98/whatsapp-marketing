@@ -3547,7 +3547,9 @@ tbody tr:hover {
    Chat list (green "Chats" title, round search, filter chips with counts, 49px round avatars,
    green time + badge for unread), the empty pane (card + quick actions) and the open chat
    (bubbles with tails, white pill composer). Colours measured from WhatsApp Web. */
-.wa-web {
+/* WhatsApp palette — on :root so the message menu and dialogs (rendered outside the chat
+   panel) use it too. */
+:root {
   --wa-green: #1daa61;
   --wa-green-dark: #15603e;
   --wa-green-soft: #d9fdd3;
@@ -3562,7 +3564,10 @@ tbody tr:hover {
   --wa-avatar-bg: #d2e8fe;
   --wa-avatar-ink: #0d67cd;
   --wa-tick: #007bfc;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --wa-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+}
+.wa-web {
+  font-family: var(--wa-font);
   grid-template-columns: minmax(320px, min(38%, 470px)) 1fr;
   background: #fff;
   border-color: var(--wa-line);
@@ -3947,3 +3952,211 @@ tbody tr:hover {
 @media (prefers-reduced-motion: reduce) {
   .wa-banner-icon svg { animation: none; }
 }
+
+/* ---- message menu: hover arrow + react button, reactions, actions (like WhatsApp) ---- */
+.wa-caret {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 28px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 0 8px 0 14px;
+  display: grid;
+  place-items: center;
+  color: #8696a0;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s;
+  background: radial-gradient(at top right, #fff 55%, rgba(255, 255, 255, 0) 80%);
+}
+.bubble.out .wa-caret { background: radial-gradient(at top right, #d9fdd3 55%, rgba(217, 253, 211, 0) 80%); }
+.bubble.sticker .wa-caret { background: rgba(255, 255, 255, 0.85); border-radius: 50%; }
+.bubble:hover .wa-caret,
+.bubble.menu-open .wa-caret,
+.wa-caret:focus-visible { opacity: 1; pointer-events: auto; }
+.wa-react-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.92);
+  color: #8696a0;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(11, 20, 26, 0.15);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s;
+}
+.wa-react-btn svg { width: 18px; height: 18px; }
+.bubble.in .wa-react-btn { right: -40px; }
+.bubble.out .wa-react-btn { left: -40px; }
+.bubble:hover .wa-react-btn,
+.wa-react-btn:focus-visible { opacity: 1; pointer-events: auto; }
+@media (hover: none) {
+  .wa-caret { opacity: 0.85; pointer-events: auto; }
+}
+
+.wa-menu {
+  position: fixed;
+  z-index: 1000;
+  width: 248px;
+  padding: 6px;
+  background: #fff;
+  border-radius: 16px;
+  box-shadow: 0 10px 30px rgba(11, 20, 26, 0.22), 0 1px 3px rgba(11, 20, 26, 0.12);
+  font-family: var(--wa-font);
+}
+.wa-react-bar,
+.wa-react-grid {
+  padding: 4px 2px 8px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid #efedea;
+}
+.wa-react-bar { display: flex; align-items: center; justify-content: space-between; }
+.wa-react-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 2px; }
+.wa-react {
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  font-size: 21px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: transform 0.1s, background 0.1s;
+}
+.wa-react:hover { background: #f0f2f5; transform: scale(1.12); }
+.wa-react.on { background: #d9fdd3; }
+.wa-react.more { color: #54656f; background: #f0f2f5; }
+.wa-react.more svg { width: 18px; height: 18px; }
+.wa-menu-list { display: flex; flex-direction: column; }
+.wa-menu-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 9px 12px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  font: inherit;
+  font-size: 15px;
+  color: #111b21;
+  text-align: left;
+  cursor: pointer;
+}
+.wa-menu-item:hover,
+.wa-menu-item:focus-visible { background: #f0f2f5; outline: none; }
+.wa-menu-item.danger,
+.wa-menu-item.danger .wa-menu-ico { color: #d70f3d; }
+.wa-menu-ico { flex: none; width: 20px; height: 20px; display: grid; place-items: center; color: #54656f; }
+.wa-menu-ico svg { width: 19px; height: 19px; }
+.wa-menu-sep { height: 1px; margin: 4px 6px; background: #efedea; }
+.wa-menu-label { padding: 6px 12px 4px; font-size: 13px; color: #667781; }
+
+/* quoted message inside a bubble / above the message box */
+.wa-quote {
+  width: 100%;
+  min-width: 170px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0 0 4px;
+  padding: 6px 10px 6px 10px;
+  border: none;
+  border-left: 4px solid #06cf9c;
+  border-radius: 7px;
+  background: rgba(11, 20, 26, 0.05);
+  font: inherit;
+  text-align: left;
+  white-space: normal;
+  cursor: pointer;
+}
+.bubble.out .wa-quote { background: rgba(11, 20, 26, 0.06); }
+.wa-quote-who { font-size: 13px; font-weight: 600; color: #06a37f; }
+.wa-quote-text {
+  font-size: 13px;
+  line-height: 18px;
+  color: #54656f;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  word-break: break-word;
+}
+.wa-quote.static { flex: 1; min-width: 0; margin: 0; cursor: default; background: #fff; }
+.wa-fwd { display: flex; align-items: center; gap: 4px; margin-bottom: 2px; font-size: 12.5px; font-style: italic; color: #667781; }
+.wa-fwd svg { width: 14px; height: 14px; }
+.wa-deleted { font-style: italic; color: #667781; }
+.wa-row-deleted { font-style: italic; }
+.wa-time-ico { display: inline-flex; color: #8696a0; }
+.wa-time-ico svg { width: 12px; height: 12px; }
+.bubble.flash { animation: wa-flash 1.6s ease; }
+@keyframes wa-flash {
+  0%, 55% { box-shadow: 0 0 0 3px rgba(6, 207, 156, 0.55); }
+  100% { box-shadow: 0 1px 0.5px rgba(11, 20, 26, 0.13); }
+}
+
+/* pinned message bar under the chat header */
+.wa-pinbar {
+  flex: none;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px 4px 16px;
+  background: #fff;
+  border-bottom: 1px solid var(--wa-line);
+}
+.wa-pinbar-ico { display: grid; color: #8696a0; }
+.wa-pinbar-ico svg { width: 16px; height: 16px; }
+.wa-pinbar-text {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 0;
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 14px;
+  color: var(--wa-ink-2);
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.wa-pinbar-n { flex: none; font-size: 12px; color: var(--wa-muted); }
+.wa-icon-btn.sm { width: 32px; height: 32px; }
+.wa-icon-btn.sm svg { width: 16px; height: 16px; }
+
+/* replying to: above the message box */
+.wa-replybar { flex: none; display: flex; align-items: center; gap: 8px; padding: 8px 16px 0; background: var(--wa-panel); }
+
+/* forward picker */
+.wa-fwd-preview {
+  max-height: 86px;
+  overflow: hidden;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--wa-panel);
+  font-size: 14px;
+  color: var(--wa-ink-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.wa-fwd-list { max-height: 340px; overflow-y: auto; margin: 0 -6px; }
+.wa-fwd-row { display: flex; align-items: center; gap: 12px; padding: 7px 8px; border-radius: 10px; cursor: pointer; }
+.wa-fwd-row:hover { background: var(--wa-panel); }
+.wa-fwd-row.on { background: #eaf8ee; }
+.wa-fwd-row input { flex: none; width: 18px; height: 18px; accent-color: var(--wa-green); }
+.wa-fwd-name { min-width: 0; font-size: 15px; color: var(--wa-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

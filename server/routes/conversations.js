@@ -4,8 +4,9 @@ import path from 'node:path';
 import { DATA_DIR } from '../config.js';
 import { db, audit, oid, pub, pubList, nowIso, dayKey, getSetting, setSetting, clearHandoff, handoffFor } from '../db/mongo.js';
 import { emit } from '../events.js';
-import { sendText, sendToJid, isConnected } from '../whatsapp/client.js';
-import { poolState, sendJidFrom, chatJidOf, isAccountConnected, startPoolAccount, removePoolAccount, setPoolLabel, setPoolAutoReply, downloadStoredMedia, canPostInGroup, phoneOfAccount, requestOlderMessages } from '../whatsapp/pool.js';
+import { isConnected } from '../whatsapp/client.js';
+import { poolState, sendJidFrom, chatJidOf, isAccountConnected, startPoolAccount, removePoolAccount, setPoolLabel, setPoolAutoReply, downloadStoredMedia, canPostInGroup, phoneOfAccount, requestOlderMessages, messageKeyOf, contentOf, sendToChat, chatModifyOn } from '../whatsapp/pool.js';
+import { markDeleted } from '../receipts.js';
 import { accountGroup, tabPhone, listNumbers, hasMain } from '../numbers.js';
 import { canLinkNumber } from '../limits.js';
 import { accountKind } from '../whatsapp/pool.js';
@@ -192,12 +193,13 @@ conversations.get('/', async (req, res) => {
   const summaries = await db
     .messages()
     .aggregate([
-      { $match: await accountMatch(account) },
+      { $match: { ...(await accountMatch(account)), deleted_for_me: { $ne: 1 } } },
       { $sort: { created_at: 1 } },
       {
         $group: {
           _id: '$contact_id',
           last_message: { $last: '$body' },
+          last_deleted: { $last: '$deleted' },
           last_direction: { $last: '$direction' },
           last_status: { $last: '$status' },
           last_sender: { $last: '$sender' },
@@ -244,6 +246,7 @@ conversations.get('/', async (req, res) => {
       last_inbound_at: c.last_inbound_at,
       last_outbound_at: c.last_outbound_at,
       last_message: s.last_message,
+      last_deleted: s.last_deleted ? 1 : 0,
       last_direction: s.last_direction,
       last_status: s.last_status,
       last_sender: s.last_sender || '',
@@ -308,7 +311,7 @@ conversations.get('/:contactId', async (req, res) => {
   if (!contact) return res.status(404).json({ error: 'Not found' });
   const account = req.query.account || 'main';
   const limit = Math.min(Math.max(Number(req.query.limit) || 150, 20), 500);
-  const q = { contact_id: String(_id), ...(await accountMatch(account)) };
+  const q = { contact_id: String(_id), ...(await accountMatch(account)), deleted_for_me: { $ne: 1 } };
   if (req.query.before) q.created_at = { $lt: String(req.query.before) };
   const page = await db
     .messages()
@@ -329,13 +332,22 @@ conversations.get('/:contactId', async (req, res) => {
   const tabPh = phone || (await tabPhone(account));
   const handoff = handoffFor(contact, tabPh);
   const named = { name: chatNameFor(contact, tabPh), push_name: contact.is_group ? '' : contact.push_name || '', handoff: handoff ? 1 : 0, handoff_reason: handoff };
-  res.json({ contact: pub({ ...shown, ...named, unread: 0, read_only }), messages: pubList(messages), has_more });
+  // Messages pinned for everyone in this chat (WhatsApp shows them in a bar under the header).
+  const pinned = req.query.before
+    ? []
+    : await db
+        .messages()
+        .find({ ...q, deleted: { $ne: 1 }, pinned_until: { $gt: nowIso() } }, { projection: { media_raw: 0 } })
+        .sort({ pinned_at: -1 })
+        .limit(3)
+        .toArray();
+  res.json({ contact: pub({ ...shown, ...named, unread: 0, read_only }), messages: pubList(messages), has_more, pinned: pubList(pinned) });
 });
 
 conversations.post('/:contactId/reply', async (req, res) => {
   const _id = oid(req.params.contactId);
   if (!_id) return res.status(400).json({ error: 'Bad id' });
-  const { body } = req.body;
+  const { body, quoted_id } = req.body;
   const account = req.body.account || 'main';
   const contact = await db.contacts().findOne({ _id });
   if (!contact) return res.status(404).json({ error: 'Not found' });
@@ -363,27 +375,53 @@ conversations.post('/:contactId/reply', async (req, res) => {
     if (!allowed) return res.status(403).json({ error: 'Only admins can send messages to this group' });
   }
 
+  // Replying to a message (WhatsApp's "Reply": the quoted message shows above the text).
+  let quotedDoc = null;
+  if (quoted_id) {
+    quotedDoc = await db.messages().findOne({ _id: oid(quoted_id), contact_id: String(_id) });
+    if (!quotedDoc || quotedDoc.deleted) return res.status(400).json({ error: "That message can't be replied to" });
+  }
+
   try {
-    // Groups go to the group jid, @lid-only contacts to their lid, everyone else to the number.
+    // Groups go to the group jid, @lid-only contacts to their lid, everyone else to the number
+    // (or its @lid, when that's how this chat works — pool.js sendAddress).
     const jid = chatJidOf(contact);
+    const sender = useMain ? 'main' : poolId;
     let waId;
-    if (useMain) {
-      waId = contact.is_group || contact.lid_only ? await sendToJid(jid, body.trim()) : await sendText(contact.phone, body.trim());
+    let sentTo = null;
+    if (accountKind(sender) === 'cloud') {
+      waId = await sendJidFrom(poolId, jid, body.trim()); // official API: plain text
     } else {
-      waId = await sendJidFrom(poolId, jid, body.trim());
+      const options = {};
+      const qKey = quotedDoc && messageKeyOf(quotedDoc, contact);
+      const qMsg = quotedDoc && (await contentOf(quotedDoc));
+      if (qKey && qMsg) options.quoted = { key: qKey, message: qMsg };
+      const r = await sendToChat(sender, jid, { text: body.trim() }, options);
+      waId = r.id;
+      sentTo = r.jid;
     }
-    await db.messages().insertOne({
+    const quoted = quotedDoc
+      ? { id: quotedDoc.wa_message_id, body: String(quotedDoc.body || quotedDoc.caption || '').slice(0, 300), participant: quotedDoc.sender_jid || '', from_me: quotedDoc.direction === 'out' ? 1 : 0 }
+      : null;
+    const doc = {
       contact_id: String(_id),
       campaign_id: null,
       account_id: account,
-      account_phone: phoneOfAccount(useMain ? 'main' : poolId), // keeps it in this number's tab
+      account_phone: phoneOfAccount(sender), // keeps it in this number's tab
       direction: 'out',
       body: body.trim(),
       status: 'sent',
       wa_message_id: waId,
       created_at: nowIso(),
       day_key: dayKey(),
-    });
+    };
+    const extra = { ...(sentTo ? { chat_jid: sentTo } : {}), ...(quoted ? { quoted } : {}) };
+    if (waId) {
+      // Baileys may have stored its own echo of this message already — one row either way.
+      await db.messages().updateOne({ wa_message_id: waId }, { $setOnInsert: doc, ...(Object.keys(extra).length ? { $set: extra } : {}) }, { upsert: true });
+    } else {
+      await db.messages().insertOne({ ...doc, ...extra });
+    }
     await db.contacts().updateOne({ _id }, { $set: { last_outbound_at: nowIso() } });
     audit('reply', `Human replied to ${contact.name || contact.phone}`);
     emit('message:out', { contactId: String(_id) });
@@ -391,6 +429,162 @@ conversations.post('/:contactId/reply', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ---- Message actions (WhatsApp's message menu): react, delete, pin, star, forward ----
+
+// The connected session of a number tab: 'main' or a pool id, and whether it's QR-linked or
+// an official API number (which can't do these actions from here).
+function liveSender(account) {
+  const { ids } = accountGroup(account);
+  if (hasMain() && ids.includes('main') && isConnected()) return { id: 'main', kind: 'qr' };
+  const poolId = ids.find((id) => id !== 'main' && isAccountConnected(id));
+  return poolId ? { id: poolId, kind: accountKind(poolId) } : null;
+}
+async function actionTarget(req, res, { needLive = true } = {}) {
+  const cid = oid(req.params.contactId);
+  const mid = oid(req.params.msgId);
+  if (!cid || !mid) return void res.status(400).json({ error: 'Bad id' });
+  const contact = await db.contacts().findOne({ _id: cid });
+  const doc = contact && (await db.messages().findOne({ _id: mid, contact_id: String(cid) }));
+  if (!doc) return void res.status(404).json({ error: 'Message not found' });
+  const sender = liveSender(req.body?.account || 'main');
+  if (needLive && !sender) return void res.status(400).json({ error: 'That number is not connected' });
+  if (needLive && sender.kind === 'cloud') return void res.status(400).json({ error: "Official WhatsApp API numbers can't do this from here" });
+  return { contact, doc, sender };
+}
+const changed = (contactId) => emit('message:out', { contactId: String(contactId) });
+
+// React with an emoji ('' removes your reaction).
+conversations.post('/:contactId/messages/:msgId/react', async (req, res) => {
+  const t = await actionTarget(req, res);
+  if (!t) return;
+  const emoji = String(req.body?.emoji || '');
+  if ([...emoji].length > 10) return res.status(400).json({ error: 'Pick one emoji' });
+  const key = messageKeyOf(t.doc, t.contact);
+  if (!key || t.doc.deleted) return res.status(400).json({ error: "You can't react to this message" });
+  try {
+    await sendToChat(t.sender.id, key.remoteJid, { react: { text: emoji, key } }, { exact: true });
+    await db.messages().updateOne({ _id: t.doc._id }, { $pull: { reactions: { from: 'me' } } });
+    if (emoji) await db.messages().updateOne({ _id: t.doc._id }, { $push: { reactions: { emoji, from: 'me' } } });
+    changed(t.contact._id);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Delete for everyone (your own message, within about 2 days, like WhatsApp) or for me.
+const DELETE_FOR_EVERYONE_MS = 60 * 3600e3;
+conversations.post('/:contactId/messages/:msgId/delete', async (req, res) => {
+  const everyone = req.body?.scope === 'everyone';
+  const t = await actionTarget(req, res, { needLive: everyone });
+  if (!t) return;
+  const key = messageKeyOf(t.doc, t.contact);
+  try {
+    if (everyone) {
+      if (t.doc.direction !== 'out') return res.status(400).json({ error: 'You can only delete your own messages for everyone' });
+      if (t.doc.deleted) return res.json({ ok: true });
+      if (Date.now() - new Date(t.doc.created_at).getTime() > DELETE_FOR_EVERYONE_MS) {
+        return res.status(400).json({ error: 'This message is too old to delete for everyone — WhatsApp allows about 2 days' });
+      }
+      if (!key || !t.doc.wa_message_id) return res.status(400).json({ error: "This message can't be deleted for everyone" });
+      await sendToChat(t.sender.id, key.remoteJid, { delete: key }, { exact: true });
+      await markDeleted(t.doc.wa_message_id);
+      audit('reply', `Deleted a message for everyone in the chat with ${t.contact.name || t.contact.phone}`);
+    } else {
+      // Also off the linked phone (WhatsApp syncs "Delete for me" between your devices).
+      if (key && t.sender?.kind === 'qr') {
+        const timestamp = Math.floor(new Date(t.doc.created_at).getTime() / 1000);
+        await chatModifyOn(t.sender.id, { deleteForMe: { deleteMedia: false, key, timestamp } }, key.remoteJid);
+      }
+      await db.messages().updateOne({ _id: t.doc._id }, { $set: { deleted_for_me: 1 } });
+    }
+    changed(t.contact._id);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Pin for everyone in the chat (24 hours, 7 days or 30 days) / unpin.
+conversations.post('/:contactId/messages/:msgId/pin', async (req, res) => {
+  const t = await actionTarget(req, res);
+  if (!t) return;
+  const pin = req.body?.pin !== false;
+  const days = [1, 7, 30].includes(Number(req.body?.days)) ? Number(req.body.days) : 7;
+  const key = messageKeyOf(t.doc, t.contact);
+  if (!key || t.doc.deleted) return res.status(400).json({ error: "This message can't be pinned" });
+  try {
+    await sendToChat(t.sender.id, key.remoteJid, { pin: key, type: pin ? 1 : 2, time: days * 86400 }, { exact: true });
+    await db.messages().updateOne(
+      { _id: t.doc._id },
+      pin
+        ? { $set: { pinned_at: nowIso(), pinned_until: new Date(Date.now() + days * 86400e3).toISOString() } }
+        : { $unset: { pinned_at: '', pinned_until: '' } }
+    );
+    changed(t.contact._id);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Star / unstar (also on the linked phone when it can sync it).
+conversations.post('/:contactId/messages/:msgId/star', async (req, res) => {
+  const t = await actionTarget(req, res, { needLive: false });
+  if (!t) return;
+  const star = req.body?.star !== false;
+  const key = messageKeyOf(t.doc, t.contact);
+  if (key && t.sender?.kind === 'qr') {
+    await chatModifyOn(t.sender.id, { star: { messages: [{ id: key.id, fromMe: key.fromMe }], star } }, key.remoteJid);
+  }
+  await db.messages().updateOne({ _id: t.doc._id }, star ? { $set: { starred: 1 } } : { $unset: { starred: '' } });
+  changed(t.contact._id);
+  res.json({ ok: true });
+});
+
+// Forward to up to 5 chats of this number (shown there as "Forwarded", like WhatsApp).
+conversations.post('/:contactId/messages/:msgId/forward', async (req, res) => {
+  const t = await actionTarget(req, res);
+  if (!t) return;
+  const ids = [...new Set((Array.isArray(req.body?.to) ? req.body.to : []).map(String))].map(oid).filter(Boolean).slice(0, 5);
+  if (!ids.length) return res.status(400).json({ error: 'Pick a chat to forward to' });
+  if (t.doc.deleted) return res.status(400).json({ error: 'This message was deleted' });
+  const message = await contentOf(t.doc);
+  if (!message) return res.status(400).json({ error: "This message can't be forwarded" });
+  const key = { remoteJid: t.doc.chat_jid || chatJidOf(t.contact), fromMe: t.doc.direction === 'out', id: t.doc.wa_message_id };
+  const account = req.body?.account || 'main';
+  const tabPh = accountGroup(account).phone;
+  const targets = await db.contacts().find({ _id: { $in: ids } }).toArray();
+  const done = [];
+  const skipped = [];
+  for (const c of targets) {
+    const readOnly = c.is_group && ((tabPh && (c.read_only_for || []).includes(tabPh)) || (t.sender.id !== 'main' && !(await canPostInGroup(t.sender.id, c.jid))));
+    if (readOnly) {
+      skipped.push(c.name || c.phone);
+      continue;
+    }
+    try {
+      const r = await sendToChat(t.sender.id, chatJidOf(c), { forward: { key, message } });
+      if (r.id) {
+        await db.messages().updateOne(
+          { wa_message_id: r.id },
+          {
+            $set: { chat_jid: r.jid, forwarded: 1 },
+            $setOnInsert: { contact_id: String(c._id), campaign_id: null, account_id: account, account_phone: phoneOfAccount(t.sender.id), direction: 'out', body: t.doc.body || t.doc.caption || '', status: 'sent', wa_message_id: r.id, created_at: nowIso(), day_key: dayKey() },
+          },
+          { upsert: true }
+        );
+      }
+      done.push(String(c._id));
+      changed(c._id);
+    } catch (e) {
+      skipped.push(c.name || c.phone);
+    }
+  }
+  if (!done.length) return res.status(400).json({ error: `Couldn't forward${skipped.length ? ` to ${skipped.join(', ')}` : ''}` });
+  res.json({ ok: true, sent: done.length, skipped });
 });
 
 // "Load older messages from your phone" (like WhatsApp Web): ask this number's phone for
