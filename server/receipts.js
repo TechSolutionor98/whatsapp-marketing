@@ -5,6 +5,12 @@ import { inWs } from './tenant.js';
 // WhatsApp refused a message we sent (Baileys handleBadAck → status ERROR with the server's
 // error code), e.g. posting in an admins-only group. It was never delivered, so show it as
 // "not sent" instead of leaving it at a single tick.
+// What to do after a rejection (pool.js: resend a 479 to the chat's other address).
+let onRejected = null;
+export function setRejectedHandler(fn) {
+  onRejected = fn;
+}
+
 export async function markFailed(waId, errorCode) {
   if (!waId || !isMongoUp()) return;
   try {
@@ -15,6 +21,7 @@ export async function markFailed(waId, errorCode) {
     if (r.modifiedCount) {
       audit('reply', `WhatsApp rejected a sent message${errorCode ? ` (error ${errorCode})` : ''} — marked as not sent`, { level: 'warn' });
       emit('message:status', { waId });
+      await onRejected?.(waId, errorCode);
     }
   } catch {
     /* ignore */

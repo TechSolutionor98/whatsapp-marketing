@@ -8,7 +8,7 @@ import makeWASocket, {
   isJidStatusBroadcast,
 } from 'baileys';
 import { getWaVersion } from './version.js';
-import { registerMainNumber, attachConversationHandlers, onConversationOpen, historyHook, ingestMain, waLogger, storedMessageFor } from './pool.js';
+import { registerMainNumber, attachConversationHandlers, onConversationOpen, historyHook, ingestMain, waLogger, storedMessageFor, sendAddress } from './pool.js';
 
 import { WA_AUTH_DIR } from '../config.js';
 import { db, audit, getSetting, setSetting } from '../db/mongo.js';
@@ -242,7 +242,7 @@ export async function sendTyping(phone, ms = 1200) {
 
 export async function sendText(phone, text) {
   if (!isConnected()) throw new Error('WhatsApp is not connected');
-  const jid = `${normalizePhone(phone)}@s.whatsapp.net`;
+  const jid = await sendAddress('main', `${normalizePhone(phone)}@s.whatsapp.net`); // @lid when this chat uses it
   const sent = await sock.sendMessage(jid, { text });
   return sent?.key?.id || null;
 }
@@ -250,6 +250,7 @@ export async function sendText(phone, text) {
 // Send to a full jid (used for group chats, which aren't addressable by phone).
 export async function sendToJid(jid, text) {
   if (!isConnected()) throw new Error('WhatsApp is not connected');
+  jid = await sendAddress('main', jid);
   const sent = await sock.sendMessage(jid, { text });
   return sent?.key?.id || null;
 }
@@ -257,14 +258,14 @@ export async function sendToJid(jid, text) {
 // Any Baileys message content (text, image, document) — used by the Developer API.
 export async function sendContent(phone, content) {
   if (!isConnected()) throw new Error('WhatsApp is not connected');
-  const jid = `${normalizePhone(phone)}@s.whatsapp.net`;
+  const jid = await sendAddress('main', `${normalizePhone(phone)}@s.whatsapp.net`); // @lid when this chat uses it
   const sent = await sock.sendMessage(jid, content);
   return sent?.key?.id || null;
 }
 
 export async function sendImage(phone, buffer, caption) {
   if (!isConnected()) throw new Error('WhatsApp is not connected');
-  const jid = `${normalizePhone(phone)}@s.whatsapp.net`;
+  const jid = await sendAddress('main', `${normalizePhone(phone)}@s.whatsapp.net`); // @lid when this chat uses it
   const sent = await sock.sendMessage(jid, { image: buffer, caption: caption || undefined });
   return sent?.key?.id || null;
 }

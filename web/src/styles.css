@@ -3766,6 +3766,7 @@ tbody tr:hover {
   text-overflow: ellipsis;
 }
 .wa-row-preview .wa-ticks { vertical-align: -1px; margin-right: 3px; }
+.wa-row-preview .msg-failed { margin-right: 5px; }
 .wa-row-end { flex: none; display: flex; align-items: center; gap: 6px; }
 .wa-badge {
   min-width: 20px;

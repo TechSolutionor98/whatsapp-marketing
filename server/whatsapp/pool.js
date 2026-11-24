@@ -26,7 +26,7 @@ import { DATA_DIR } from '../config.js';
 import { db, col, audit, oid, getSetting, setSetting, nowIso, dayKey, setHandoff, isWsSuspended } from '../db/mongo.js';
 import { DEFAULT_WS, currentWs, runInWs, inWs } from '../tenant.js';
 import { emit } from '../events.js';
-import { attachReceipts } from '../receipts.js';
+import { attachReceipts, setRejectedHandler } from '../receipts.js';
 import { aiAvailable, conversationReply } from '../ai.js';
 import { productContext, catalogIdsForAccount } from '../catalog.js';
 import { getWaState } from './client.js';
@@ -628,6 +628,7 @@ export async function sendJidFrom(fromId, jid, text) {
     return sendCloudText(a.cloud, jidPhone(jid), text);
   }
   if (!a?.sock || a.status !== 'connected') throw new Error('Source number not connected');
+  jid = await sendAddress(fromId, jid);
   await a.sock.sendPresenceUpdate('composing', jid).catch(() => {});
   const sent = await a.sock.sendMessage(jid, { text });
   return sent?.key?.id || null;
@@ -640,7 +641,7 @@ export async function sendFromTo(fromId, toPhone, text) {
     return sendCloudText(a.cloud, toPhone, text);
   }
   if (!a?.sock || a.status !== 'connected') throw new Error('Source number not connected');
-  const jid = `${normalizePhone(toPhone)}@s.whatsapp.net`;
+  const jid = await sendAddress(fromId, `${normalizePhone(toPhone)}@s.whatsapp.net`);
   await a.sock.sendPresenceUpdate('composing', jid).catch(() => {});
   const sent = await a.sock.sendMessage(jid, { text });
   return sent?.key?.id || null;
@@ -653,7 +654,7 @@ export async function sendMediaFromTo(fromId, toPhone, buffer, caption, mime) {
     return sendCloudImage(a.cloud, toPhone, buffer, caption, mime);
   }
   if (!a?.sock || a.status !== 'connected') throw new Error('Source number not connected');
-  const jid = `${normalizePhone(toPhone)}@s.whatsapp.net`;
+  const jid = await sendAddress(fromId, `${normalizePhone(toPhone)}@s.whatsapp.net`);
   const sent = await a.sock.sendMessage(jid, { image: buffer, caption: caption || undefined });
   return sent?.key?.id || null;
 }
@@ -664,7 +665,7 @@ export async function sendContentFromTo(fromId, toPhone, content) {
   const a = fromId === 'main' ? null : ctxOf(fromId);
   if (a?.kind === 'cloud') throw new Error('Official API numbers send through cloud-api.js');
   if (!a?.sock || a.status !== 'connected') throw new Error('Source number not connected');
-  const jid = `${normalizePhone(toPhone)}@s.whatsapp.net`;
+  const jid = await sendAddress(fromId, `${normalizePhone(toPhone)}@s.whatsapp.net`);
   const sent = await a.sock.sendMessage(jid, content);
   return sent?.key?.id || null;
 }
@@ -786,6 +787,82 @@ export function chatJidOf(contact) {
   if (contact?.lid_only && isLid(contact.jid)) return contact.jid;
   return `${normalizePhone(contact?.phone)}@s.whatsapp.net`;
 }
+
+// Which address to send a 1:1 message to. WhatsApp has moved some numbers' chats to hidden
+// IDs (@lid): on such a number a message to the phone-number address never arrives (Baileys
+// 6.7: stuck at "sent"; 7: rejected with error 479 "smax-invalid"), while the phone itself
+// sends that chat to the @lid and it's read. Measured on 2026-11-24: the Grabatoz number sent
+// 93 of its 137 phone messages to @lid and all 4 app sends to numbers failed; the main
+// number's chats still use numbers and its app sends are delivered. So send the way this
+// number's chat already works: the address of its newest message that proves it (one we
+// received, or one delivered/read). No such message → the number, as before.
+export async function sendAddress(accountId, jid) {
+  if (!isPn(jid)) return jid; // groups, @lid chats, newsletters are already exact
+  const myPhone = phoneOfAccount(accountId);
+  if (!myPhone) return jid;
+  try {
+    const contact = await db.contacts().findOne({ phone: jidToPhone(jid), is_group: { $ne: 1 } }, { projection: { _id: 1, lid: 1 } });
+    if (!contact) return jid; // never talked → nothing to go by
+    const lid = isLid(contact.lid) ? contact.lid : (await db.lidMap().findOne({ pn: jid }, { projection: { _id: 1 } }))?._id;
+    if (!isLid(lid)) return jid;
+    const [last] = await db
+      .messages()
+      .find(
+        { contact_id: String(contact._id), account_phone: myPhone, chat_jid: { $in: [jid, lid] }, $or: [{ direction: 'in' }, { status: { $in: ['delivered', 'read'] } }] },
+        { projection: { chat_jid: 1 } }
+      )
+      .sort({ created_at: -1 })
+      .limit(1)
+      .toArray();
+    return last?.chat_jid === lid ? lid : jid;
+  } catch {
+    return jid;
+  }
+}
+
+// The linked session that owns a phone in this workspace ('main' or a pool id).
+function accountIdForPhone(phone) {
+  if (!phone) return null;
+  if (mainCtx?.me?.phone === phone && ctxOf('main')) return 'main';
+  const list = wsAccounts().filter((a) => a.me?.phone === phone && a.sock);
+  return (list.find((a) => a.status === 'connected') || list[0])?.id || null;
+}
+
+// WhatsApp rejected one of our 1:1 messages with error 479 ("smax-invalid": the address
+// doesn't fit how this chat is addressed). Send it once more to the chat's other address
+// (number <-> @lid). It never arrived, so this can't duplicate it.
+const resentOnce = new Set();
+async function resendOnOtherAddress(waId, code) {
+  if (String(code) !== '479' || !waId || resentOnce.has(waId)) return;
+  resentOnce.add(waId);
+  try {
+    const m = await db.messages().findOne({ wa_message_id: waId, direction: 'out' });
+    if (!m || m.resent_from || !m.contact_id || !m.chat_jid) return;
+    const contact = await db.contacts().findOne({ _id: oid(m.contact_id) });
+    if (!contact || contact.is_group) return;
+    const pn = contact.phone && !contact.lid_only ? `${normalizePhone(contact.phone)}@s.whatsapp.net` : null;
+    const lid = isLid(contact.lid) ? contact.lid : pn ? (await db.lidMap().findOne({ pn }, { projection: { _id: 1 } }))?._id : null;
+    const other = m.chat_jid === lid ? pn : isPn(m.chat_jid) && isLid(lid) ? lid : null;
+    const id = accountIdForPhone(m.account_phone);
+    const sock = id && ctxOf(id)?.sock;
+    if (!other || !sock) return;
+    const content = await storedMessageFor({ id: waId });
+    if (!content) return;
+    const newId = content.conversation != null && Object.keys(content).length === 1
+      ? (await sock.sendMessage(other, { text: content.conversation }))?.key?.id
+      : await sock.relayMessage(other, content, {});
+    if (!newId) return;
+    await db.messages().updateOne(
+      { _id: m._id },
+      { $set: { wa_message_id: newId, chat_jid: other, status: 'sent', resent_from: waId }, $unset: { error_code: '', status_code: '' } }
+    );
+    audit('reply', `WhatsApp rejected a message to ${contact.name || '+' + contact.phone} at its ${isLid(m.chat_jid) ? 'hidden ID' : 'number'} — sent it again to its ${isLid(other) ? 'hidden ID' : 'number'}`, { level: 'info' });
+    emit('message:status', { waId: newId });
+  } catch (e) {
+    audit('reply', `Couldn't resend a rejected message: ${e.message}`, { level: 'warn' });
+  }
+}
+setRejectedHandler(resendOnOtherAddress);
 
 // lid -> { pn, name, notify } from the persistent map.
 async function lidLookup(lids) {
