@@ -1,9 +1,8 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
-import { Modal, Empty, Loading, StatusBadge, clockTime, timeAgo, initials } from '../ui.jsx';
+import { Modal, Empty, Loading, StatusBadge } from '../ui.jsx';
 
 // What to call a chat: its name, else its number — never an @lid (WhatsApp's id for a
 // contact whose number it hasn't shared with this device), which only looks like a number.
@@ -13,12 +12,62 @@ function chatTitle(c) {
   if (c?.name) return c.name;
   if (c?.is_group) return 'Group chat';
   if (c?.lid_only) return c?.push_name ? `~${c.push_name}` : 'Unknown contact';
-  return '+' + c?.phone;
+  return fmtPhone(c?.phone);
+}
+// A number the way WhatsApp writes it: "+971 55 968 2523", "+92 325 7847744". Countries
+// without a known pattern stay "+<digits>".
+const PHONE_GROUPS = [
+  ['971', [2, 3, 4]],
+  ['966', [2, 3, 4]],
+  ['92', [3, 7]],
+  ['91', [5, 5]],
+  ['44', [4, 6]],
+  ['1', [3, 3, 4]],
+];
+export function fmtPhone(p) {
+  const d = String(p || '').replace(/\D/g, '');
+  if (!d) return '';
+  for (const [cc, groups] of PHONE_GROUPS) {
+    if (!d.startsWith(cc)) continue;
+    const rest = d.slice(cc.length);
+    if (rest.length !== groups.reduce((a, b) => a + b, 0)) break;
+    let i = 0;
+    return `+${cc} ${groups.map((n) => rest.slice(i, (i += n))).join(' ')}`;
+  }
+  return `+${d}`;
+}
+// Round avatar like WhatsApp's: the name's first letter, a person for a bare number, people
+// for a group.
+function ChatAvatar({ c, size = '' }) {
+  const letter = String(c?.name || (c?.lid_only ? c?.push_name : '') || '')
+    .trim()
+    .match(/[\p{L}\p{N}]/u)?.[0]
+    ?.toUpperCase();
+  return (
+    <div className={`wa-avatar ${size}`} aria-hidden="true">
+      {c?.is_group ? <Icon.users /> : letter || <Icon.user />}
+    </div>
+  );
+}
+// Chat-list time like WhatsApp: "3:09 PM" today, "Yesterday", the weekday this week, else the date.
+function listTime(iso) {
+  const d = asDate(iso);
+  if (!d) return '';
+  const now = new Date();
+  if (sameDay(d, now)) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const y = new Date(now);
+  y.setDate(now.getDate() - 1);
+  if (sameDay(d, y)) return 'Yesterday';
+  if (now - d < 6 * 86400000) return d.toLocaleDateString([], { weekday: 'long' });
+  return d.toLocaleDateString();
+}
+// A message's time: "2:55 PM" (no leading zero, like WhatsApp).
+function msgTime(iso) {
+  const d = asDate(iso);
+  return d ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
 }
 // The "~Name" shown beside a number for someone not saved on this phone.
 const pushName = (c) => (!c?.name && !c?.is_group && !c?.lid_only && c?.push_name ? `~${c.push_name}` : '');
-// Avatar letters only from a saved name (or the ~name when the number is hidden); unsaved → number digits.
-const chatInitials = (c) => initials(c?.name || (c?.lid_only ? c?.push_name : ''), c?.lid_only || c?.is_group ? '' : c?.phone);
 
 // WhatsApp text formatting: *bold*, _italic_, ~strike~, ```mono``` and clickable links.
 // Built as React nodes (never innerHTML), so message text can't inject markup.
@@ -116,9 +165,35 @@ function MessageMedia({ m, onLoad }) {
 function Ticks({ status }) {
   // WhatsApp refused it (e.g. admins-only group) — it was never delivered.
   if (status === 'failed') return <span className="msg-failed" title="Not sent — WhatsApp rejected this message">! Not sent</span>;
-  if (status === 'read') return <span style={{ color: '#53bdeb' }}>✓✓</span>;
-  if (status === 'delivered') return <span>✓✓</span>;
-  return <span>✓</span>; // sent / unknown
+  const two = status === 'read' || status === 'delivered';
+  const label = status === 'read' ? 'Read' : status === 'delivered' ? 'Delivered' : 'Sent';
+  return (
+    <svg className={`wa-ticks${status === 'read' ? ' read' : ''}`} viewBox="0 0 18 11" width="18" height="11" role="img" aria-label={label}>
+      <g fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d={two ? 'M1.2 5.8l2.9 2.9 6.4-7.4' : 'M3.5 5.8l2.9 2.9 6.4-7.4'} />
+        {two && <path d="M7.6 8.1l.6.6 6.4-7.4" />}
+      </g>
+    </svg>
+  );
+}
+
+// The picture on the empty chat pane (drawn for this app): a phone with a chat on it.
+function ChatsArt() {
+  return (
+    <svg viewBox="0 0 220 150" width="220" height="150" aria-hidden="true">
+      <rect x="30" y="18" width="160" height="112" rx="14" fill="#fff" stroke="#111b21" strokeWidth="2.5" />
+      <rect x="30" y="18" width="160" height="26" rx="14" fill="#d9fdd3" stroke="#111b21" strokeWidth="2.5" />
+      <rect x="31.5" y="32" width="157" height="11" fill="#d9fdd3" />
+      <circle cx="48" cy="31" r="6" fill="#1daa61" />
+      <rect x="60" y="27" width="44" height="7" rx="3.5" fill="#111b21" opacity=".75" />
+      <rect x="46" y="56" width="78" height="20" rx="8" fill="#f7f5f3" stroke="#111b21" strokeWidth="2" />
+      <rect x="96" y="84" width="80" height="20" rx="8" fill="#d9fdd3" stroke="#111b21" strokeWidth="2" />
+      <rect x="54" y="63" width="50" height="5" rx="2.5" fill="#111b21" opacity=".55" />
+      <rect x="104" y="91" width="54" height="5" rx="2.5" fill="#15603e" opacity=".7" />
+      <path d="M160 107l3 3 6-7" fill="none" stroke="#007bfc" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M182 22l4-9M192 30l9-4M188 14l3-3" stroke="#1daa61" strokeWidth="3" strokeLinecap="round" />
+    </svg>
+  );
 }
 
 const PinIcon = () => (
@@ -127,7 +202,6 @@ const PinIcon = () => (
   </svg>
 );
 
-// Get the header's action slot so page-specific controls render up in the top bar.
 // History sync for one number, shown as a loading line under its tab: first WhatsApp sends
 // the history (its own %), then the server saves what arrived (can take minutes on a big phone).
 function syncLabel(s) {
@@ -150,14 +224,6 @@ function TabSync({ sync }) {
       <span className={`wa-tab-sync-bar${pct == null ? ' indeterminate' : ''}`} style={pct == null ? undefined : { width: `${Math.max(3, pct)}%` }} />
     </span>
   );
-}
-
-function useHeaderSlot() {
-  const [node, setNode] = useState(null);
-  useEffect(() => {
-    setNode(document.getElementById('topbar-slot'));
-  }, []);
-  return node;
 }
 
 function asDate(iso) {
@@ -187,6 +253,7 @@ export default function Conversations({ go }) {
   const { toast, onBus, wa, can } = useApp();
   const [threads, setThreads] = useState([]);
   const [threadsLoaded, setThreadsLoaded] = useState(false);
+  const [counts, setCounts] = useState(null); // chip numbers: { all, unread, groups, handoff }
   const [filter, setFilter] = useState('');
   const [search, setSearch] = useState('');
   const [active, setActive] = useState(null); // contactId
@@ -272,10 +339,12 @@ export default function Conversations({ go }) {
 
   const loadThreads = async () => {
     if (!account) return; // waiting for the number list (opens on the default number)
-    const params = new URLSearchParams({ account });
+    const params = new URLSearchParams({ account, counts: '1' });
     if (filter) params.set('filter', filter);
     try {
-      setThreads(await api.get('/conversations?' + params));
+      const r = await api.get('/conversations?' + params);
+      setThreads(Array.isArray(r) ? r : r.rows || []);
+      setCounts(Array.isArray(r) ? null : r.counts || null);
     } finally {
       setThreadsLoaded(true);
     }
@@ -466,37 +535,8 @@ export default function Conversations({ go }) {
           (t.last_message || '').toLowerCase().includes(q)
       );
 
-  const headerSlot = useHeaderSlot();
-  const controls = (
-    <div className="conv-header-ctrls">
-      <div className="wa-filters">
-        {[['', 'All'], ['unread', 'Unread'], ['groups', 'Groups'], ['handoff', 'Needs human']].map(([v, label]) => (
-          <button key={v || 'all'} className={`wa-pill ${filter === v ? 'active' : ''}`} onClick={() => setFilter(v)}>
-            {v === 'handoff' && <Icon.warn style={{ width: 13, verticalAlign: '-2px' }} />} {label}
-          </button>
-        ))}
-      </div>
-      {aiAvail && (
-        <>
-          <button
-            className={`btn sm ${autoReply ? 'primary' : ''}`}
-            onClick={toggleAutoReply}
-            disabled={!account}
-            title="When on, AI answers incoming replies automatically"
-          >
-            <Icon.sparkles /> AI auto-reply: {autoReply ? 'On' : 'Off'}
-          </button>
-          <button className="btn sm" onClick={() => setShowAiSettings(true)} disabled={!account} title="AI auto-reply settings">
-            <Icon.settings />
-          </button>
-        </>
-      )}
-    </div>
-  );
-
   return (
     <>
-      {headerSlot ? createPortal(controls, headerSlot) : null}
       {showAiSettings && (
         <AiReplySettings
           account={account}
@@ -541,20 +581,68 @@ export default function Conversations({ go }) {
         </button>}
       </div>
 
-      <div className="chat-layout">
+      <div className={`chat-layout wa-web${thread ? ' has-thread' : ''}`}>
         <div className="thread-list">
-          <div className="thread-search">
+          <div className="wa-list-head">
+            <h2 className="wa-list-title">Chats</h2>
+            <div className="wa-list-actions">
+              {aiAvail && (
+                <button
+                  className={`wa-ai-toggle ${autoReply ? 'on' : ''}`}
+                  onClick={toggleAutoReply}
+                  disabled={!account}
+                  aria-pressed={autoReply}
+                  title={autoReply ? 'AI auto-reply is on for this number — click to turn it off' : 'AI auto-reply is off — click to let AI answer incoming messages'}
+                >
+                  <Icon.sparkles /> AI {autoReply ? 'on' : 'off'}
+                </button>
+              )}
+              {aiAvail && (
+                <button className="wa-icon-btn" onClick={() => setShowAiSettings(true)} disabled={!account} title="AI auto-reply settings" aria-label="AI auto-reply settings">
+                  <Icon.settings />
+                </button>
+              )}
+              <button className="wa-icon-btn" onClick={() => { loadThreads(); loadAccounts(); }} title="Refresh chats" aria-label="Refresh chats">
+                <Icon.refresh />
+              </button>
+            </div>
+          </div>
+          <div className="wa-search">
             <Icon.search />
-            <input
-              className="input"
-              placeholder="Search chats…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
+            <input placeholder="Search chats" aria-label="Search chats" value={search} onChange={(e) => setSearch(e.target.value)} />
+            {search && (
+              <button className="wa-search-clear" onClick={() => setSearch('')} aria-label="Clear search"><Icon.x /></button>
+            )}
+          </div>
+          <div className="wa-chips" role="tablist" aria-label="Filter chats">
+            {[['', 'All'], ['unread', 'Unread'], ['groups', 'Groups'], ['handoff', 'Needs human']].map(([v, label]) => {
+              const n = v && counts ? counts[v] : 0;
+              return (
+                <button key={v || 'all'} role="tab" aria-selected={filter === v} className={`wa-chip ${filter === v ? 'active' : ''}`} onClick={() => setFilter(v)}>
+                  {label}
+                  {n ? <span className="wa-chip-n">{n > 999 ? '999+' : n}</span> : null}
+                </button>
+              );
+            })}
           </div>
           {activeAcct?.sync && threads.length > 0 && (
-            <div className="sync-banner"><span className="wa-spin" /> {syncLabel(activeAcct.sync)}</div>
+            <div className="wa-banner" role="status">
+              <span className="wa-banner-icon"><Icon.refresh /></span>
+              <div className="wa-banner-body">
+                <div className="wa-banner-title">
+                  {activeAcct.sync.fetching ? 'Syncing your chats' : 'Saving your chats'}
+                  {activeAcct.sync.fetching && activeAcct.sync.progress != null ? ` · ${activeAcct.sync.progress}%` : ''}
+                </div>
+                <div className="wa-banner-text">
+                  {activeAcct.sync.fetching
+                    ? 'WhatsApp is sending this number’s chat history. Chats appear here as they arrive.'
+                    : `Saving what WhatsApp sent${activeAcct.sync.saved ? ` — ${activeAcct.sync.saved.toLocaleString()} messages so far` : ''}${activeAcct.sync.pending > 1 ? `, ${activeAcct.sync.pending} batches left` : ''}.`}
+                </div>
+                <TabSync sync={activeAcct.sync} />
+              </div>
+            </div>
           )}
+          <div className="wa-chat-scroll">
           {!threadsLoaded ? (
             <Loading label="Loading chats…" minHeight={200} />
           ) : threads.length === 0 ? (
@@ -562,8 +650,8 @@ export default function Conversations({ go }) {
               <Loading label="Syncing your chats…" minHeight={200} />
             ) : (
               <div style={{ padding: 30 }}>
-                <Empty icon="chat" title="No conversations">
-                  Replies and your WhatsApp chats appear here.
+                <Empty icon="chat" title={filter ? 'No chats here' : 'No conversations'}>
+                  {filter ? 'No chat matches this filter.' : 'Replies and your WhatsApp chats appear here.'}
                 </Empty>
               </div>
             )
@@ -575,59 +663,91 @@ export default function Conversations({ go }) {
             shown.map((t) => (
               <div
                 key={t.id}
-                className={`thread-item ${active === t.id ? 'active' : ''}`}
+                className={`thread-item wa-row ${active === t.id ? 'active' : ''} ${t.unread > 0 ? 'unread' : ''}`}
                 onClick={() => setActive(t.id)}
+                onKeyDown={(e) => { if (e.key === 'Enter') setActive(t.id); }}
+                role="button"
+                tabIndex={0}
               >
-                <div className="avatar lg">{chatInitials(t)}</div>
-                <div className="thread-main">
-                  <div className="thread-row1">
-                    <span className="thread-name-txt">
-                      {t.is_group === 1 && <Icon.users style={{ width: 13, opacity: 0.6, verticalAlign: '-2px', marginRight: 4 }} />}
-                      {chatTitle(t)}
-                      {pushName(t) ? <span className="thread-push">{pushName(t)}</span> : null}
+                <ChatAvatar c={t} />
+                <div className="wa-row-main">
+                  <div className="wa-row-top">
+                    <span className="wa-row-name">
+                      <span className="wa-row-title">{chatTitle(t)}</span>
+                      {pushName(t) ? <span className="wa-row-push">{pushName(t)}</span> : null}
                     </span>
-                    <span className={`thread-time ${t.unread > 0 ? 'unread' : ''}`}>{timeAgo(t.last_at)}</span>
+                    <span className="wa-row-time">{listTime(t.last_at)}</span>
                   </div>
-                  <div className="thread-row2">
-                    <span className="thread-preview">
-                      {t.last_direction === 'out' && <span className="preview-tick"><Ticks status={t.last_status} /> </span>}
+                  <div className="wa-row-bottom">
+                    <span className="wa-row-preview">
+                      {t.last_direction === 'out' && <Ticks status={t.last_status} />}
                       {t.is_group === 1 && t.last_direction === 'in' && t.last_sender ? (
-                        <span className="preview-sender">{t.last_sender}: </span>
+                        <span className="wa-row-sender">{t.last_sender}: </span>
                       ) : null}
                       {t.last_message}
                     </span>
-                    <span className="thread-end">
+                    <span className="wa-row-end">
+                      {t.handoff === 1 && (
+                        <span className="wa-row-handoff" title={t.handoff_reason === 'ai' ? "The AI couldn't answer this — reply yourself, then Resolve" : 'Waiting for your reply'}>
+                          {t.handoff_reason === 'ai' ? 'Needs you' : 'Handoff'}
+                        </span>
+                      )}
+                      {t.unread > 0 && <span className="wa-badge" aria-label={`${t.unread} unread`}>{t.unread}</span>}
                       <button
-                        className={`thread-pin ${t.pinned ? 'on' : ''}`}
-                        title={t.pinned ? 'Unpin' : 'Pin'}
+                        className={`wa-row-pin ${t.pinned ? 'on' : ''}`}
+                        title={t.pinned ? 'Unpin chat' : 'Pin chat'}
+                        aria-label={t.pinned ? 'Unpin chat' : 'Pin chat'}
                         onClick={(e) => { e.stopPropagation(); pinChat(t); }}
                       >
                         <PinIcon />
                       </button>
-                      {t.handoff === 1 && (
-                        <span className="badge amber" style={{ padding: '0 6px' }} title={t.handoff_reason === 'ai' ? "The AI couldn't answer this — reply yourself, then Resolve" : 'Waiting for your reply'}>
-                          {t.handoff_reason === 'ai' ? 'needs you' : 'handoff'}
-                        </span>
-                      )}
-                      {t.unread > 0 && <span className="unread-badge">{t.unread}</span>}
                     </span>
                   </div>
                 </div>
               </div>
             ))
           )}
+          </div>
         </div>
 
         <div className="chat-panel">
           {!thread ? (
-            <div style={{ margin: 'auto', textAlign: 'center', color: 'var(--text-soft)' }}>
-              <Icon.chat style={{ width: 40, opacity: 0.4 }} />
-              <p style={{ marginTop: 10 }}>Select a conversation</p>
+            <div className="wa-empty">
+              <div className="wa-empty-card">
+                <ChatsArt />
+                <h3>Pick a chat to start replying</h3>
+                <p>
+                  Messages to {activeAcct?.label || 'this number'}
+                  {activeAcct?.phone ? ` (${fmtPhone(activeAcct.phone)})` : ''} arrive here as they come in. Your replies go out from this number.
+                </p>
+                {can('gateway') && (
+                  <button className="wa-soft-btn" onClick={() => go?.('gateway')}>Manage numbers</button>
+                )}
+              </div>
+              <div className="wa-quick">
+                {[['contacts', 'Contacts', Icon.users], ['templates', 'Templates', Icon.template], ['campaigns', 'Campaigns', Icon.megaphone]]
+                  .filter(([page]) => can(page))
+                  .map(([page, label, Ico]) => (
+                    <button key={page} className="wa-quick-btn" onClick={() => go?.(page)}>
+                      <span className="wa-quick-icon"><Ico /></span>
+                      {label}
+                    </button>
+                  ))}
+                {aiAvail && (
+                  <button className="wa-quick-btn" onClick={() => setShowAiSettings(true)} disabled={!account}>
+                    <span className="wa-quick-icon"><Icon.sparkles /></span>
+                    AI replies
+                  </button>
+                )}
+              </div>
             </div>
           ) : (
             <>
               <div className="chat-head">
-                <div className="avatar">{chatInitials(thread.contact)}</div>
+                <button className="wa-back" onClick={() => { setActive(null); setThread(null); }} aria-label="Back to chats" title="Back to chats">
+                  <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M20 11H7.8l5.6-5.6L12 4l-8 8 8 8 1.4-1.4L7.8 13H20z" fill="currentColor" /></svg>
+                </button>
+                <ChatAvatar c={thread.contact} size="md" />
                 <div style={{ flex: 1 }}>
                   <strong>
                     {chatTitle(thread.contact)}
@@ -640,7 +760,7 @@ export default function Conversations({ go }) {
                         {thread.contact.lid_only
                           ? 'Number hidden by WhatsApp'
                           : thread.contact.name
-                            ? '+' + thread.contact.phone
+                            ? fmtPhone(thread.contact.phone)
                             : pushName(thread.contact) || 'Not in your contacts'}{' '}
                         · <StatusBadge status={thread.contact.status} />
                       </>
@@ -691,7 +811,7 @@ export default function Conversations({ go }) {
                           <span className="chip" style={{ marginLeft: 6, fontSize: 9.5, padding: '0 6px' }}>AI</span>
                         )}
                         <div className="time">
-                          {clockTime(m.created_at)} {m.direction === 'out' && <Ticks status={m.status} />}
+                          {msgTime(m.created_at)} {m.direction === 'out' && <Ticks status={m.status} />}
                         </div>
                         {reacts.length ? (
                           <div className="bubble-reacts" title={reacts.map((r) => r.emoji).join(' ')}>

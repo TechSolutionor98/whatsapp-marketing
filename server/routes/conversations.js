@@ -187,6 +187,7 @@ conversations.delete('/accounts/:id', async (req, res) => {
 // Thread list: one row per contact that has messages, newest activity first.
 conversations.get('/', async (req, res) => {
   const { filter = '', account = 'main' } = req.query;
+  const withCounts = req.query.counts === '1'; // the chips' numbers: Unread 57, Groups 25, …
   // One row per contact (for this account tab), ordered by most recent message.
   const summaries = await db
     .messages()
@@ -210,19 +211,23 @@ conversations.get('/', async (req, res) => {
 
   const phoneOfTab = await tabPhone(account);
   const ids = summaries.map((s) => oid(s._id)).filter(Boolean);
-  const cfilter = { _id: { $in: ids } };
-  if (filter === 'handoff') cfilter.handoff = 1;
-  else if (filter === 'groups') cfilter.is_group = 1;
-  else if (filter === 'unread') cfilter.unread = { $gt: 0 };
-  const contactsList = await db.contacts().find(cfilter).toArray();
+  // Every chat of this tab once (the counts need all of them); the filter is applied below.
+  const contactsList = await db.contacts().find({ _id: { $in: ids } }).toArray();
   const byId = new Map(contactsList.map((c) => [String(c._id), c]));
+  const counts = { all: 0, unread: 0, groups: 0, handoff: 0 };
+  const passes = (c, handoff) =>
+    filter === 'handoff' ? !!handoff : filter === 'groups' ? !!c.is_group : filter === 'unread' ? (c.unread || 0) > 0 : true;
 
   const rows = [];
   for (const s of summaries) {
     const c = byId.get(s._id);
     if (!c) continue;
     const handoff = handoffFor(c, phoneOfTab); // only when THIS number's chat needs a person
-    if (filter === 'handoff' && !handoff) continue;
+    counts.all++;
+    if ((c.unread || 0) > 0) counts.unread++;
+    if (c.is_group) counts.groups++;
+    if (handoff) counts.handoff++;
+    if (!passes(c, handoff) || rows.length >= 300) continue;
     rows.push({
       id: String(c._id),
       name: chatNameFor(c, phoneOfTab),
@@ -244,11 +249,10 @@ conversations.get('/', async (req, res) => {
       last_sender: s.last_sender || '',
       last_at: s.last_at,
     });
-    if (rows.length >= 300) break;
   }
   // Pinned chats float to the top (keeping recent-activity order within each group).
   rows.sort((a, b) => b.pinned - a.pinned);
-  res.json(rows);
+  res.json(withCounts ? { rows, counts } : rows);
 });
 
 // Pin / unpin a chat (no limit on how many).
