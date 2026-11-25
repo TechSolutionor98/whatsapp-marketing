@@ -9,6 +9,7 @@ import { Modal, Loading, Empty, timeAgo } from '../ui.jsx';
 // a key; the server is /api/v1 (server/routes/public-api.js).
 
 const TABS = [
+  ['number', 'Number & sending', 'phone'],
   ['keys', 'API keys', 'key'],
   ['pos', 'POS receipt button', 'receipt'],
   ['reference', 'API reference', 'book'],
@@ -18,6 +19,21 @@ const KEY_HOLDER = 'YOUR_API_KEY';
 const apiBase = () => `${window.location.origin}/api/v1`;
 const numName = (n) => `${n.label || n.name || 'Number'} · +${n.phone}${n.kind === 'cloud' ? ' (Official API)' : ''}`;
 const fmtNum = (n) => Number(n || 0).toLocaleString();
+// "in 45 s" / "in 3 min" / "now"
+const fromNow = (iso) => {
+  const s = Math.round((new Date(iso).getTime() - Date.now()) / 1000);
+  if (!(s > 1)) return 'now';
+  if (s < 60) return `in ${s} s`;
+  if (s < 3600) return `in ${Math.round(s / 60)} min`;
+  return `in ${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`;
+};
+const secs = (n) => (n < 60 ? `${n} second${n === 1 ? '' : 's'}` : n % 60 === 0 ? `${n / 60} minute${n === 60 ? '' : 's'}` : `${Math.floor(n / 60)} min ${n % 60} s`);
+// What a key's "Send from: Automatic" means right now.
+const automaticName = (data) => {
+  if (data.api_number?.phone) return `Automatic — the API number (+${data.api_number.phone})`;
+  const d = data.numbers.find((n) => n.default);
+  return `Automatic — default Gateway number${d ? ` (+${d.phone})` : ''}`;
+};
 
 function useCopy() {
   const { toast } = useApp();
@@ -217,7 +233,6 @@ function KeyModal({ data, editing, onClose, onSaved }) {
   const [name, setName] = useState(editing?.name || '');
   const [sender, setSender] = useState(editing?.sender || 'default');
   const [busy, setBusy] = useState(false);
-  const def = data.numbers.find((n) => n.default);
   async function save(e) {
     e.preventDefault();
     setBusy(true);
@@ -249,12 +264,17 @@ function KeyModal({ data, editing, onClose, onSaved }) {
         <div className="field">
           <label htmlFor="dev-key-sender">Send from</label>
           <select id="dev-key-sender" className="select" value={sender} onChange={(e) => setSender(e.target.value)}>
-            <option value="default">Default number{def ? ` (now +${def.phone})` : ''}</option>
-            {data.numbers.map((n) => (
-              <option key={n.phone} value={n.phone}>{numName(n)}</option>
-            ))}
+            <option value="default">{automaticName(data)}</option>
+            {data.api_number?.phone && <option value={data.api_number.phone}>API number · +{data.api_number.phone}</option>}
+            {data.numbers.length > 0 && (
+              <optgroup label="WhatsApp Gateway numbers">
+                {data.numbers.map((n) => (
+                  <option key={n.phone} value={n.phone}>{numName(n)}</option>
+                ))}
+              </optgroup>
+            )}
           </select>
-          <div className="hint">Messages sent with this key go out from this WhatsApp number.</div>
+          <div className="hint">Automatic sends from the API number when one is linked (Number &amp; sending tab), otherwise from the default Gateway number.</div>
         </div>
       </form>
     </Modal>
@@ -326,6 +346,323 @@ function TestCard({ data }) {
   );
 }
 
+// ---- Number & sending: the API-only number, how fast it sends, and the queue ----
+function ApiNumberCard({ data, reload }) {
+  const { toast } = useApp();
+  const [n, setN] = useState(data.api_number);
+  const [busy, setBusy] = useState(false);
+  const [unlinking, setUnlinking] = useState(false);
+  useEffect(() => setN(data.api_number), [data.api_number]);
+  // While a QR code is up (it changes) or it's connecting, ask every 2 s.
+  const waiting = n && n.status !== 'connected' && !(n.status === 'disconnected' && !n.qr);
+  useEffect(() => {
+    if (!waiting) return;
+    const t = setInterval(async () => {
+      try {
+        const x = await api.get('/developer/number');
+        setN(x);
+        if (x?.status === 'connected') {
+          toast(`API number +${x.phone} connected`, 'success');
+          reload();
+        }
+      } catch {}
+    }, 2000);
+    return () => clearInterval(t);
+  }, [waiting, n?.id]);
+  async function call(fn) {
+    setBusy(true);
+    try {
+      await fn();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+    setBusy(false);
+  }
+  const link = () => call(async () => setN(await api.post('/developer/number', {})));
+  const reconnect = () => call(async () => setN(await api.post('/developer/number/reconnect', {})));
+  const unlink = () =>
+    call(async () => {
+      await api.del('/developer/number');
+      setUnlinking(false);
+      toast('API number unlinked', 'success');
+      reload();
+    });
+  return (
+    <div className="card">
+      <div className="card-head">
+        <Icon.phone style={{ width: 18, color: 'var(--brand-700)' }} />
+        <div style={{ flex: 1 }}>
+          <h3>API number</h3>
+          <div className="sub">A WhatsApp number used only by the API: receipts and messages from your POS, website or app.</div>
+        </div>
+        {n?.status === 'connected' && <span className="dev-live"><span className="dev-live-dot" /> Connected</span>}
+      </div>
+      <div className="card-pad">
+        {!n ? (
+          <div className="dev-number-empty">
+            <ul className="dev-list">
+              <li>Its own number, so API messages don't go out from the number your team chats on.</li>
+              <li>Only for the API: its chats don't show in Conversations, and campaigns and warm-up never send from it.</li>
+              <li>Keys set to <strong>Automatic</strong> send from it. A key can still use a WhatsApp Gateway number instead.</li>
+            </ul>
+            <button className="btn primary" onClick={link} disabled={busy}><Icon.plus /> {busy ? 'Starting…' : 'Link the API number'}</button>
+          </div>
+        ) : n.status === 'connected' ? (
+          <div className="dev-number-row">
+            <div className="dev-number-avatar"><Icon.phone /></div>
+            <div style={{ flex: 1 }}>
+              <div className="dev-number-phone">+{n.phone}</div>
+              <div className="cell-muted">{n.name || n.label} · sends the API's messages</div>
+            </div>
+            <button className="btn sm danger-text" onClick={() => setUnlinking(true)}>Unlink</button>
+          </div>
+        ) : n.qr ? (
+          <div className="qr-stage dev-qr">
+            <div className="qr-box"><img src={n.qr} alt="QR code to link the API number" /></div>
+            <div>
+              <h4 className="dev-h4" style={{ marginTop: 0 }}>Scan with the phone of the API number</h4>
+              <ol className="dev-list">
+                <li>Open WhatsApp on that phone.</li>
+                <li>Tap <strong>Settings → Linked devices → Link a device</strong>.</li>
+                <li>Point the phone at this code. It refreshes by itself.</li>
+              </ol>
+              <button className="btn sm" onClick={() => setUnlinking(true)} disabled={busy}>Cancel</button>
+            </div>
+          </div>
+        ) : n.phone && n.status === 'disconnected' ? (
+          <div className="dev-number-row">
+            <div className="dev-number-avatar off"><Icon.phone /></div>
+            <div style={{ flex: 1 }}>
+              <div className="dev-number-phone">+{n.phone}</div>
+              <div className="cell-muted">Not connected. Messages wait in the queue until it's back (up to 24 hours).</div>
+            </div>
+            <button className="btn sm primary" onClick={reconnect} disabled={busy}><Icon.refresh /> Reconnect</button>
+            <button className="btn sm danger-text" onClick={() => setUnlinking(true)}>Unlink</button>
+          </div>
+        ) : (
+          <div className="dev-number-row">
+            <span className="wa-spin" />
+            <div style={{ flex: 1 }} className="cell-muted">{n.phone ? `Connecting +${n.phone}…` : 'Getting a QR code…'}</div>
+            <button className="btn sm" onClick={() => setUnlinking(true)} disabled={busy}>Cancel</button>
+          </div>
+        )}
+      </div>
+      {unlinking && (
+        <Modal
+          title={n?.phone ? `Unlink +${n.phone}?` : 'Stop linking the API number?'}
+          onClose={() => setUnlinking(false)}
+          footer={
+            <>
+              <button className="btn" onClick={() => setUnlinking(false)}>Keep it</button>
+              <button className="btn danger" onClick={unlink} disabled={busy}>{n?.phone ? 'Unlink' : 'Stop'}</button>
+            </>
+          }
+        >
+          <p className="dev-p" style={{ margin: 0 }}>
+            {n?.phone
+              ? "Keys set to Automatic will send from the default Gateway number instead. Messages still waiting for this number are cancelled. The phone itself keeps all its chats."
+              : 'The QR code goes away. You can link a number again any time.'}
+          </p>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function SendingCard({ data, reload }) {
+  const { toast } = useApp();
+  const s = data.sending;
+  const lim = data.sending_limits;
+  const [perBatch, setPerBatch] = useState(s.per_batch);
+  const [gap, setGap] = useState(s.gap_seconds);
+  const [maxQ, setMaxQ] = useState(s.max_queue);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    setPerBatch(s.per_batch);
+    setGap(s.gap_seconds);
+    setMaxQ(s.max_queue);
+  }, [s.per_batch, s.gap_seconds, s.max_queue]);
+  const num = (v, [lo, hi]) => Math.min(hi, Math.max(lo, Math.round(Number(v) || 0)));
+  const pb = num(perBatch, lim.per_batch);
+  const g = num(gap, lim.gap_seconds);
+  const dirty = pb !== s.per_batch || g !== s.gap_seconds || num(maxQ, lim.max_queue) !== s.max_queue;
+  const perHour = g > 0 ? Math.floor((3600 / g) * pb) : null;
+  const risky = pb > 10 && g < 30;
+  async function save(e) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await api.put('/developer/settings', { per_batch: pb, gap_seconds: g, max_queue: num(maxQ, lim.max_queue) });
+      toast('Sending settings saved', 'success');
+      reload();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+    setBusy(false);
+  }
+  return (
+    <div className="card">
+      <div className="card-head">
+        <Icon.clock style={{ width: 18, color: 'var(--brand-700)' }} />
+        <div style={{ flex: 1 }}>
+          <h3>Sending settings</h3>
+          <div className="sub">How fast API messages go out. These are separate from campaign and warm-up settings.</div>
+        </div>
+      </div>
+      <form className="card-pad" onSubmit={save}>
+        <div className="dev-send-grid">
+          <div className="field">
+            <label htmlFor="dev-per-batch">Messages sent at a time</label>
+            <input id="dev-per-batch" className="input" type="number" min={lim.per_batch[0]} max={lim.per_batch[1]} value={perBatch} onChange={(e) => setPerBatch(e.target.value)} />
+            <div className="hint">{lim.per_batch[0]}–{lim.per_batch[1]} messages, a few seconds apart.</div>
+          </div>
+          <div className="field">
+            <label htmlFor="dev-gap">Then wait (seconds)</label>
+            <input id="dev-gap" className="input" type="number" min={lim.gap_seconds[0]} max={lim.gap_seconds[1]} value={gap} onChange={(e) => setGap(e.target.value)} />
+            <div className="dev-chips">
+              {[0, 5, 15, 30, 60, 120, 300].map((v) => (
+                <button type="button" key={v} className={`chip-btn ${g === v ? 'on' : ''}`} onClick={() => setGap(v)}>{v === 0 ? 'No wait' : v < 60 ? `${v}s` : `${v / 60} min`}</button>
+              ))}
+            </div>
+          </div>
+          <div className="field">
+            <label htmlFor="dev-maxq">Most messages in the queue</label>
+            <input id="dev-maxq" className="input" type="number" min={lim.max_queue[0]} max={lim.max_queue[1]} value={maxQ} onChange={(e) => setMaxQ(e.target.value)} />
+            <div className="hint">More than this and new requests get <code>429 queue_full</code>.</div>
+          </div>
+        </div>
+        <div className="dev-send-summary">
+          {g > 0 ? (
+            <>Sends <strong>{pb} message{pb === 1 ? '' : 's'}</strong>, then waits <strong>{secs(g)}</strong> — about <strong>{fmtNum(perHour)} an hour</strong>. </>
+          ) : (
+            <>Sends <strong>{pb} message{pb === 1 ? '' : 's'}</strong> at a time with no wait between batches. </>
+          )}
+          Messages that arrive faster wait in the queue and go out in order; your software gets <code>"status": "queued"</code> (HTTP 202) for them.
+        </div>
+        {risky && <div className="auth-error" style={{ marginTop: 10 }}>Sending this fast from a number linked by QR code can get it banned. For big volumes, keep it to 5 or fewer at a time with 30 seconds or more between.</div>}
+        <div className="dev-form-foot">
+          <button className="btn primary" disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save'}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function QueueCard({ data }) {
+  const { toast, onBus } = useApp();
+  const [q, setQ] = useState(null);
+  const [confirmAll, setConfirmAll] = useState(false);
+  const load = useCallback(async () => {
+    try {
+      setQ(await api.get('/developer/queue'));
+    } catch {}
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load, data.queue.total]);
+  useEffect(() => {
+    let t = null;
+    const off = onBus?.((ev) => {
+      if (ev === 'message:out' || ev === 'message:status') {
+        clearTimeout(t);
+        t = setTimeout(load, 800);
+      }
+    });
+    return () => {
+      clearTimeout(t);
+      off?.();
+    };
+  }, [onBus, load]);
+  // Count-downs while something is waiting.
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!q?.total) return;
+    const t = setInterval(() => tick((x) => x + 1), 1000);
+    const r = setInterval(load, 10000);
+    return () => {
+      clearInterval(t);
+      clearInterval(r);
+    };
+  }, [q?.total, load]);
+  async function cancel(id) {
+    try {
+      await api.del(id ? `/developer/queue/${id}` : '/developer/queue');
+      toast(id ? 'Message cancelled' : 'Queue cleared', 'success');
+      setConfirmAll(false);
+      load();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+  const nameOf = (phone) => (data.api_number?.phone === phone ? 'API number' : data.numbers.find((n) => n.phone === phone)?.label || `+${phone}`);
+  return (
+    <div className="card">
+      <div className="card-head">
+        <Icon.inbox style={{ width: 18, color: 'var(--brand-700)' }} />
+        <div style={{ flex: 1 }}>
+          <h3>Queue</h3>
+          <div className="sub">{q ? (q.total ? `${fmtNum(q.total)} waiting to go out` : 'Nothing waiting') : 'Loading…'}</div>
+        </div>
+        {q?.total > 0 && <button className="btn sm danger-text" onClick={() => setConfirmAll(true)}>Cancel all</button>}
+      </div>
+      {!q ? (
+        <Loading />
+      ) : q.total === 0 ? (
+        <Empty icon="inbox" title="The queue is empty">Messages wait here when they arrive faster than your sending settings allow, or while the number is offline.</Empty>
+      ) : (
+        <div className="table-wrap">
+          <table className="dev-table">
+            <thead>
+              <tr><th>To</th><th>Message</th><th>From</th><th>Queued</th><th>Goes out</th><th aria-label="Actions" /></tr>
+            </thead>
+            <tbody>
+              {q.items.map((m) => (
+                <tr key={m.id}>
+                  <td className="cell-strong">{m.name || `+${m.to}`}{m.name && <div className="cell-muted">+{m.to}</div>}</td>
+                  <td>
+                    <div className="dev-queue-text">{m.file_name ? `📄 ${m.file_name}` : m.text}</div>
+                    <div className="cell-muted">{m.key}{m.reference ? ` · ${m.reference}` : ''}</div>
+                  </td>
+                  <td className="cell-muted">{nameOf(m.from)}</td>
+                  <td className="cell-muted">{timeAgo(m.queued_at)}</td>
+                  <td>{fromNow(m.estimated_send_at)}</td>
+                  <td><button className="btn sm" onClick={() => cancel(m.id)}>Cancel</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {q.total > q.items.length && <div className="cell-muted" style={{ padding: '10px 16px' }}>…and {fmtNum(q.total - q.items.length)} more</div>}
+        </div>
+      )}
+      {confirmAll && (
+        <Modal
+          title={`Cancel all ${fmtNum(q.total)} waiting messages?`}
+          onClose={() => setConfirmAll(false)}
+          footer={
+            <>
+              <button className="btn" onClick={() => setConfirmAll(false)}>Keep them</button>
+              <button className="btn danger" onClick={() => cancel(null)}>Cancel all</button>
+            </>
+          }
+        >
+          <p className="dev-p" style={{ margin: 0 }}>They won't be sent. Your software sees them as <code>failed</code> with the code <code>cancelled</code>.</p>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function NumberTab({ data, reload }) {
+  return (
+    <>
+      {!data.enabled && <div className="auth-error">The Developer API is switched off by the super admin. API requests are refused.</div>}
+      <ApiNumberCard data={data} reload={reload} />
+      <SendingCard data={data} reload={reload} />
+      <QueueCard data={data} />
+    </>
+  );
+}
+
 function KeysTab({ data, reload, setTab }) {
   const { can, toast } = useApp();
   const [modal, setModal] = useState(null); // 'new' | key
@@ -335,10 +672,8 @@ function KeysTab({ data, reload, setTab }) {
   const linked = data.numbers.length > 0;
   const live = data.numbers.some((n) => n.connected);
   const senderName = (phone) => {
-    if (!phone) {
-      const d = data.numbers.find((n) => n.default);
-      return d ? `Default number (+${d.phone})` : 'Default number';
-    }
+    if (!phone) return automaticName(data);
+    if (data.api_number?.phone === phone) return `API number (+${phone})`;
     const n = data.numbers.find((x) => x.phone === phone);
     return n ? numName(n) : `+${phone} (no longer linked)`;
   };
@@ -355,7 +690,18 @@ function KeysTab({ data, reload, setTab }) {
     setBusy(false);
   }
   const steps = [
-    { done: live, title: 'Link a WhatsApp number', text: live ? 'Connected and ready to send.' : linked ? 'Linked, but not connected right now.' : 'Scan a QR code, or connect the official API.', action: !live && can('gateway') ? <button className="btn sm" onClick={() => (window.location.hash = '/gateway')}>Open WhatsApp Gateway</button> : null },
+    {
+      done: !!data.api_number?.connected || (!data.api_number && live),
+      title: 'Link the API number',
+      text: data.api_number?.connected
+        ? `+${data.api_number.phone} is connected and sends your API messages.`
+        : data.api_number
+          ? 'Linked, but not connected right now.'
+          : live
+            ? 'Sending from your default Gateway number for now. Link a separate number just for the API.'
+            : 'Scan a QR code with the WhatsApp you want receipts to come from.',
+      action: !data.api_number?.connected ? <button className="btn sm" onClick={() => setTab('number')}>Open Number &amp; sending</button> : null,
+    },
     { done: data.keys.length > 0, title: 'Create an API key', text: 'One for each POS or app, so you can delete one without touching the others.', action: data.enabled ? <button className="btn sm primary" onClick={() => setModal('new')}><Icon.plus /> Create key</button> : null },
     { done: false, title: 'Add it to your POS button', text: 'When the cashier taps "Send on WhatsApp", the receipt goes to the customer.', action: <button className="btn sm" onClick={() => setTab('pos')}>Read the guide</button> },
   ];
@@ -495,6 +841,7 @@ function PosTab({ setTab }) {
         <h4 className="dev-h4"><span className="dev-n">4</span> Show the result to the cashier</h4>
         <ul className="dev-list">
           <li><strong>Sent</strong> (HTTP 201): show a tick. The answer has <code>"status": "sent"</code> and the message <code>"id"</code>.</li>
+          <li><strong>Queued</strong> (HTTP 202): accepted, and it goes out shortly following your sending settings (<code>"status": "queued"</code>, with <code>"queue": &#123; "position", "estimated_send_at" &#125;</code>). Show a tick too.</li>
           <li><strong>Not sent</strong> (HTTP 4xx/5xx): show <code>error.message</code>. It's written for people, e.g. <em>"0501234567" looks like a local number. Use the full international number with the country code.</em></li>
           <li>Later you can check <code>GET {base}/messages/&#123;id&#125;</code> to see <em>delivered</em> or <em>read</em>.</li>
         </ul>
@@ -575,9 +922,11 @@ const ERRORS = [
   ['window_closed', 422, 'Official number, more than 24 hours since the customer wrote: send a template.'],
   ['template_not_found', 422, 'No approved template with that name and language.'],
   ['file_unreachable', 422, "The file link couldn't be downloaded, or points to a private address."],
-  ['rate_limited, busy', 429, 'Too many requests a minute, or too many waiting for one number. Retry shortly (see Retry-After).'],
+  ['rate_limited', 429, 'Too many requests a minute. Retry shortly (see Retry-After).'],
+  ['queue_full', 429, 'The queue is at its limit (Developer page → Number & sending). Retry in a little while.'],
   ['daily_limit', 429, "A QR-linked number reached today's API cap."],
   ['send_failed', 502, "WhatsApp or Meta didn't accept the message; the message says why."],
+  ['expired, cancelled, number_removed', '—', 'Only on a queued message that later failed (GET /messages/{id}): it waited over 24 hours, was cancelled on the Developer page, or its number was unlinked.'],
   ['number_not_connected, no_number', 503, 'The WhatsApp number is offline or none is linked. Reconnect it on WhatsApp Gateway.'],
 ];
 
@@ -601,7 +950,7 @@ function ReferenceTab() {
       </div>
 
       <Endpoint m="POST" path="/messages">
-        <p className="dev-p">Send a message. It answers once WhatsApp has taken it, with <strong>201</strong> (or <strong>200</strong> with <code>"duplicate": true</code> if this reference was already sent).</p>
+        <p className="dev-p">Send a message. If it can go out right away it answers once WhatsApp has taken it, with <strong>201</strong>. If it has to wait its turn (the sending settings on the Developer page, e.g. 5 messages then 60 seconds), it answers at once with <strong>202</strong> and <code>"status": "queued"</code>, plus <code>"queue": &#123; "position": 3, "estimated_send_at": "…" &#125;</code>; check it later with <code>GET /messages/&#123;id&#125;</code>. A reference that was already sent or queued answers <strong>200</strong> with <code>"duplicate": true</code>.</p>
         <div className="table-wrap">
           <table className="dev-table dev-fields">
             <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
@@ -640,7 +989,7 @@ Content-Type: application/json
       </Endpoint>
 
       <Endpoint m="GET" path="/messages/{id}">
-        <p className="dev-p">A message's delivery status. <code>status</code> moves from <strong>sent</strong> → <strong>delivered</strong> (on the customer's phone) → <strong>read</strong> (blue ticks; only if the customer has read receipts on), or becomes <strong>failed</strong> with an <code>error</code>.</p>
+        <p className="dev-p">A message's delivery status. <code>status</code> moves from <strong>queued</strong> (waiting its turn) → <strong>sent</strong> → <strong>delivered</strong> (on the customer's phone) → <strong>read</strong> (blue ticks; only if the customer has read receipts on), or becomes <strong>failed</strong> with an <code>error</code>.</p>
         <CodeBlock label="cURL" code={`curl ${base}/messages/6740c3f2a1b2c3d4e5f60718 \\
   -H "Authorization: Bearer ${KEY_HOLDER}"`} />
       </Endpoint>
@@ -654,8 +1003,9 @@ Content-Type: application/json
         <CodeBlock label="Response 200" code={`{
   "workspace": "Your business",
   "key": { "name": "Shop POS", "prefix": "twa_live_Ab3x" },
-  "number": { "phone": "971509876543", "label": "Shop", "type": "qr", "connected": true },
-  "limits": { "requests_per_minute": 60, "messages_per_day": 500 }
+  "number": { "phone": "971509876543", "label": "API number", "type": "qr", "connected": true, "api_only": true },
+  "limits": { "requests_per_minute": 60, "messages_per_day": 500 },
+  "sending": { "messages_per_batch": 5, "seconds_between_batches": 60, "max_queue": 500 }
 }`} />
       </Endpoint>
 
@@ -750,9 +1100,9 @@ export default function Developer() {
   const [tab, setTabState] = useState(() => {
     try {
       const t = localStorage.getItem('pulse.devTab');
-      return TABS.some(([id]) => id === t) ? t : 'keys';
+      return TABS.some(([id]) => id === t) ? t : 'number';
     } catch {
-      return 'keys';
+      return 'number';
     }
   });
   const setTab = (t) => {
@@ -803,6 +1153,7 @@ export default function Developer() {
           );
         })}
       </div>
+      {tab === 'number' && <NumberTab data={data} reload={load} />}
       {tab === 'keys' && <KeysTab data={data} reload={load} setTab={setTab} />}
       {tab === 'pos' && <PosTab setTab={setTab} />}
       {tab === 'reference' && <ReferenceTab />}

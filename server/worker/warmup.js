@@ -1,6 +1,7 @@
 import { db, audit, getSetting, nowIso, dayKey, listWorkspaces, isWsSuspended } from '../db/mongo.js';
 import { emit } from '../events.js';
 import { connectedAccounts, sendFromTo, reconnectPoolAccounts } from '../whatsapp/pool.js';
+import { resumeApiQueues } from '../developer.js';
 import { isMongoUp } from '../db/mongo.js';
 import { DEFAULT_WS, currentWs, runInWs } from '../tenant.js';
 import { getLimits } from '../limits.js';
@@ -192,6 +193,7 @@ function supervise() {
   if (!reconnected) {
     reconnected = true;
     reconnectPoolAccounts();
+    resumeApiQueues().catch(() => {}); // the Developer API's queued messages go out once numbers are back
   }
   const ids = new Set(listWorkspaces().map((w) => w.id));
   for (const id of ids) if (!loops.has(id)) scheduleNext(id, 6000);

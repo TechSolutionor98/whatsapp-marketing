@@ -72,6 +72,7 @@ export async function listNumbers() {
     const a = live.get(id);
     const role = a?.role || d.role || 'warmup';
     if (role === 'warmup') continue; // warm-up numbers live only in the Warmup page
+    if (role === 'api') continue; // the Developer page's API-only number: no tab, not a Gateway number
     const phone = a?.me?.phone || d.phone || null;
     if (!phone) continue; // not linked yet (awaiting first QR scan)
     raw.push({

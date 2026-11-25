@@ -5,7 +5,7 @@ import express, { Router } from 'express';
 import { isMongoUp, workspaceOf } from '../db/mongo.js';
 import { runInWs } from '../tenant.js';
 import { getLimits } from '../limits.js';
-import { ApiError, findKey, rateLimited, touchKey, logRequest, sendViaApi, messageById, messageByReference, resolveSender, PER_MINUTE } from '../developer.js';
+import { ApiError, findKey, rateLimited, touchKey, logRequest, sendViaApi, messageById, messageByReference, resolveSender, sendingSettings, PER_MINUTE } from '../developer.js';
 import { normalizePhone } from '../utils.js';
 
 export const publicApi = Router();
@@ -79,8 +79,9 @@ publicApi.get('/me', async (req, res) => {
     res.json({
       workspace: w?.name || '',
       key: { name: req.apiKey.name, prefix: req.apiKey.prefix },
-      number: n ? { phone: n.phone, label: n.label, type: n.kind === 'cloud' ? 'official' : 'qr', connected: n.connected } : null,
+      number: n ? { phone: n.phone, label: n.label, type: n.kind === 'cloud' ? 'official' : 'qr', connected: n.connected, api_only: !!n.api } : null,
       limits: { requests_per_minute: PER_MINUTE, messages_per_day: n?.kind === 'qr' && L.apiMaxPerNumberDay > 0 ? L.apiMaxPerNumberDay : null },
+      sending: (({ per_batch, gap_seconds, max_queue }) => ({ messages_per_batch: per_batch, seconds_between_batches: gap_seconds, max_queue }))(sendingSettings()),
     });
   } catch (e) {
     const r = sendError(res, e);
@@ -96,8 +97,10 @@ publicApi.post('/messages', async (req, res) => {
   const reference = b.reference != null ? String(b.reference).slice(0, 100) : null;
   try {
     const m = await sendViaApi(req.apiKey, b);
-    res.status(m.duplicate ? 200 : 201).json(m);
-    log(req, m.duplicate ? 200 : 201, { code: m.duplicate ? 'duplicate' : 'ok', to, type: m.type, reference, message_id: m.id });
+    // 201 sent · 202 accepted and waiting in the queue (sending settings) · 200 a duplicate
+    const http = m.duplicate ? 200 : m.status === 'queued' ? 202 : 201;
+    res.status(http).json(m);
+    log(req, http, { code: m.duplicate ? 'duplicate' : m.status === 'queued' ? 'queued' : 'ok', to, type: m.type, reference, message_id: m.id });
   } catch (e) {
     const r = sendError(res, e);
     log(req, r.status, { code: r.code, message: r.message, to, type, reference });

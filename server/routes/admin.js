@@ -36,7 +36,7 @@ function wsDetail(id) {
     return {
       sendingPaused: !!getSetting('sendingPaused', false),
       warmupActive: !!getSetting('warmupActive', false),
-      warmupNumbers: await db.warmupAccounts().countDocuments({ role: { $ne: 'conversation' } }),
+      warmupNumbers: await db.warmupAccounts().countDocuments({ role: { $nin: ['conversation', 'api'] } }),
       numbers: numbers.map((n) => ({ id: n.id, label: n.label, name: n.name || '', phone: n.phone, connected: n.connected, auto_reply: n.auto_reply, default: n.default, main: n.id === 'main' })),
       contacts: await db.contacts().countDocuments({ synced: { $ne: 1 }, warmup: { $ne: 1 } }),
       chats: await db.contacts().countDocuments({ synced: 1 }),
@@ -154,7 +154,7 @@ admin.put('/workspaces/:id/system', async (req, res) => {
     }
     if ('warmupActive' in b) {
       if (b.warmupActive) {
-        const n = await db.warmupAccounts().countDocuments({ role: { $ne: 'conversation' } });
+        const n = await db.warmupAccounts().countDocuments({ role: { $nin: ['conversation', 'api'] } });
         if (n < 2) return 'Link at least 2 numbers on the Warmup page first';
       }
       await setSetting('warmupActive', !!b.warmupActive);

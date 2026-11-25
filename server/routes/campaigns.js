@@ -19,7 +19,8 @@ async function senderConnected(c) {
 async function validSender(id) {
   if (!id) return true;
   const _id = oid(id);
-  return !!(_id && (await db.warmupAccounts().findOne({ _id }, { projection: { _id: 1 } })));
+  // (never the Developer page's API-only number)
+  return !!(_id && (await db.warmupAccounts().findOne({ _id, role: { $ne: 'api' } }, { projection: { _id: 1 } })));
 }
 
 // The number a campaign really sends from (its own, else — in a workspace without the main

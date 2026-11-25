@@ -14,13 +14,13 @@ import https from 'node:https';
 import dns from 'node:dns';
 import net from 'node:net';
 import { DATA_DIR } from './config.js';
-import { db, col, audit, oid, nowIso, dayKey } from './db/mongo.js';
+import { db, col, audit, oid, nowIso, dayKey, getSetting, setSetting } from './db/mongo.js';
 import { emit } from './events.js';
-import { currentWs } from './tenant.js';
+import { currentWs, runInWs, DEFAULT_WS } from './tenant.js';
 import { getLimits } from './limits.js';
 import { listNumbers, accountGroup, hasMain } from './numbers.js';
 import { isConnected as mainConnected, checkOnWhatsApp, sendContent } from './whatsapp/client.js';
-import { isAccountConnected, checkOnWhatsAppVia, sendContentFromTo, accountKind, cloudAccountOf } from './whatsapp/pool.js';
+import { isAccountConnected, checkOnWhatsAppVia, sendContentFromTo, accountKind, cloudAccountOf, poolState } from './whatsapp/pool.js';
 import { sendCloudText, sendCloudMedia, uploadCloudMedia, sendCloudTemplate, listCloudTemplates } from './whatsapp/cloud-api.js';
 import { replyWindowOpen, templateShape } from './whatsapp/cloud.js';
 import { normalizePhone, randInt, sleep } from './utils.js';
@@ -66,7 +66,8 @@ async function cleanSender(v) {
   if (v === null || v === undefined || v === '' || v === 'default') return null;
   const phone = normalizePhone(v);
   const nums = await listNumbers();
-  if (!phone || !nums.some((n) => n.phone === phone)) fail(400, 'invalid_sender', "That number isn't linked in this workspace");
+  const api = await apiNumber();
+  if (!phone || !(nums.some((n) => n.phone === phone) || api?.phone === phone)) fail(400, 'invalid_sender', "That number isn't linked in this workspace");
   return phone;
 }
 
@@ -184,7 +185,34 @@ export async function listLogs(limit = 50) {
 
 // The number a message goes out from: `from` (a number of this workspace), else the key's own
 // number, else the workspace's default number. Then the session of it that's connected now.
+// ---- The API number: a WhatsApp number linked on the Developer page, only for the API ----
+// (role 'api': no Conversations tab, never a campaign or warm-up sender). One per workspace.
+export async function apiNumber() {
+  const d = await db.warmupAccounts().findOne({ role: 'api' });
+  if (!d) return null;
+  const live = poolState().find((a) => a.id === String(d._id));
+  return {
+    id: String(d._id),
+    phone: live?.me?.phone || d.phone || null,
+    name: live?.me?.name || d.name || '',
+    label: d.label || 'API number',
+    status: live?.status || 'disconnected',
+    qr: live?.qr || null,
+    connected: live?.status === 'connected',
+  };
+}
+
 export async function resolveSender(fromPhone, { keyNumber = false, soft = false } = {}) {
+  // The API number: when a key (or `from`) names it, or — nothing named — whenever one is linked.
+  const api = await apiNumber();
+  if (api?.phone && (!fromPhone || fromPhone === api.phone)) {
+    const id = api.connected ? api.id : null;
+    if (soft) return { id, phone: api.phone, kind: 'qr', label: api.label, connected: !!id, default: !fromPhone, api: true };
+    if (!id) {
+      fail(503, 'number_not_connected', `The API number +${api.phone} isn't connected right now. Open the Developer page and reconnect it (the phone has to stay online).`);
+    }
+    return { id, phone: api.phone, kind: 'qr', label: api.label, api: true };
+  }
   const nums = await listNumbers();
   let n;
   if (fromPhone) {
@@ -518,40 +546,170 @@ async function buildApiTemplate(senderId, spec, file) {
   return { name, language, components, headerKind, text };
 }
 
-// ---- Sending ----
-
-// One message at a time per number, with a short human gap on QR-linked numbers (ten tills
-// pressing "send" at once mustn't burst out of one phone).
-const queues = new Map();
-const MAX_WAITING = 30;
-const qrGapMs = () => {
-  const v = process.env.API_QR_GAP_MS; // tests
-  return v != null && v !== '' ? Math.max(0, Number(v) || 0) : randInt(1500, 3500);
+// ---- Sending: the API queue ----
+// Every API message is saved as "queued", then each number's lane sends them in order: up to
+// `per_batch` messages, then a pause of `gap_seconds` (the Developer page's sending settings),
+// with a short human gap between messages inside a batch on QR-linked numbers. The queue is in
+// the database, so a restart doesn't lose it. A request whose message can go out within a few
+// seconds waits for it and answers "sent" (or the real error) like before; one that has to wait
+// its turn is answered at once with "queued" (HTTP 202) — GET /messages/{id} tells the rest.
+export const SENDING_LIMITS = { per_batch: [1, 50], gap_seconds: [0, 3600], max_queue: [10, 5000] };
+const clampInt = (v, [lo, hi], dflt) => {
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : dflt;
 };
-function onQueue(key, gapMs, fn) {
-  let q = queues.get(key);
-  if (!q) {
-    q = { tail: Promise.resolve(), waiting: 0, lastAt: 0 };
-    queues.set(key, q);
-  }
-  if (q.waiting >= MAX_WAITING) fail(429, 'busy', 'This number has too many messages waiting to go out. Try again in a few seconds.');
-  q.waiting++;
-  const run = q.tail.then(async () => {
-    const wait = q.lastAt + gapMs - Date.now();
-    if (wait > 0) await sleep(wait);
-    try {
-      return await fn();
-    } finally {
-      q.lastAt = Date.now();
+// Tests set API_QR_GAP_MS (milliseconds) to pace without waiting seconds.
+const envGapMs = () => {
+  const v = process.env.API_QR_GAP_MS;
+  return v != null && v !== '' ? Math.max(0, Number(v) || 0) : null;
+};
+const qrGapMs = () => envGapMs() ?? randInt(1500, 3500); // between messages of one batch (QR numbers)
+export function sendingSettings() {
+  const s = getSetting('apiSending', null) || {};
+  const saved = s.gap_seconds != null;
+  return {
+    per_batch: clampInt(s.per_batch, SENDING_LIMITS.per_batch, 1),
+    gap_seconds: clampInt(s.gap_seconds, SENDING_LIMITS.gap_seconds, 3),
+    max_queue: clampInt(s.max_queue, SENDING_LIMITS.max_queue, 500),
+    gap_ms: saved ? clampInt(s.gap_seconds, SENDING_LIMITS.gap_seconds, 3) * 1000 : envGapMs() ?? 3000,
+  };
+}
+export async function saveSendingSettings(body = {}, by = '') {
+  const cur = sendingSettings();
+  const next = {
+    per_batch: 'per_batch' in body ? clampInt(body.per_batch, SENDING_LIMITS.per_batch, cur.per_batch) : cur.per_batch,
+    gap_seconds: 'gap_seconds' in body ? clampInt(body.gap_seconds, SENDING_LIMITS.gap_seconds, cur.gap_seconds) : cur.gap_seconds,
+    max_queue: 'max_queue' in body ? clampInt(body.max_queue, SENDING_LIMITS.max_queue, cur.max_queue) : cur.max_queue,
+  };
+  await setSetting('apiSending', next);
+  audit('system', `API sending set to ${next.per_batch} message${next.per_batch === 1 ? '' : 's'} every ${next.gap_seconds}s (queue up to ${next.max_queue})${by ? ` by ${by}` : ''}`);
+  // A shorter gap applies to what's waiting now.
+  for (const [k, l] of lanes) {
+    const [ws, phone] = k.split('|');
+    if (ws === (currentWs() || DEFAULT_WS)) {
+      l.nextAt = Math.min(l.nextAt, (l.lastBatchAt || 0) + next.gap_seconds * 1000);
+      kick(ws, phone);
     }
+  }
+  return sendingSettings();
+}
+
+const DAY_MS = 24 * 3600 * 1000;
+const lanes = new Map(); // `${ws}|${phone}` → { running, again, timer, due, nextAt, lastBatchAt }
+const laneOf = (ws, phone) => {
+  const k = `${ws}|${phone}`;
+  let l = lanes.get(k);
+  if (!l) lanes.set(k, (l = { running: false, again: false, timer: null, due: 0, nextAt: 0, lastBatchAt: 0 }));
+  return l;
+};
+function schedule(ws, phone, ms) {
+  const l = laneOf(ws, phone);
+  const due = Date.now() + Math.max(0, ms);
+  if (l.timer && l.due <= due) return; // an earlier run is already set
+  clearTimeout(l.timer);
+  l.due = due;
+  l.timer = setTimeout(() => {
+    l.timer = null;
+    runLane(ws, phone);
+  }, Math.max(0, ms));
+  l.timer.unref?.();
+}
+// Something was queued (or the settings changed): send when the lane's gap allows.
+export function kick(ws, phone) {
+  const l = laneOf(ws, phone);
+  if (l.running) {
+    l.again = true;
+    return;
+  }
+  schedule(ws, phone, l.nextAt - Date.now());
+}
+
+const waiters = new Map(); // message id → [resolve] (requests waiting for their message to go)
+function settle(id, error) {
+  for (const r of waiters.get(id) || []) r({ error });
+  waiters.delete(id);
+}
+function waitFor(id, ms) {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => {
+      const list = (waiters.get(id) || []).filter((x) => x !== done);
+      if (list.length) waiters.set(id, list);
+      else waiters.delete(id);
+      resolve(null);
+    }, ms);
+    const done = (r) => {
+      clearTimeout(t);
+      resolve(r);
+    };
+    waiters.set(id, [...(waiters.get(id) || []), done]);
   });
-  q.tail = run.then(
-    () => {},
-    () => {}
-  ).finally(() => {
-    q.waiting--;
-  });
-  return run;
+}
+
+const queuedOn = (phone) => ({ source: 'api', status: 'queued', account_phone: phone });
+async function failQueued(filter, code, message) {
+  const list = await db.messages().find({ source: 'api', status: 'queued', ...filter }, { projection: { _id: 1 } }).toArray();
+  if (!list.length) return 0;
+  await db.messages().updateMany({ _id: { $in: list.map((m) => m._id) } }, { $set: { status: 'failed', error_code: code, error: message, failed_at: nowIso() }, $unset: { api_payload: '' } });
+  for (const m of list) settle(String(m._id), new ApiError(422, code, message));
+  emit('message:status', {});
+  return list.length;
+}
+
+async function runLane(ws, phone) {
+  const l = laneOf(ws, phone);
+  if (l.running) {
+    l.again = true;
+    return;
+  }
+  l.running = true;
+  let next = null; // ms until this lane should run again
+  try {
+    await runInWs(ws, async () => {
+      const s = sendingSettings();
+      // A receipt a day late is worse than none: older queued messages are dropped.
+      await failQueued({ account_phone: phone, created_at: { $lt: new Date(Date.now() - DAY_MS).toISOString() } }, 'expired', 'Not sent: it waited more than 24 hours in the queue (the number was offline).');
+      const batch = await db.messages().find(queuedOn(phone)).sort({ _id: 1 }).limit(s.per_batch).toArray();
+      if (!batch.length) return;
+      const sender = await resolveSender(phone, { soft: true }).catch(() => null);
+      if (!sender) {
+        await failQueued({ account_phone: phone }, 'number_removed', `Not sent: +${phone} is no longer linked in this workspace.`);
+        return;
+      }
+      if (!sender.id) {
+        next = 20000; // offline: try again soon (they wait up to 24 hours)
+        return;
+      }
+      for (let i = 0; i < batch.length; i++) {
+        if (i > 0 && sender.kind !== 'cloud') await sleep(qrGapMs());
+        // cancelled meanwhile?
+        if (!(await db.messages().findOne({ _id: batch[i]._id, status: 'queued' }, { projection: { _id: 1 } }))) continue;
+        await sendQueued(batch[i], sender);
+      }
+      l.lastBatchAt = Date.now();
+      l.nextAt = l.lastBatchAt + s.gap_ms;
+      if (await db.messages().findOne(queuedOn(phone), { projection: { _id: 1 } })) next = l.nextAt - Date.now();
+    });
+  } catch (e) {
+    console.error('  [api queue]', e?.message || e);
+    next = 15000;
+  } finally {
+    l.running = false;
+    if (l.again) {
+      l.again = false;
+      next = next == null ? l.nextAt - Date.now() : next;
+    }
+    if (next != null) schedule(ws, phone, next);
+  }
+}
+
+// After a restart: pick up whatever was still queued (numbers reconnect first).
+export async function resumeApiQueues(delayMs = 15000) {
+  const groups = await col('messages')
+    .aggregate([{ $match: { source: 'api', status: 'queued' } }, { $group: { _id: { ws: '$ws', phone: '$account_phone' } } }])
+    .toArray()
+    .catch(() => []);
+  for (const g of groups) if (g._id?.phone) schedule(g._id.ws || DEFAULT_WS, g._id.phone, delayMs);
+  return groups.length;
 }
 
 async function deliver(sender, to, { text, caption, file, tpl }) {
@@ -600,11 +758,12 @@ export function messagePublic(m) {
   };
   if (m.file_name) out.file_name = m.file_name;
   if (m.template_name) out.template = m.template_name;
+  if (m.status === 'queued') out.queued_at = m.queued_at || m.created_at;
+  if (m.sent_at) out.sent_at = m.sent_at;
   if (m.status === 'failed') out.error = { code: m.error_code || null, message: m.error || "WhatsApp couldn't deliver this message" };
   return out;
 }
 
-const DAY_MS = 24 * 3600 * 1000;
 async function sentWithReference(reference, to) {
   const since = new Date(Date.now() - DAY_MS).toISOString();
   const [m] = await db
@@ -674,10 +833,15 @@ async function send(key, body, to, reference) {
   // A QR-linked number's daily API cap (the super admin's rule; keeps the number safe from bans).
   const L = getLimits();
   if (sender.kind !== 'cloud' && L.apiMaxPerNumberDay > 0) {
-    const today = await db.messages().countDocuments({ source: 'api', account_phone: sender.phone, day_key: dayKey() });
+    const today = await db.messages().countDocuments({ source: 'api', account_phone: sender.phone, day_key: dayKey(), status: { $ne: 'failed' } });
     if (today >= L.apiMaxPerNumberDay) {
       fail(429, 'daily_limit', `+${sender.phone} has sent ${today} messages through the API today, the most a QR-linked number may send (${L.apiMaxPerNumberDay}) to keep it safe from bans. It resets tomorrow.`);
     }
+  }
+  const S = sendingSettings();
+  const waiting = await db.messages().countDocuments(queuedOn(sender.phone));
+  if (waiting >= S.max_queue) {
+    fail(429, 'queue_full', `${waiting} messages are already waiting to go out from +${sender.phone} (the most the queue holds is ${S.max_queue}, set on the Developer page). Try again in a little while.`);
   }
 
   const contact = await contactFor(to, body.name);
@@ -695,18 +859,10 @@ async function send(key, body, to, reference) {
         `+${to} hasn't written to +${sender.phone} in the last 24 hours, so WhatsApp only allows an approved template. Send "template": { "name": "…", "language": "en", "variables": […] } with a template approved in Meta (a "utility" receipt template works well).`
       );
     }
-  } else {
-    const check = sender.id === 'main' ? await checkOnWhatsApp(to) : await checkOnWhatsAppVia(sender.id, to);
-    if (!check.exists && !check.reason) {
-      await db.contacts().updateOne({ _id: contact._id }, { $set: { status: 'bounced' } });
-      fail(422, 'not_on_whatsapp', `+${to} isn't on WhatsApp.`);
-    }
   }
 
+  // Into the queue — and into the chat, like a message typed in Conversations (shown as waiting).
   const type = tpl ? 'template' : file ? file.kind : 'text';
-  const waId = await onQueue(`${currentWs()}:${sender.phone}`, sender.kind === 'cloud' ? 0 : qrGapMs(), () => deliver(sender, to, { text, caption, file, tpl }));
-
-  // Save it in the chat, like a message typed in Conversations.
   const now = nowIso();
   const shown = tpl ? tpl.text : file ? caption || (file.kind === 'image' ? '📷 Photo' : `📄 ${file.filename}`) : text;
   const doc = {
@@ -726,33 +882,135 @@ async function send(key, body, to, reference) {
     ...(file
       ? { type: file.kind, media: 1, mime: file.mime, size: file.size, caption: tpl ? tpl.text : caption, local_media: 1, ...(file.kind === 'document' ? { file_name: file.filename } : {}) }
       : {}),
+    status: 'queued',
+    queued_at: now,
+    created_at: now,
+    day_key: dayKey(),
+    api_payload: { text, caption, tpl, file: file ? { kind: file.kind, mime: file.mime, size: file.size, filename: file.filename } : null },
   };
-  const onInsert = { status: 'sent', created_at: now, day_key: dayKey() };
-  let saved;
-  if (waId) {
-    // The phone's own copy of the message may already be stored (same WhatsApp id): fill it in.
-    saved = await db.messages().findOneAndUpdate({ wa_message_id: waId }, { $set: { ...doc, wa_message_id: waId }, $setOnInsert: onInsert }, { upsert: true, returnDocument: 'after' });
-  } else {
-    const r = await db.messages().insertOne({ ...doc, ...onInsert });
-    saved = { _id: r.insertedId, ...doc, ...onInsert };
-  }
+  const r = await db.messages().insertOne(doc);
+  const id = String(r.insertedId);
   if (file) {
-    try {
-      await fs.promises.mkdir(MEDIA_DIR, { recursive: true });
-      await fs.promises.writeFile(path.join(MEDIA_DIR, String(saved._id)), file.buffer);
-    } catch {}
+    await fs.promises.mkdir(MEDIA_DIR, { recursive: true });
+    await fs.promises.writeFile(path.join(MEDIA_DIR, id), file.buffer); // sent from here, and shown in the chat
   }
-  await db.contacts().updateOne({ _id: contact._id }, { $set: { last_outbound_at: now } });
-  if (key._id !== 'test') col('api_keys').updateOne({ _id: key._id }, { $inc: { sent: 1 }, $set: { last_used_at: now } }).catch(() => {});
-  audit('send', `Sent by API${key._id === 'test' ? ' (test from the Developer page)' : ` (key "${key.name}")`} to ${contact.name ? `${contact.name} (+${to})` : `+${to}`}${reference ? ` — ${reference}` : ''}`, {
-    meta: { contactId: String(contact._id) },
-  });
   emit('message:out', { contactId: String(contact._id) });
-  emit('stats:dirty', {});
-  return messagePublic(saved);
+
+  // Will it go out within a few seconds? Then wait for it and answer like before.
+  const ws = currentWs() || DEFAULT_WS;
+  const eta = await queueEta(ws, sender.phone, r.insertedId, S);
+  kick(ws, sender.phone);
+  if (eta - Date.now() <= 15000) {
+    const done = await waitFor(id, 25000);
+    if (done?.error) throw done.error;
+  }
+  const saved = await db.messages().findOne({ _id: r.insertedId });
+  const out = messagePublic(saved);
+  if (saved.status === 'queued') {
+    const pos = await db.messages().countDocuments({ ...queuedOn(sender.phone), _id: { $lte: r.insertedId } });
+    out.queue = { position: pos, estimated_send_at: new Date(Math.max(eta, Date.now())).toISOString() };
+  }
+  return out;
+}
+
+// When a queued message should go out: after the batches ahead of it, each followed by the gap.
+async function queueEta(ws, phone, id, S = sendingSettings()) {
+  const ahead = await db.messages().countDocuments({ ...queuedOn(phone), _id: { $lt: id } });
+  const l = laneOf(ws, phone);
+  const start = Math.max(Date.now(), l.nextAt || 0);
+  return start + Math.floor(ahead / S.per_batch) * S.gap_ms;
+}
+
+// Send one queued message from the lane: the last checks, WhatsApp, then the chat + counters.
+async function sendQueued(m, sender) {
+  const p = m.api_payload || {};
+  const to = m.api_to;
+  let error = null;
+  try {
+    let file = null;
+    if (p.file) {
+      const buffer = await fs.promises.readFile(path.join(MEDIA_DIR, String(m._id))).catch(() => null);
+      if (!buffer) fail(410, 'file_missing', 'The queued file is no longer on the server. Send the message again.');
+      file = { ...p.file, buffer };
+    }
+    if (sender.kind !== 'cloud') {
+      const check = sender.id === 'main' ? await checkOnWhatsApp(to) : await checkOnWhatsAppVia(sender.id, to);
+      if (!check.exists && !check.reason) {
+        await db.contacts().updateOne({ _id: oid(m.contact_id) }, { $set: { status: 'bounced' } });
+        fail(422, 'not_on_whatsapp', `+${to} isn't on WhatsApp.`);
+      }
+    } else if (!p.tpl && !(await replyWindowOpen(oid(m.contact_id), sender.phone))) {
+      fail(422, 'window_closed', `+${to} hasn't written to +${sender.phone} in the last 24 hours, so WhatsApp only allows an approved template.`);
+    }
+    const waId = await deliver(sender, to, { text: p.text, caption: p.caption, file, tpl: p.tpl });
+    const now = nowIso();
+    await db.messages().updateOne(
+      { _id: m._id },
+      { $set: { status: 'sent', wa_message_id: waId || null, account_id: sender.id, sent_at: now, created_at: now, day_key: dayKey() }, $unset: { api_payload: '' } }
+    );
+    // The phone's own copy of it may have been saved first (same WhatsApp id): keep one.
+    if (waId) await db.messages().deleteMany({ wa_message_id: waId, _id: { $ne: m._id } });
+    await db.contacts().updateOne({ _id: oid(m.contact_id) }, { $set: { last_outbound_at: now } });
+    if (m.api_key_id && m.api_key_id !== 'test' && oid(m.api_key_id)) col('api_keys').updateOne({ _id: oid(m.api_key_id) }, { $inc: { sent: 1 } }).catch(() => {});
+    const c = await db.contacts().findOne({ _id: oid(m.contact_id) }, { projection: { name: 1 } });
+    audit('send', `Sent by API${m.api_key_id === 'test' ? ' (test from the Developer page)' : ` (key "${m.api_key_name}")`} to ${c?.name ? `${c.name} (+${to})` : `+${to}`}${m.api_ref ? ` — ${m.api_ref}` : ''}`, {
+      meta: { contactId: m.contact_id },
+    });
+    emit('message:out', { contactId: m.contact_id });
+    emit('stats:dirty', {});
+  } catch (e) {
+    error = e instanceof ApiError ? e : new ApiError(502, 'send_failed', `WhatsApp didn't accept the message: ${e.message}`);
+    await db.messages().updateOne(
+      { _id: m._id },
+      { $set: { status: 'failed', error_code: error.code, error: error.message, failed_at: nowIso() }, $unset: { api_payload: '' } }
+    );
+    audit('send', `API message to +${to} not sent — ${error.message}`, { level: 'warn', meta: { contactId: m.contact_id } });
+    emit('message:out', { contactId: m.contact_id });
+  }
+  settle(String(m._id), error);
+}
+
+// ---- The queue on the Developer page ----
+export async function queueState() {
+  const S = sendingSettings();
+  const ws = currentWs() || DEFAULT_WS;
+  const list = await db.messages().find({ source: 'api', status: 'queued' }, { projection: { api_payload: 0 } }).sort({ _id: 1 }).limit(300).toArray();
+  const total = await db.messages().countDocuments({ source: 'api', status: 'queued' });
+  const names = new Map(
+    (await db.contacts().find({ _id: { $in: [...new Set(list.map((m) => m.contact_id))].map(oid).filter(Boolean) } }, { projection: { name: 1 } }).toArray()).map((c) => [String(c._id), c.name || ''])
+  );
+  const seen = new Map(); // phone → position so far
+  const items = list.map((m) => {
+    const n = seen.get(m.account_phone) || 0;
+    seen.set(m.account_phone, n + 1);
+    const l = laneOf(ws, m.account_phone);
+    const eta = Math.max(Date.now(), l.nextAt || 0) + Math.floor(n / S.per_batch) * S.gap_ms;
+    return {
+      id: String(m._id),
+      to: m.api_to,
+      name: names.get(m.contact_id) || '',
+      from: m.account_phone,
+      type: m.api_type || 'text',
+      text: String(m.body || '').slice(0, 140),
+      file_name: m.file_name || null,
+      reference: m.api_ref || null,
+      key: m.api_key_name || '',
+      queued_at: m.queued_at || m.created_at,
+      estimated_send_at: new Date(eta).toISOString(),
+    };
+  });
+  return { total, items, settings: S };
+}
+// One message (id), everything from one number (phone), or the whole queue.
+export async function cancelQueued(id, by = '', { phone = null } = {}) {
+  const filter = id ? { _id: oid(id) } : phone ? { account_phone: phone } : {};
+  if (id && !filter._id) fail(400, 'invalid_id', 'Bad id');
+  const n = await failQueued(filter, 'cancelled', `Not sent: cancelled on the Developer page${by ? ` by ${by}` : ''}.`);
+  if (n) audit('system', `${n} queued API message${n === 1 ? '' : 's'} cancelled${by ? ` by ${by}` : ''}`, { level: 'warn' });
+  return n;
 }
 
 // What the Developer page shows next to the keys.
 export async function usageToday() {
-  return db.messages().countDocuments({ source: 'api', day_key: dayKey() });
+  return db.messages().countDocuments({ source: 'api', day_key: dayKey(), status: { $nin: ['queued', 'failed'] } });
 }

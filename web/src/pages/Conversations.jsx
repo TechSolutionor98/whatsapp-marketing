@@ -165,6 +165,14 @@ function MessageMedia({ m, onLoad }) {
 function Ticks({ status }) {
   // WhatsApp refused it (e.g. admins-only group) — it was never delivered.
   if (status === 'failed') return <span className="msg-failed" title="Not sent — WhatsApp rejected this message">! Not sent</span>;
+  if (status === 'queued') {
+    return (
+      <svg className="wa-ticks" viewBox="0 0 16 16" width="14" height="14" role="img" aria-label="Waiting in the API queue">
+        <title>Waiting in the API queue</title>
+        <g fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><circle cx="8" cy="8" r="6" /><path d="M8 4.8V8l2.2 1.4" /></g>
+      </svg>
+    );
+  }
   const two = status === 'read' || status === 'delivered';
   const label = status === 'read' ? 'Read' : status === 'delivered' ? 'Delivered' : 'Sent';
   return (

@@ -224,7 +224,8 @@ export function poolState(ws = currentWs()) {
 // Warm-up / campaign-sender numbers only (conversation-only numbers are excluded).
 export function connectedAccounts(ws = currentWs()) {
   return wsAccounts(ws).filter(
-    (a) => a.status === 'connected' && a.sock && a.me?.phone && (a.role || 'warmup') !== 'conversation'
+    // not conversation numbers, and never the Developer page's API-only number
+    (a) => a.status === 'connected' && a.sock && a.me?.phone && !['conversation', 'api'].includes(a.role || 'warmup')
   );
 }
 
@@ -315,6 +316,8 @@ async function startPoolAccountIn(ws, id, label = '', role, autoReply) {
         if ((a.role || 'warmup') === 'conversation') {
           audit('connection', `Conversation number linked: ${a.me.name || a.me.phone} — syncing history…`, { level: 'success' });
           onConversationOpen(id);
+        } else if (a.role === 'api') {
+          audit('connection', `API number connected: +${a.me.phone}${a.me.name ? ` (${a.me.name})` : ''} — sends the Developer API's messages`, { level: 'success' });
         } else {
           audit('warmup', `Warm-up number linked: ${a.me.name || a.me.phone}`, { level: 'success' });
         }
@@ -329,7 +332,7 @@ async function startPoolAccountIn(ws, id, label = '', role, autoReply) {
         a.starting = false;
         // Why it dropped (real data: Suppo dropped at 07:02:38 and the reason was never logged).
         console.log(`  [linked ${a.me?.phone || id}] connection closed (code ${code ?? '?'})`);
-        if (code !== DisconnectReason.restartRequired && !a.manualLogout && (a.role || 'warmup') === 'conversation') {
+        if (code !== DisconnectReason.restartRequired && !a.manualLogout && ['conversation', 'api'].includes(a.role || 'warmup')) {
           audit('connection', `Linked number ${a.me?.phone ? '+' + a.me.phone : ''} disconnected (code ${code ?? '?'})${loggedOut ? ' — logged out on the phone, scan again' : ' — reconnecting'}`, { level: 'warn' });
         }
         if (loggedOut) {
@@ -595,7 +598,8 @@ export function setPoolAutoReply(id, enabled) {
   if (a) a.autoReply = !!enabled;
 }
 
-// The role of a pool account ('warmup' | 'conversation'), or null if unknown.
+// The role of a pool account ('warmup' | 'conversation' | 'api' — the Developer page's
+// API-only number), or null if unknown.
 export function accountRole(id) {
   return (id === 'main' ? null : ctxOf(id)?.role) || null;
 }
