@@ -4211,3 +4211,12 @@ tbody tr:hover {
   .dev-send-grid { grid-template-columns: 1fr; }
   .dev-qr { grid-template-columns: 1fr; }
 }
+
+.dev-rule-note { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; color: var(--text-soft); }
+.dev-rule-note svg { width: 15px; height: 15px; color: var(--brand-700); flex: none; }
+/* Super Admin → workspace → Developer API */
+.setting-row.sa-dev-send { flex-direction: column; align-items: stretch; gap: 10px; }
+.sa-dev-fields { display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; }
+.sa-dev-fields .btn { margin-bottom: 19px; }
+.sa-dev-field { display: flex; flex-direction: column; gap: 3px; font-size: 12px; font-weight: 600; color: var(--text-soft); }
+.sa-dev-field .input { width: 84px; }

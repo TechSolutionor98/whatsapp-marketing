@@ -17,7 +17,7 @@ import { DATA_DIR } from './config.js';
 import { db, col, audit, oid, nowIso, dayKey, getSetting, setSetting } from './db/mongo.js';
 import { emit } from './events.js';
 import { currentWs, runInWs, DEFAULT_WS } from './tenant.js';
-import { getLimits } from './limits.js';
+import { getLimits, apiSendingBounds } from './limits.js';
 import { listNumbers, accountGroup, hasMain } from './numbers.js';
 import { isConnected as mainConnected, checkOnWhatsApp, sendContent } from './whatsapp/client.js';
 import { isAccountConnected, checkOnWhatsAppVia, sendContentFromTo, accountKind, cloudAccountOf, poolState } from './whatsapp/pool.js';
@@ -553,7 +553,7 @@ async function buildApiTemplate(senderId, spec, file) {
 // the database, so a restart doesn't lose it. A request whose message can go out within a few
 // seconds waits for it and answers "sent" (or the real error) like before; one that has to wait
 // its turn is answered at once with "queued" (HTTP 202) — GET /messages/{id} tells the rest.
-export const SENDING_LIMITS = { per_batch: [1, 50], gap_seconds: [0, 3600], max_queue: [10, 5000] };
+export const SENDING_LIMITS = { per_batch: [1, 50], gap_seconds: [0, 3600], max_queue: [10, 5000] }; // without super admin rules
 const clampInt = (v, [lo, hi], dflt) => {
   const n = Math.round(Number(v));
   return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : dflt;
@@ -564,34 +564,59 @@ const envGapMs = () => {
   return v != null && v !== '' ? Math.max(0, Number(v) || 0) : null;
 };
 const qrGapMs = () => envGapMs() ?? randInt(1500, 3500); // between messages of one batch (QR numbers)
+// The workspace's settings as they apply now: always inside the super admin's API rules.
 export function sendingSettings() {
   const s = getSetting('apiSending', null) || {};
+  const B = apiSendingBounds();
   const saved = s.gap_seconds != null;
+  const gap = clampInt(saved ? s.gap_seconds : 3, B.gap_seconds, 3);
+  const envMs = envGapMs();
   return {
-    per_batch: clampInt(s.per_batch, SENDING_LIMITS.per_batch, 1),
-    gap_seconds: clampInt(s.gap_seconds, SENDING_LIMITS.gap_seconds, 3),
-    max_queue: clampInt(s.max_queue, SENDING_LIMITS.max_queue, 500),
-    gap_ms: saved ? clampInt(s.gap_seconds, SENDING_LIMITS.gap_seconds, 3) * 1000 : envGapMs() ?? 3000,
+    per_batch: clampInt(s.per_batch ?? 1, B.per_batch, 1),
+    gap_seconds: gap,
+    max_queue: clampInt(s.max_queue ?? 500, B.max_queue, Math.min(500, B.max_queue[1])),
+    gap_ms: saved || envMs == null ? gap * 1000 : Math.max(envMs, B.gap_seconds[0] * 1000),
   };
 }
+export const sendingBounds = () => apiSendingBounds();
+// Is the Developer API on for the current workspace? (The super admin's switch for every
+// workspace, and one per workspace.)
+export const apiAllowed = () => !!getLimits().allowApi && !getSetting('apiOff', false);
 export async function saveSendingSettings(body = {}, by = '') {
   const cur = sendingSettings();
-  const next = {
-    per_batch: 'per_batch' in body ? clampInt(body.per_batch, SENDING_LIMITS.per_batch, cur.per_batch) : cur.per_batch,
-    gap_seconds: 'gap_seconds' in body ? clampInt(body.gap_seconds, SENDING_LIMITS.gap_seconds, cur.gap_seconds) : cur.gap_seconds,
-    max_queue: 'max_queue' in body ? clampInt(body.max_queue, SENDING_LIMITS.max_queue, cur.max_queue) : cur.max_queue,
+  const B = apiSendingBounds();
+  const want = {
+    per_batch: 'per_batch' in body ? Math.round(Number(body.per_batch)) : cur.per_batch,
+    gap_seconds: 'gap_seconds' in body ? Math.round(Number(body.gap_seconds)) : cur.gap_seconds,
+    max_queue: 'max_queue' in body ? Math.round(Number(body.max_queue)) : cur.max_queue,
   };
+  const next = {
+    per_batch: clampInt(want.per_batch, B.per_batch, cur.per_batch),
+    gap_seconds: clampInt(want.gap_seconds, B.gap_seconds, cur.gap_seconds),
+    max_queue: clampInt(want.max_queue, B.max_queue, cur.max_queue),
+  };
+  // Say what the super admin's rules changed (plain range clamps need no note).
+  const L = getLimits();
+  const notes = [];
+  if (L.apiMaxPerBatch && want.per_batch > next.per_batch && next.per_batch === B.per_batch[1]) notes.push(`at most ${B.per_batch[1]} at a time`);
+  if (L.apiMinGapSec && want.gap_seconds < next.gap_seconds && next.gap_seconds === B.gap_seconds[0]) notes.push(`at least ${B.gap_seconds[0]} seconds between batches`);
+  if (L.apiMaxQueue && want.max_queue > next.max_queue && next.max_queue === B.max_queue[1]) notes.push(`a queue of at most ${B.max_queue[1]}`);
   await setSetting('apiSending', next);
   audit('system', `API sending set to ${next.per_batch} message${next.per_batch === 1 ? '' : 's'} every ${next.gap_seconds}s (queue up to ${next.max_queue})${by ? ` by ${by}` : ''}`);
   // A shorter gap applies to what's waiting now.
+  rekickLanes(currentWs() || DEFAULT_WS);
+  const out = sendingSettings();
+  return notes.length ? { ...out, notes: [`Set by the super admin: ${notes.join(', ')}.`] } : out;
+}
+// Settings (or the switch) changed: a shorter gap applies to what's waiting now.
+export function rekickLanes(wsId) {
+  const gap = runInWs(wsId, () => sendingSettings().gap_ms);
   for (const [k, l] of lanes) {
     const [ws, phone] = k.split('|');
-    if (ws === (currentWs() || DEFAULT_WS)) {
-      l.nextAt = Math.min(l.nextAt, (l.lastBatchAt || 0) + next.gap_seconds * 1000);
-      kick(ws, phone);
-    }
+    if (ws !== wsId) continue;
+    l.nextAt = Math.min(l.nextAt, (l.lastBatchAt || 0) + gap);
+    kick(ws, phone);
   }
-  return sendingSettings();
 }
 
 const DAY_MS = 24 * 3600 * 1000;
@@ -666,6 +691,10 @@ async function runLane(ws, phone) {
   try {
     await runInWs(ws, async () => {
       const s = sendingSettings();
+      if (!apiAllowed()) {
+        next = 60000; // switched off by the super admin: wait (queued messages expire after 24 h)
+        return;
+      }
       // A receipt a day late is worse than none: older queued messages are dropped.
       await failQueued({ account_phone: phone, created_at: { $lt: new Date(Date.now() - DAY_MS).toISOString() } }, 'expired', 'Not sent: it waited more than 24 hours in the queue (the number was offline).');
       const batch = await db.messages().find(queuedOn(phone)).sort({ _id: 1 }).limit(s.per_batch).toArray();

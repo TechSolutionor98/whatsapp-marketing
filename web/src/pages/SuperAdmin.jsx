@@ -621,6 +621,8 @@ function ManageWorkspaceModal({ w, here, onClose, onChanged, onDeleted, onOpen }
         )}
       </div>
 
+      <DeveloperBox w={w} onChanged={onChanged} />
+
       <div className="sa-sub-head">Access</div>
       <div className="sa-rows sa-m-box">
         <div className="setting-row">
@@ -663,6 +665,103 @@ function ManageWorkspaceModal({ w, here, onClose, onChanged, onDeleted, onOpen }
         </div>
       )}
     </Modal>
+  );
+}
+
+// One workspace's Developer API: on/off, its API number, how fast it sends, and its queue.
+function DeveloperBox({ w, onChanged }) {
+  const { toast } = useApp();
+  const a = w.api || { off: false, keys: 0, number: null, sending: { per_batch: 1, gap_seconds: 3, max_queue: 500 }, bounds: { per_batch: [1, 50], gap_seconds: [0, 3600], max_queue: [10, 5000] }, queued: 0, sentToday: 0 };
+  const [f, setF] = useState(a.sending);
+  const [busy, setBusy] = useState('');
+  useEffect(() => setF(a.sending), [a.sending.per_batch, a.sending.gap_seconds, a.sending.max_queue]);
+  const dirty = Number(f.per_batch) !== a.sending.per_batch || Number(f.gap_seconds) !== a.sending.gap_seconds || Number(f.max_queue) !== a.sending.max_queue;
+  async function put(key, body, ok) {
+    setBusy(key);
+    try {
+      const r = await api.put(`/admin/workspaces/${w.id}/developer`, body);
+      toast([ok, ...(r.notes || [])].filter(Boolean).join(' — '), 'success');
+      onChanged();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+    setBusy('');
+  }
+  const field = (k, label, [lo, hi], suffix) => (
+    <label className="sa-dev-field">
+      <span>{label}</span>
+      <span className="flex" style={{ gap: 6 }}>
+        <input className="input" type="number" min={lo} max={hi} value={f[k]} onChange={(e) => setF((x) => ({ ...x, [k]: e.target.value }))} aria-label={label} />
+        <span className="muted" style={{ fontSize: 12 }}>{suffix}</span>
+      </span>
+      <span className="muted" style={{ fontSize: 11.5 }}>{lo}–{hi}</span>
+    </label>
+  );
+  return (
+    <>
+      <div className="sa-sub-head">Developer API</div>
+      <div className="sa-rows sa-m-box">
+        <div className="setting-row">
+          <div>
+            <div className="st-label">Developer API for this workspace</div>
+            <div className="st-desc">
+              {a.off
+                ? 'Off — its keys are refused and its queue waits (messages expire after 24 hours).'
+                : `On — ${plural(a.keys, 'API key')}, ${plural(a.sentToday, 'message')} sent through the API today.`}
+            </div>
+          </div>
+          <Toggle label="Developer API for this workspace" checked={!a.off} disabled={busy === 'off'} onChange={(on) => put('off', { apiOff: !on }, on ? 'Developer API switched on' : 'Developer API switched off')} />
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="st-label">API number</div>
+            <div className="st-desc">
+              {a.number?.phone
+                ? `+${a.number.phone} · ${a.number.connected ? 'connected' : 'offline'} — used only for the API.`
+                : a.number
+                  ? 'Waiting for a QR scan on its Developer page.'
+                  : 'None — its API sends from its default WhatsApp Gateway number.'}
+            </div>
+          </div>
+          {a.number && (
+            <button
+              className="btn sm sa-warn"
+              disabled={busy === 'unlink'}
+              onClick={() => confirm(`Unlink ${a.number.phone ? '+' + a.number.phone : 'the API number'} from ${w.name}?\n\nIts keys on "Automatic" will send from the default Gateway number, and messages waiting for this number are cancelled.`) && put('unlink', { unlinkApiNumber: true }, 'API number unlinked')}
+            >
+              Unlink
+            </button>
+          )}
+        </div>
+        <div className="setting-row sa-dev-send">
+          <div>
+            <div className="st-label">Sending settings</div>
+            <div className="st-desc">What its Developer page shows; inside your rules for every workspace.</div>
+          </div>
+          <div className="sa-dev-fields">
+            {field('per_batch', 'At a time', a.bounds.per_batch, 'msgs')}
+            {field('gap_seconds', 'Then wait', a.bounds.gap_seconds, 'sec')}
+            {field('max_queue', 'Queue up to', a.bounds.max_queue, 'msgs')}
+            <button className="btn sm primary" disabled={!dirty || busy === 'send'} onClick={() => put('send', { sending: { per_batch: Number(f.per_batch), gap_seconds: Number(f.gap_seconds), max_queue: Number(f.max_queue) } }, 'Sending settings saved')}>
+              Save
+            </button>
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="st-label">Queue</div>
+            <div className="st-desc">{a.queued ? `${plural(a.queued, 'message')} waiting to go out.` : 'Nothing waiting.'}</div>
+          </div>
+          <button
+            className="btn sm sa-warn"
+            disabled={!a.queued || busy === 'q'}
+            onClick={() => confirm(`Cancel all ${a.queued} waiting API messages in ${w.name}? They won't be sent.`) && put('q', { cancelQueue: true }, 'Queue cleared')}
+          >
+            Cancel all
+          </button>
+        </div>
+      </div>
+    </>
   );
 }
 

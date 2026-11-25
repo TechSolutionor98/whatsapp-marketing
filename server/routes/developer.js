@@ -2,7 +2,8 @@
 import { Router } from 'express';
 import { getLimits } from '../limits.js';
 import { listNumbers } from '../numbers.js';
-import { ApiError, listKeys, createKey, updateKey, revokeKey, listLogs, sendViaApi, usageToday, PER_MINUTE, MAX_KEYS, apiNumber, sendingSettings, saveSendingSettings, SENDING_LIMITS, queueState, cancelQueued } from '../developer.js';
+import { ApiError, listKeys, createKey, updateKey, revokeKey, listLogs, sendViaApi, usageToday, PER_MINUTE, MAX_KEYS, apiNumber, sendingSettings, saveSendingSettings, sendingBounds, apiAllowed, queueState, cancelQueued } from '../developer.js';
+import { getSetting } from '../db/mongo.js';
 import { db, audit, nowIso, oid } from '../db/mongo.js';
 import { canLinkNumber } from '../limits.js';
 import { startPoolAccount, removePoolAccount } from '../whatsapp/pool.js';
@@ -22,12 +23,14 @@ developer.get('/', async (_req, res) => {
     const nums = await listNumbers();
     const q = await queueState();
     res.json({
-      enabled: !!L.allowApi,
+      enabled: apiAllowed(),
+      off_by: !L.allowApi ? 'platform' : getSetting('apiOff', false) ? 'workspace' : null, // who switched it off
       keys: await listKeys(),
       numbers: nums.map((n) => ({ phone: n.phone, label: n.label || '', name: n.name || '', kind: n.kind === 'cloud' ? 'cloud' : 'qr', connected: !!n.connected, default: !!n.default })),
       api_number: await apiNumber(),
       sending: sendingSettings(),
-      sending_limits: SENDING_LIMITS,
+      sending_limits: sendingBounds(), // narrowed by the super admin's rules
+      sending_rules: { per_batch: L.apiMaxPerBatch || 0, min_gap: L.apiMinGapSec || 0, max_queue: L.apiMaxQueue || 0 },
       queue: { total: q.total, next_at: q.items[0]?.estimated_send_at || null },
       limits: { perMinute: PER_MINUTE, qrPerDay: L.apiMaxPerNumberDay || 0, maxKeys: MAX_KEYS },
       today: await usageToday(),
@@ -39,7 +42,7 @@ developer.get('/', async (_req, res) => {
 
 developer.post('/keys', async (req, res) => {
   try {
-    if (!getLimits().allowApi) throw new ApiError(403, 'api_disabled', 'The Developer API is switched off by the super admin.');
+    if (!apiAllowed()) throw new ApiError(403, 'api_disabled', 'The Developer API is switched off by the super admin.');
     res.json(await createKey(req.body || {}, by(req)));
   } catch (e) {
     sendError(res, e);
@@ -74,7 +77,7 @@ developer.get('/logs', async (req, res) => {
 // "Send a test message": the same path an API request takes, without needing the key.
 developer.post('/test', async (req, res) => {
   try {
-    if (!getLimits().allowApi) throw new ApiError(403, 'api_disabled', 'The Developer API is switched off by the super admin.');
+    if (!apiAllowed()) throw new ApiError(403, 'api_disabled', 'The Developer API is switched off by the super admin.');
     const b = req.body || {};
     const key = { _id: 'test', name: 'Developer page test', sender_phone: b.sender && b.sender !== 'default' ? String(b.sender) : null };
     res.json(await sendViaApi(key, { to: b.to, text: b.text, name: b.name }));

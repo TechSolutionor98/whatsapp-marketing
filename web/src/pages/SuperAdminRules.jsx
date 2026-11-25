@@ -127,6 +127,25 @@ export function RulesPanel({ onSaved }) {
         <Row label="API messages a day, per QR-linked number" desc="Keeps a scanned number safe from bans when software sends a lot. Official WhatsApp API numbers follow Meta's own limits.">
           <Num label="API messages a day" value={L.apiMaxPerNumberDay} onChange={(v) => set('apiMaxPerNumberDay', v)} suffix="msgs/day" />
         </Row>
+        <Row
+          label="Most API messages sent at a time"
+          desc={L.apiMaxPerBatch ? `A workspace's "Messages sent at a time" (Developer page) can be at most ${L.apiMaxPerBatch}.` : 'No limit — each workspace picks 1 to 50 on its Developer page.'}
+        >
+          <Num label="Most API messages at a time" value={L.apiMaxPerBatch} onChange={(v) => set('apiMaxPerBatch', v)} suffix="at a time" />
+        </Row>
+        <Row
+          label="Fewest seconds between API batches"
+          desc={L.apiMinGapSec ? `Every workspace waits at least ${L.apiMinGapSec} seconds between batches; messages that come faster wait in its queue.` : 'No minimum — each workspace sets its own wait (0 = none).'}
+        >
+          <Num label="Fewest seconds between API batches" value={L.apiMinGapSec} onChange={(v) => set('apiMinGapSec', v)} suffix="seconds" />
+        </Row>
+        <Row
+          label="Largest API queue"
+          desc={L.apiMaxQueue ? `A workspace's queue holds at most ${L.apiMaxQueue} messages; more are refused with "queue_full".` : 'No limit — each workspace allows up to 5,000 waiting.'}
+        >
+          <Num label="Largest API queue" value={L.apiMaxQueue} onChange={(v) => set('apiMaxQueue', v)} suffix="messages" />
+        </Row>
+        <div className="muted" style={{ padding: '10px 2px 2px', fontSize: 12.5 }}>0 = no limit. Each workspace's own settings are on its Developer page; you can also change them per workspace (Workspaces → Manage → Developer API).</div>
       </Section>
 
       <Section icon="briefcase" title="Workspace size" sub="What one business may have">

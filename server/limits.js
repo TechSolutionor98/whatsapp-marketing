@@ -27,6 +27,10 @@ export const LIMIT_DEFAULTS = {
   // Developer API (POS buttons, websites, other software sending through a workspace's number).
   allowApi: true, // workspaces may create API keys and send through the API
   apiMaxPerNumberDay: 500, // API messages one QR-linked number may send a day (0 = no cap; official numbers: Meta's limits)
+  // The Developer page's sending settings (each workspace sets its own, inside these):
+  apiMaxPerBatch: 0, // most API messages sent at a time (0 = up to 50)
+  apiMinGapSec: 0, // fewest seconds between API batches (0 = none)
+  apiMaxQueue: 0, // most API messages that may wait in a workspace's queue (0 = up to 5,000)
 };
 
 const hhmm = (v) => (/^([01]\d|2[0-3]):[0-5]\d$/.test(String(v || '')) ? String(v) : '');
@@ -40,7 +44,7 @@ export function getLimits() {
 export function cleanLimits(b = {}) {
   const cur = getLimits();
   const out = { ...cur };
-  for (const k of ['minDelaySec', 'maxPerNumberDay', 'warmupMaxPerDay', 'warmupMinGap', 'maxNumbers', 'maxTeam', 'apiMaxPerNumberDay']) if (k in b) out[k] = nonNeg(b[k]);
+  for (const k of ['minDelaySec', 'maxPerNumberDay', 'warmupMaxPerDay', 'warmupMinGap', 'maxNumbers', 'maxTeam', 'apiMaxPerNumberDay', 'apiMaxPerBatch', 'apiMinGapSec', 'apiMaxQueue']) if (k in b) out[k] = nonNeg(b[k]);
   for (const k of ['windowStart', 'windowEnd']) if (k in b) out[k] = hhmm(b[k]);
   for (const k of ['forceTyping', 'forceRamp', 'allowAi', 'sharePlatformKey', 'officialFollowRules', 'allowApi']) if (k in b) out[k] = !!b[k];
   if (out.windowStart && out.windowEnd && out.windowStart >= out.windowEnd) throw new Error('Sending hours: the start must be before the end');
@@ -73,12 +77,39 @@ export function clampSettings(s, L = getLimits()) {
   if ('warmupDailyMax' in out && L.warmupMaxPerDay) fix('warmupDailyMax', Math.min(num('warmupDailyMax', 0), L.warmupMaxPerDay), `At most ${L.warmupMaxPerDay} warm-up messages a day`);
   if ('warmupMinGap' in out && L.warmupMinGap) fix('warmupMinGap', Math.max(num('warmupMinGap', 0), L.warmupMinGap), `Warm-up gap is at least ${L.warmupMinGap} sec`);
   if ('warmupMaxGap' in out && 'warmupMinGap' in out) fix('warmupMaxGap', Math.max(num('warmupMaxGap', 0), num('warmupMinGap', 0)), 'The longest warm-up gap can\'t be shorter than the shortest');
+  // The Developer API's sending settings (one object) → inside the API rules.
+  if (out.apiSending && typeof out.apiSending === 'object') {
+    const b = apiSendingBounds(L);
+    const cur = out.apiSending;
+    const next = { ...cur };
+    const into = (k, [lo, hi], why) => {
+      if (cur[k] == null) return;
+      const v = Math.min(hi, Math.max(lo, Number(cur[k]) || 0));
+      if (v !== Number(cur[k])) {
+        next[k] = v;
+        notes.push(why);
+      }
+    };
+    into('per_batch', b.per_batch, `At most ${b.per_batch[1]} API messages at a time`);
+    into('gap_seconds', b.gap_seconds, `At least ${b.gap_seconds[0]} seconds between API batches`);
+    into('max_queue', b.max_queue, `An API queue holds at most ${b.max_queue[1]} messages`);
+    if (JSON.stringify(next) !== JSON.stringify(cur)) out.apiSending = next;
+  }
   if (!L.allowAi) {
     if ('aiEnabled' in out) fix('aiEnabled', false, 'AI is switched off by the super admin');
     if ('autoReplyEnabled' in out) fix('autoReplyEnabled', false, 'AI is switched off by the super admin');
     if ('warmupUseAi' in out) fix('warmupUseAi', false, 'AI is switched off by the super admin');
   }
   return { settings: out, notes: [...new Set(notes)] };
+}
+
+// What a workspace may set on its Developer page: [lowest, highest] for each sending setting,
+// narrowed by the super admin's API rules.
+export function apiSendingBounds(L = getLimits()) {
+  const perBatchHi = L.apiMaxPerBatch ? Math.min(50, L.apiMaxPerBatch) : 50;
+  const gapLo = Math.min(3600, L.apiMinGapSec || 0);
+  const queueHi = L.apiMaxQueue ? Math.min(5000, L.apiMaxQueue) : 5000;
+  return { per_batch: [1, Math.max(1, perBatchHi)], gap_seconds: [gapLo, 3600], max_queue: [Math.min(10, queueHi), Math.max(1, queueHi)] };
 }
 
 // Do the anti-ban gap and daily cap apply to this campaign? (Not to official API numbers,

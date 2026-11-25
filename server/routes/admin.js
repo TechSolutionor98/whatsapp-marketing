@@ -18,6 +18,7 @@ import { keySource, aiProviderName } from '../ai.js';
 import { emit } from '../events.js';
 import { DEFAULT_WS, runInWs } from '../tenant.js';
 import { getLimits, cleanLimits, enforceEverywhere, getWsDefaults, saveWsDefaults, defaultsOf, canAddPerson, clampSettings, DEFAULT_KEYS, LIMIT_DEFAULTS } from '../limits.js';
+import { apiNumber, sendingSettings, saveSendingSettings, sendingBounds, cancelQueued, rekickLanes, usageToday } from '../developer.js';
 
 export const admin = Router();
 
@@ -43,9 +44,65 @@ function wsDetail(id) {
       campaignsRunning: await db.campaigns().countDocuments({ status: 'running' }),
       sentToday: await db.messages().countDocuments({ direction: 'out', day_key: dayKey() }),
       ai: { provider: aiProviderName(), key: keySource() }, // whose AI key it uses (never the key)
+      api: await apiDetail(),
     };
   });
 }
+
+// A workspace's Developer API, for the super admin (read inside that workspace).
+async function apiDetail() {
+  const n = await apiNumber();
+  return {
+    off: !!getSetting('apiOff', false),
+    keys: await db.apiKeys().countDocuments({ revoked_at: null }),
+    number: n ? { phone: n.phone, connected: n.connected, status: n.status } : null,
+    sending: (({ per_batch, gap_seconds, max_queue }) => ({ per_batch, gap_seconds, max_queue }))(sendingSettings()),
+    bounds: sendingBounds(),
+    queued: await db.messages().countDocuments({ source: 'api', status: 'queued' }),
+    sentToday: await usageToday(),
+  };
+}
+
+// The super admin controls one workspace's Developer API: on/off, its sending settings, its
+// queue and its API number.
+admin.put('/workspaces/:id/developer', async (req, res) => {
+  const w = wsOr404(req, res);
+  if (!w) return;
+  const b = req.body || {};
+  try {
+    const out = await runInWs(w.id, async () => {
+      const notes = [];
+      if ('apiOff' in b) {
+        await setSetting('apiOff', !!b.apiOff);
+        audit(w.id, `Developer API ${b.apiOff ? 'switched OFF' : 'switched on'} for this workspace by ${by(req)}${b.apiOff ? ' — API requests are refused and the queue waits' : ''}`, b.apiOff ? 'warn' : 'info');
+        rekickLanes(w.id);
+      }
+      if (b.sending && typeof b.sending === 'object') {
+        const r = await saveSendingSettings(b.sending, `${by(req)} (super admin)`);
+        if (r.notes) notes.push(...r.notes);
+      }
+      if (b.cancelQueue) {
+        const n = await cancelQueued(null, `${by(req)} (super admin)`);
+        notes.push(`${n} queued message${n === 1 ? '' : 's'} cancelled`);
+      }
+      if (b.unlinkApiNumber) {
+        const n = await apiNumber();
+        if (n) {
+          await removePoolAccount(n.id);
+          await db.warmupAccounts().deleteOne({ _id: new ObjectId(n.id) });
+          const dropped = n.phone ? await cancelQueued(null, `${by(req)} (super admin)`, { phone: n.phone }) : 0;
+          audit(w.id, `API number${n.phone ? ` +${n.phone}` : ''} unlinked by ${by(req)} (super admin)${dropped ? ` — ${dropped} queued message${dropped === 1 ? '' : 's'} cancelled` : ''}`, 'warn');
+        }
+      }
+      emit('pool:update', poolState());
+      return { api: await apiDetail(), notes };
+    });
+    emit('admin:update', {}, { ws: null });
+    res.json(out);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
 
 const wsOr404 = (req, res) => {
   const w = workspaceOf(req.params.id);
@@ -377,6 +434,10 @@ admin.put('/limits', async (req, res) => {
     next.maxNumbers ? `≤${next.maxNumbers} numbers` : null,
     next.maxTeam ? `≤${next.maxTeam} people` : null,
     next.allowAi ? null : 'AI off',
+    next.allowApi ? null : 'Developer API off',
+    next.apiMaxPerBatch ? `API ≤${next.apiMaxPerBatch} at a time` : null,
+    next.apiMinGapSec ? `API ≥${next.apiMinGapSec}s between batches` : null,
+    next.apiMaxQueue ? `API queue ≤${next.apiMaxQueue}` : null,
   ].filter(Boolean);
   audit(null, `Rules for every workspace changed by ${by(req)}: ${parts.join(', ')}${fixed.settings || fixed.campaigns ? ` — adjusted ${fixed.settings} workspace setting${fixed.settings === 1 ? '' : 's'} and ${fixed.campaigns} campaign value${fixed.campaigns === 1 ? '' : 's'}` : ''}`);
   emit('admin:update', {}, { ws: null });

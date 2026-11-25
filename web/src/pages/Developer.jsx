@@ -488,12 +488,18 @@ function SendingCard({ data, reload }) {
   const dirty = pb !== s.per_batch || g !== s.gap_seconds || num(maxQ, lim.max_queue) !== s.max_queue;
   const perHour = g > 0 ? Math.floor((3600 / g) * pb) : null;
   const risky = pb > 10 && g < 30;
+  const rules = data.sending_rules || {};
+  const ruleText = [
+    rules.per_batch ? `at most ${rules.per_batch} at a time` : null,
+    rules.min_gap ? `at least ${rules.min_gap} seconds between batches` : null,
+    rules.max_queue ? `a queue of at most ${rules.max_queue}` : null,
+  ].filter(Boolean);
   async function save(e) {
     e.preventDefault();
     setBusy(true);
     try {
-      await api.put('/developer/settings', { per_batch: pb, gap_seconds: g, max_queue: num(maxQ, lim.max_queue) });
-      toast('Sending settings saved', 'success');
+      const r = await api.put('/developer/settings', { per_batch: pb, gap_seconds: g, max_queue: num(maxQ, lim.max_queue) });
+      toast(['Sending settings saved', ...(r.notes || [])].join(' — '), 'success');
       reload();
     } catch (err) {
       toast(err.message, 'error');
@@ -520,7 +526,7 @@ function SendingCard({ data, reload }) {
             <label htmlFor="dev-gap">Then wait (seconds)</label>
             <input id="dev-gap" className="input" type="number" min={lim.gap_seconds[0]} max={lim.gap_seconds[1]} value={gap} onChange={(e) => setGap(e.target.value)} />
             <div className="dev-chips">
-              {[0, 5, 15, 30, 60, 120, 300].map((v) => (
+              {[0, 5, 15, 30, 60, 120, 300].filter((v) => v >= lim.gap_seconds[0]).map((v) => (
                 <button type="button" key={v} className={`chip-btn ${g === v ? 'on' : ''}`} onClick={() => setGap(v)}>{v === 0 ? 'No wait' : v < 60 ? `${v}s` : `${v / 60} min`}</button>
               ))}
             </div>
@@ -539,6 +545,7 @@ function SendingCard({ data, reload }) {
           )}
           Messages that arrive faster wait in the queue and go out in order; your software gets <code>"status": "queued"</code> (HTTP 202) for them.
         </div>
+        {ruleText.length > 0 && <div className="dev-rule-note"><Icon.shield /> Set by the platform admin: {ruleText.join(', ')}.</div>}
         {risky && <div className="auth-error" style={{ marginTop: 10 }}>Sending this fast from a number linked by QR code can get it banned. For big volumes, keep it to 5 or fewer at a time with 30 seconds or more between.</div>}
         <div className="dev-form-foot">
           <button className="btn primary" disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save'}</button>
@@ -655,7 +662,13 @@ function QueueCard({ data }) {
 function NumberTab({ data, reload }) {
   return (
     <>
-      {!data.enabled && <div className="auth-error">The Developer API is switched off by the super admin. API requests are refused.</div>}
+      {!data.enabled && (
+        <div className="auth-error">
+          {data.off_by === 'workspace'
+            ? 'The platform admin switched the Developer API off for this workspace. API requests are refused and the queue waits.'
+            : 'The Developer API is switched off by the platform admin. API requests are refused.'}
+        </div>
+      )}
       <ApiNumberCard data={data} reload={reload} />
       <SendingCard data={data} reload={reload} />
       <QueueCard data={data} />

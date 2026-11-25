@@ -2,7 +2,7 @@
 // never with a signed-in session. Every answer is JSON; errors are
 // { "error": { "code": "…", "message": "…" } } with a matching HTTP status.
 import express, { Router } from 'express';
-import { isMongoUp, workspaceOf } from '../db/mongo.js';
+import { isMongoUp, workspaceOf, getSetting } from '../db/mongo.js';
 import { runInWs } from '../tenant.js';
 import { getLimits } from '../limits.js';
 import { ApiError, findKey, rateLimited, touchKey, logRequest, sendViaApi, messageById, messageByReference, resolveSender, sendingSettings, PER_MINUTE } from '../developer.js';
@@ -43,6 +43,7 @@ publicApi.use(async (req, res, next) => {
   if (w.pending) return deny(403, 'workspace_pending', `${w.name} is waiting for approval. The API works once it's approved.`);
   if (w.suspended) return deny(403, 'workspace_suspended', `${w.name} is suspended, so the API can't send. Contact the platform admin.`);
   if (!getLimits().allowApi) return deny(403, 'api_disabled', 'The Developer API is switched off by the platform admin.');
+  if (runInWs(key.ws, () => getSetting('apiOff', false))) return deny(403, 'api_disabled', `The Developer API is switched off for ${w.name} by the platform admin.`);
   const wait = rateLimited(key._id);
   if (wait) return deny(429, 'rate_limited', `Too many requests: a key can make ${PER_MINUTE} a minute. Try again in ${wait} seconds.`, { 'Retry-After': String(wait) });
   touchKey(key);
