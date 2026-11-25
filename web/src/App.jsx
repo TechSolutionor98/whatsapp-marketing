@@ -26,13 +26,15 @@ const NAV = [
   { id: 'warmup', label: 'Warmup', icon: 'flame', group: 'Operations' },
   { id: 'conversations', label: 'Conversations', icon: 'chat', group: 'Operations' },
   { id: 'gateway', label: 'WhatsApp Gateway', icon: 'gateway', group: 'System' },
-  { id: 'developer', label: 'Developer', icon: 'code', group: 'System' },
-  { id: 'devdocs', label: 'Developer Docs', icon: 'book', group: 'System' },
   { id: 'audit', label: 'Audit Logs', icon: 'logs', group: 'System' },
   { id: 'settings', label: 'Settings', icon: 'settings', group: 'System' },
   { id: 'team', label: 'Team', icon: 'users', group: 'System' },
   { id: 'auth', label: 'Authentication', icon: 'shield', group: 'System' },
   { id: 'superadmin', label: 'Super Admin', icon: 'crown', group: 'System' },
+  // Its own section: the API number, sending settings and keys, and the docs for whoever
+  // connects a POS or website.
+  { id: 'developer', label: 'Developer', icon: 'code', group: 'Developer' },
+  { id: 'devdocs', label: 'Developer Docs', icon: 'book', group: 'Developer' },
 ];
 
 const PAGES = {
