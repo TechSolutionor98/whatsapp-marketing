@@ -4220,3 +4220,6 @@ tbody tr:hover {
 .sa-dev-fields .btn { margin-bottom: 19px; }
 .sa-dev-field { display: flex; flex-direction: column; gap: 3px; font-size: 12px; font-weight: 600; color: var(--text-soft); }
 .sa-dev-field .input { width: 84px; }
+
+.dev-docs-link { display: flex; align-items: center; gap: 8px; margin: 4px 2px 18px; font-size: 13px; color: var(--text-soft); }
+.dev-docs-link svg { width: 15px; height: 15px; color: var(--brand-700); }

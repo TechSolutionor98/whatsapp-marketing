@@ -4,17 +4,74 @@ import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
 import { Modal, Loading, Empty, timeAgo } from '../ui.jsx';
 
-// Developer page: API keys, the POS receipt guide, the API reference and the request log. Software
-// (a POS "Send on WhatsApp" button, a website, a CRM) sends through this workspace's numbers with
-// a key; the server is /api/v1 (server/routes/public-api.js).
+// Two pages. Developer: the API number, its sending settings and the API keys. Developer Docs:
+// the POS receipt guide, the API reference and the request log. Software (a POS "Send on
+// WhatsApp" button, a website, a CRM) sends with a key; the server is /api/v1
+// (server/routes/public-api.js).
 
 const TABS = [
   ['number', 'Number & sending', 'phone'],
   ['keys', 'API keys', 'key'],
+];
+const DOC_TABS = [
   ['pos', 'POS receipt button', 'receipt'],
   ['reference', 'API reference', 'book'],
   ['logs', 'Request log', 'logs'],
 ];
+const TAB_KEY = { developer: 'pulse.devTab', devdocs: 'pulse.devDocsTab' };
+// Open a tab on the other page (Developer ↔ Developer Docs).
+function openOn(page, tab) {
+  try {
+    localStorage.setItem(TAB_KEY[page], tab);
+  } catch {}
+  window.location.hash = `/${page}`;
+}
+// The page's open tab, remembered per page.
+function useTab(page, tabs) {
+  const [tab, setTabState] = useState(() => {
+    try {
+      const t = localStorage.getItem(TAB_KEY[page]);
+      return tabs.some(([id]) => id === t) ? t : tabs[0][0];
+    } catch {
+      return tabs[0][0];
+    }
+  });
+  // A link from the other page (same component instance stays mounted on hash change).
+  useEffect(() => {
+    const onHash = () => {
+      try {
+        const t = localStorage.getItem(TAB_KEY[page]);
+        if (tabs.some(([id]) => id === t)) setTabState(t);
+      } catch {}
+    };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, [page]);
+  const other = page === 'developer' ? 'devdocs' : 'developer';
+  const setTab = (t) => {
+    if (!tabs.some(([id]) => id === t)) return openOn(other, t);
+    setTabState(t);
+    try {
+      localStorage.setItem(TAB_KEY[page], t);
+    } catch {}
+    window.scrollTo?.(0, 0);
+  };
+  return [tab, setTab];
+}
+function TabBar({ tabs, tab, setTab }) {
+  return (
+    <div className="sa-tabs" role="tablist">
+      {tabs.map(([id, label, icon]) => {
+        const I = Icon[icon];
+        return (
+          <button key={id} role="tab" aria-selected={tab === id} className={`sa-tab ${tab === id ? 'on' : ''}`} onClick={() => setTab(id)}>
+            <I /> {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 const KEY_HOLDER = 'YOUR_API_KEY';
 const apiBase = () => `${window.location.origin}/api/v1`;
 const numName = (n) => `${n.label || n.name || 'Number'} · +${n.phone}${n.kind === 'cloud' ? ' (Official API)' : ''}`;
@@ -840,11 +897,11 @@ function PosTab({ setTab }) {
       </div>
 
       <div className="card card-pad">
-        <h4 className="dev-h4"><span className="dev-n">1</span> Link your WhatsApp number</h4>
-        <p className="dev-p">On <strong>WhatsApp Gateway</strong>, scan a QR code with the shop's phone (free) or connect the official WhatsApp API. Receipts go out from your <strong>default number</strong> unless you choose another one for the key.</p>
+        <h4 className="dev-h4"><span className="dev-n">1</span> Link the WhatsApp number receipts come from</h4>
+        <p className="dev-p">On <button className="link-btn" onClick={() => setTab('number')}>Developer → Number &amp; sending</button>, link the <strong>API number</strong>: scan a QR code with the phone that should send receipts. It's only used by the API. Without one, receipts go out from your default <strong>WhatsApp Gateway</strong> number, and a key can always be set to a Gateway number instead.</p>
 
         <h4 className="dev-h4"><span className="dev-n">2</span> Create an API key</h4>
-        <p className="dev-p">On the <button className="link-btn" onClick={() => setTab('keys')}>API keys</button> tab, create a key named after the POS (for example "Shop POS"). Copy it and save it in the POS settings. Keep it on the POS server or in the till's private settings, never in a public web page.</p>
+        <p className="dev-p">On <button className="link-btn" onClick={() => setTab('keys')}>Developer → API keys</button>, create a key named after the POS (for example "Shop POS"). Copy it and save it in the POS settings. Keep it on the POS server or in the till's private settings, never in a public web page.</p>
 
         <h4 className="dev-h4"><span className="dev-n">3</span> When the button is tapped, send the receipt</h4>
         <p className="dev-p">Send a <code>POST</code> to <code>{base}/messages</code> with the customer's number and the receipt: a text, a PDF, or both (the text becomes the PDF's caption).</p>
@@ -866,7 +923,7 @@ function PosTab({ setTab }) {
           <li><strong>Phone numbers</strong>: always with the country code, e.g. <code>971501234567</code> or <code>+971 50 123 4567</code>. Numbers that start with a single 0 are refused.</li>
           <li><strong>No double sends</strong>: put the receipt number in <code>"reference"</code>. If the button is tapped twice, or your POS retries, the same receipt to the same number goes out only once in 24 hours (the answer then has <code>"duplicate": true</code>).</li>
           <li><strong>Customer's name</strong>: add <code>"name": "Ali Khan"</code> and the contact is saved with it on the first receipt.</li>
-          <li><strong>Waiting time</strong>: the API answers once WhatsApp has taken the message, usually in 1 to 5 seconds. If many tills send at once from one QR-linked number, messages go out one after another, a few seconds apart, to keep the number safe. Use a 60-second timeout.</li>
+          <li><strong>Waiting time</strong>: when the message can go out right away, the API answers once WhatsApp has taken it, usually in 1 to 5 seconds. When it has to wait its turn (your sending settings on <em>Developer → Number &amp; sending</em>, e.g. 5 messages then 60 seconds), it answers at once with <code>"status": "queued"</code> (HTTP 202) and goes out in order. Use a 30-second timeout.</li>
           <li><strong>Replies</strong>: if the customer answers, the chat appears in <strong>Conversations</strong>, with the receipt you sent.</li>
           <li><strong>STOP</strong>: a customer who replied STOP doesn't get messages (error <code>opted_out</code>).</li>
         </ul>
@@ -1110,21 +1167,7 @@ export default function Developer() {
   const { onBus } = useApp();
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
-  const [tab, setTabState] = useState(() => {
-    try {
-      const t = localStorage.getItem('pulse.devTab');
-      return TABS.some(([id]) => id === t) ? t : 'number';
-    } catch {
-      return 'number';
-    }
-  });
-  const setTab = (t) => {
-    setTabState(t);
-    try {
-      localStorage.setItem('pulse.devTab', t);
-    } catch {}
-    window.scrollTo?.(0, 0);
-  };
+  const [tab, setTab] = useTab('developer', TABS);
   const load = useCallback(async () => {
     try {
       setData(await api.get('/developer'));
@@ -1156,18 +1199,23 @@ export default function Developer() {
   if (!data) return <Loading />;
   return (
     <div className="dev-page">
-      <div className="sa-tabs" role="tablist">
-        {TABS.map(([id, label, icon]) => {
-          const I = Icon[icon];
-          return (
-            <button key={id} role="tab" aria-selected={tab === id} className={`sa-tab ${tab === id ? 'on' : ''}`} onClick={() => setTab(id)}>
-              <I /> {label}
-            </button>
-          );
-        })}
-      </div>
+      <TabBar tabs={TABS} tab={tab} setTab={setTab} />
       {tab === 'number' && <NumberTab data={data} reload={load} />}
       {tab === 'keys' && <KeysTab data={data} reload={load} setTab={setTab} />}
+      <div className="dev-docs-link">
+        <Icon.book /> The POS receipt guide, the API reference and the request log are on{' '}
+        <button className="link-btn" onClick={() => openOn('devdocs', 'pos')}>Developer Docs</button>.
+      </div>
+    </div>
+  );
+}
+
+// Developer Docs: for whoever connects the POS / website (and to check what it sent).
+export function DeveloperDocs() {
+  const [tab, setTab] = useTab('devdocs', DOC_TABS);
+  return (
+    <div className="dev-page">
+      <TabBar tabs={DOC_TABS} tab={tab} setTab={setTab} />
       {tab === 'pos' && <PosTab setTab={setTab} />}
       {tab === 'reference' && <ReferenceTab />}
       {tab === 'logs' && <LogsTab />}

@@ -136,6 +136,7 @@ export function AppProvider({ children }) {
       if (page === 'auth') return true;
       if (page === 'superadmin') return user.role === 'owner';
       if (page === 'team') return user.role === 'owner' || user.role === 'admin'; // admins manage their team
+      if (page === 'devdocs') page = 'developer'; // Developer Docs: same access as Developer
       return user.role === 'owner' || (user.pages || []).includes(page);
     },
     [user]
