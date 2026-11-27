@@ -85,11 +85,11 @@ const fromNow = (iso) => {
   return `in ${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`;
 };
 const secs = (n) => (n < 60 ? `${n} second${n === 1 ? '' : 's'}` : n % 60 === 0 ? `${n / 60} minute${n === 60 ? '' : 's'}` : `${Math.floor(n / 60)} min ${n % 60} s`);
-// What a key's "Send from: Automatic" means right now.
+// The number a key set to "Automatic" sends from right now.
 const automaticName = (data) => {
-  if (data.api_number?.phone) return `Automatic — the API number (+${data.api_number.phone})`;
+  if (data.api_number?.phone) return `API number (+${data.api_number.phone})`;
   const d = data.numbers.find((n) => n.default);
-  return `Automatic — default Gateway number${d ? ` (+${d.phone})` : ''}`;
+  return `Your default WhatsApp Gateway number${d ? ` (+${d.phone})` : ''}`;
 };
 
 function useCopy() {
@@ -315,14 +315,14 @@ function KeyModal({ data, editing, onClose, onSaved }) {
       <form id="dev-key-form" onSubmit={save}>
         <div className="field">
           <label htmlFor="dev-key-name">Name</label>
-          <input id="dev-key-name" className="input" autoFocus maxLength={60} placeholder="e.g. Shop POS, Branch 2 till, Website" value={name} onChange={(e) => setName(e.target.value)} />
-          <div className="hint">So you know which software uses it.</div>
+          <input id="dev-key-name" className="input" autoFocus maxLength={60} placeholder="e.g. Website OTP, Shop POS" value={name} onChange={(e) => setName(e.target.value)} />
+          <div className="hint">So you know which website, POS or app uses this key.</div>
         </div>
         <div className="field">
           <label htmlFor="dev-key-sender">Send from</label>
           <select id="dev-key-sender" className="select" value={sender} onChange={(e) => setSender(e.target.value)}>
-            <option value="default">{automaticName(data)}</option>
-            {data.api_number?.phone && <option value={data.api_number.phone}>API number · +{data.api_number.phone}</option>}
+            <option value="default">Automatic: {automaticName(data)}</option>
+            {data.api_number?.phone && <option value={data.api_number.phone}>Only the API number (+{data.api_number.phone})</option>}
             {data.numbers.length > 0 && (
               <optgroup label="WhatsApp Gateway numbers">
                 {data.numbers.map((n) => (
@@ -331,7 +331,7 @@ function KeyModal({ data, editing, onClose, onSaved }) {
               </optgroup>
             )}
           </select>
-          <div className="hint">Automatic sends from the API number when one is linked (Number &amp; sending tab), otherwise from the default Gateway number.</div>
+          <div className="hint">Automatic uses the API number. If no API number is linked, it uses your default WhatsApp Gateway number.</div>
         </div>
       </form>
     </Modal>
@@ -343,10 +343,10 @@ function NewKeyModal({ created, onClose }) {
   return (
     <Modal title="Your new API key" onClose={onClose} wide footer={<button className="btn primary" onClick={onClose}>I've copied it</button>}>
       <div className="dev-warn">
-        <Icon.warn /> <span><strong>Copy this key now.</strong> For your security it's shown only once. If you lose it, delete it and create a new one.</span>
+        <Icon.warn /> <span><strong>Copy this key now.</strong> You will see it only once. If you lose it, delete it and make a new one.</span>
       </div>
       <CopyLine label={`API key: ${created.name}`} value={created.key} />
-      <p className="dev-p">Put it in your POS settings, on the server side. Anyone who has this key can send WhatsApp messages from your number, so never put it in a public web page or app.</p>
+      <p className="dev-p">Put it in your software's server settings (for example the <code>.env</code> file). Keep it secret: anyone with this key can send WhatsApp messages from your number. Never put it in website code that visitors can see.</p>
       <CodeBlock label="Try it (change the number to yours)" code={quickCurl(base, created.key)} />
     </Modal>
   );
@@ -355,7 +355,7 @@ function NewKeyModal({ created, onClose }) {
 function TestCard({ data }) {
   const { toast } = useApp();
   const [to, setTo] = useState('');
-  const [text, setText] = useState('Hello! This is a test message from our WhatsApp receipts setup.');
+  const [text, setText] = useState('Hello! This is a test message.');
   const [sender, setSender] = useState('default');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null); // { ok, text }
@@ -365,7 +365,8 @@ function TestCard({ data }) {
     setResult(null);
     try {
       const r = await api.post('/developer/test', { to, text, sender });
-      setResult({ ok: true, text: `Sent to +${r.to} from +${r.from}. You'll find it in Conversations.` });
+      const fromApi = r.from && r.from === data.api_number?.phone;
+      setResult({ ok: true, text: fromApi ? `Sent to +${r.to} from the API number +${r.from}.` : `Sent to +${r.to} from +${r.from}. You'll find it in Conversations.` });
     } catch (err) {
       setResult({ ok: false, text: err.message });
       toast('Test message not sent', 'error');
@@ -376,18 +377,18 @@ function TestCard({ data }) {
     <div className="card">
       <div className="card-head">
         <Icon.send style={{ width: 18, color: 'var(--brand-700)' }} />
-        <div><h3>Send a test message</h3><div className="sub">Goes through the same steps as an API request, without a key.</div></div>
+        <div><h3>Send a test message</h3><div className="sub">Check that sending works. No key needed.</div></div>
       </div>
       <form className="card-pad" onSubmit={send}>
         <div className="dev-test-grid">
           <div className="field">
-            <label htmlFor="dev-test-to">To (WhatsApp number with country code)</label>
+            <label htmlFor="dev-test-to">Send to (number with country code)</label>
             <input id="dev-test-to" className="input" inputMode="tel" placeholder="971501234567" value={to} onChange={(e) => setTo(e.target.value)} />
           </div>
           <div className="field">
-            <label htmlFor="dev-test-from">From</label>
+            <label htmlFor="dev-test-from">Send from</label>
             <select id="dev-test-from" className="select" value={sender} onChange={(e) => setSender(e.target.value)}>
-              <option value="default">Default number</option>
+              <option value="default">Automatic: {automaticName(data)}</option>
               {data.numbers.map((n) => <option key={n.phone} value={n.phone}>{numName(n)}</option>)}
             </select>
           </div>
@@ -450,7 +451,7 @@ function ApiNumberCard({ data, reload }) {
         <Icon.phone style={{ width: 18, color: 'var(--brand-700)' }} />
         <div style={{ flex: 1 }}>
           <h3>API number</h3>
-          <div className="sub">A WhatsApp number used only by the API: receipts and messages from your POS, website or app.</div>
+          <div className="sub">This WhatsApp number sends the messages from your website, POS or app.</div>
         </div>
         {n?.status === 'connected' && <span className="dev-live"><span className="dev-live-dot" /> Connected</span>}
       </div>
@@ -458,9 +459,9 @@ function ApiNumberCard({ data, reload }) {
         {!n ? (
           <div className="dev-number-empty">
             <ul className="dev-list">
-              <li>Its own number, so API messages don't go out from the number your team chats on.</li>
-              <li>Only for the API: its chats don't show in Conversations, and campaigns and warm-up never send from it.</li>
-              <li>Keys set to <strong>Automatic</strong> send from it. A key can still use a WhatsApp Gateway number instead.</li>
+              <li>Use a separate number, so these messages don't come from your team's chat number.</li>
+              <li>It is only for the API. Its chats don't show in Conversations, and campaigns and warm-up don't use it.</li>
+              <li>All your API keys send from this number, unless you pick a different number for a key.</li>
             </ul>
             <button className="btn primary" onClick={link} disabled={busy}><Icon.plus /> {busy ? 'Starting…' : 'Link the API number'}</button>
           </div>
@@ -469,7 +470,7 @@ function ApiNumberCard({ data, reload }) {
             <div className="dev-number-avatar"><Icon.phone /></div>
             <div style={{ flex: 1 }}>
               <div className="dev-number-phone">+{n.phone}</div>
-              <div className="cell-muted">{n.name || n.label} · sends the API's messages</div>
+              <div className="cell-muted">{n.name || n.label} · sends your API messages</div>
             </div>
             <button className="btn sm danger-text" onClick={() => setUnlinking(true)}>Unlink</button>
           </div>
@@ -477,11 +478,11 @@ function ApiNumberCard({ data, reload }) {
           <div className="qr-stage dev-qr">
             <div className="qr-box"><img src={n.qr} alt="QR code to link the API number" /></div>
             <div>
-              <h4 className="dev-h4" style={{ marginTop: 0 }}>Scan with the phone of the API number</h4>
+              <h4 className="dev-h4" style={{ marginTop: 0 }}>Scan this code with the phone you want to send from</h4>
               <ol className="dev-list">
                 <li>Open WhatsApp on that phone.</li>
                 <li>Tap <strong>Settings → Linked devices → Link a device</strong>.</li>
-                <li>Point the phone at this code. It refreshes by itself.</li>
+                <li>Point the phone at this code. The code changes by itself, that's normal.</li>
               </ol>
               <button className="btn sm" onClick={() => setUnlinking(true)} disabled={busy}>Cancel</button>
             </div>
@@ -491,7 +492,7 @@ function ApiNumberCard({ data, reload }) {
             <div className="dev-number-avatar off"><Icon.phone /></div>
             <div style={{ flex: 1 }}>
               <div className="dev-number-phone">+{n.phone}</div>
-              <div className="cell-muted">Not connected. Messages wait in the queue until it's back (up to 24 hours).</div>
+              <div className="cell-muted">Not connected. New messages wait and go out when it's back (up to 24 hours).</div>
             </div>
             <button className="btn sm primary" onClick={reconnect} disabled={busy}><Icon.refresh /> Reconnect</button>
             <button className="btn sm danger-text" onClick={() => setUnlinking(true)}>Unlink</button>
@@ -517,7 +518,7 @@ function ApiNumberCard({ data, reload }) {
         >
           <p className="dev-p" style={{ margin: 0 }}>
             {n?.phone
-              ? "Keys set to Automatic will send from the default Gateway number instead. Messages still waiting for this number are cancelled. The phone itself keeps all its chats."
+              ? "Your API messages will go out from your default WhatsApp Gateway number instead. Messages still waiting are cancelled. Nothing is deleted from the phone."
               : 'The QR code goes away. You can link a number again any time.'}
           </p>
         </Modal>
@@ -547,16 +548,16 @@ function SendingCard({ data, reload }) {
   const risky = pb > 10 && g < 30;
   const rules = data.sending_rules || {};
   const ruleText = [
-    rules.per_batch ? `at most ${rules.per_batch} at a time` : null,
-    rules.min_gap ? `at least ${rules.min_gap} seconds between batches` : null,
-    rules.max_queue ? `a queue of at most ${rules.max_queue}` : null,
+    rules.per_batch ? `at most ${rules.per_batch} together` : null,
+    rules.min_gap ? `at least ${rules.min_gap} seconds wait` : null,
+    rules.max_queue ? `at most ${rules.max_queue} waiting` : null,
   ].filter(Boolean);
   async function save(e) {
     e.preventDefault();
     setBusy(true);
     try {
       const r = await api.put('/developer/settings', { per_batch: pb, gap_seconds: g, max_queue: num(maxQ, lim.max_queue) });
-      toast(['Sending settings saved', ...(r.notes || [])].join(' — '), 'success');
+      toast(['Sending speed saved', ...(r.notes || [])].join(' — '), 'success');
       reload();
     } catch (err) {
       toast(err.message, 'error');
@@ -568,16 +569,16 @@ function SendingCard({ data, reload }) {
       <div className="card-head">
         <Icon.clock style={{ width: 18, color: 'var(--brand-700)' }} />
         <div style={{ flex: 1 }}>
-          <h3>Sending settings</h3>
-          <div className="sub">How fast API messages go out. These are separate from campaign and warm-up settings.</div>
+          <h3>Sending speed</h3>
+          <div className="sub">How fast messages go out from the API. Campaigns and warm-up have their own settings.</div>
         </div>
       </div>
       <form className="card-pad" onSubmit={save}>
         <div className="dev-send-grid">
           <div className="field">
-            <label htmlFor="dev-per-batch">Messages sent at a time</label>
+            <label htmlFor="dev-per-batch">How many to send together</label>
             <input id="dev-per-batch" className="input" type="number" min={lim.per_batch[0]} max={lim.per_batch[1]} value={perBatch} onChange={(e) => setPerBatch(e.target.value)} />
-            <div className="hint">{lim.per_batch[0]}–{lim.per_batch[1]} messages, a few seconds apart.</div>
+            <div className="hint">From {lim.per_batch[0]} to {lim.per_batch[1]}. They go out a few seconds apart.</div>
           </div>
           <div className="field">
             <label htmlFor="dev-gap">Then wait (seconds)</label>
@@ -589,21 +590,21 @@ function SendingCard({ data, reload }) {
             </div>
           </div>
           <div className="field">
-            <label htmlFor="dev-maxq">Most messages in the queue</label>
+            <label htmlFor="dev-maxq">How many can wait</label>
             <input id="dev-maxq" className="input" type="number" min={lim.max_queue[0]} max={lim.max_queue[1]} value={maxQ} onChange={(e) => setMaxQ(e.target.value)} />
-            <div className="hint">More than this and new requests get <code>429 queue_full</code>.</div>
+            <div className="hint">When this many are waiting, new messages are refused.</div>
           </div>
         </div>
         <div className="dev-send-summary">
           {g > 0 ? (
-            <>Sends <strong>{pb} message{pb === 1 ? '' : 's'}</strong>, then waits <strong>{secs(g)}</strong> — about <strong>{fmtNum(perHour)} an hour</strong>. </>
+            <>Sends <strong>{pb} message{pb === 1 ? '' : 's'}</strong>, waits <strong>{secs(g)}</strong>, then sends the next — about <strong>{fmtNum(perHour)} messages an hour</strong>. </>
           ) : (
-            <>Sends <strong>{pb} message{pb === 1 ? '' : 's'}</strong> at a time with no wait between batches. </>
+            <>Sends <strong>{pb} message{pb === 1 ? '' : 's'}</strong> together, with no wait in between. </>
           )}
-          Messages that arrive faster wait in the queue and go out in order; your software gets <code>"status": "queued"</code> (HTTP 202) for them.
+          If messages come in faster, they wait in line and go out in order.
         </div>
-        {ruleText.length > 0 && <div className="dev-rule-note"><Icon.shield /> Set by the platform admin: {ruleText.join(', ')}.</div>}
-        {risky && <div className="auth-error" style={{ marginTop: 10 }}>Sending this fast from a number linked by QR code can get it banned. For big volumes, keep it to 5 or fewer at a time with 30 seconds or more between.</div>}
+        {ruleText.length > 0 && <div className="dev-rule-note"><Icon.shield /> Limits set by the admin: {ruleText.join(', ')}.</div>}
+        {risky && <div className="auth-error" style={{ marginTop: 10 }}>Sending this fast can get the number banned by WhatsApp. To stay safe, send 5 or fewer together and wait 30 seconds or more.</div>}
         <div className="dev-form-foot">
           <button className="btn primary" disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save'}</button>
         </div>
@@ -651,7 +652,7 @@ function QueueCard({ data }) {
   async function cancel(id) {
     try {
       await api.del(id ? `/developer/queue/${id}` : '/developer/queue');
-      toast(id ? 'Message cancelled' : 'Queue cleared', 'success');
+      toast(id ? 'Message cancelled' : 'All waiting messages cancelled', 'success');
       setConfirmAll(false);
       load();
     } catch (e) {
@@ -664,20 +665,20 @@ function QueueCard({ data }) {
       <div className="card-head">
         <Icon.inbox style={{ width: 18, color: 'var(--brand-700)' }} />
         <div style={{ flex: 1 }}>
-          <h3>Queue</h3>
-          <div className="sub">{q ? (q.total ? `${fmtNum(q.total)} waiting to go out` : 'Nothing waiting') : 'Loading…'}</div>
+          <h3>Waiting to send</h3>
+          <div className="sub">{q ? (q.total ? `${fmtNum(q.total)} message${q.total === 1 ? '' : 's'} waiting` : 'No messages waiting') : 'Loading…'}</div>
         </div>
         {q?.total > 0 && <button className="btn sm danger-text" onClick={() => setConfirmAll(true)}>Cancel all</button>}
       </div>
       {!q ? (
         <Loading />
       ) : q.total === 0 ? (
-        <Empty icon="inbox" title="The queue is empty">Messages wait here when they arrive faster than your sending settings allow, or while the number is offline.</Empty>
+        <Empty icon="inbox" title="Nothing is waiting">Messages show here when they come in faster than your sending speed, or while the number is not connected.</Empty>
       ) : (
         <div className="table-wrap">
           <table className="dev-table">
             <thead>
-              <tr><th>To</th><th>Message</th><th>From</th><th>Queued</th><th>Goes out</th><th aria-label="Actions" /></tr>
+              <tr><th>To</th><th>Message</th><th>From</th><th>Added</th><th>Goes out</th><th aria-label="Actions" /></tr>
             </thead>
             <tbody>
               {q.items.map((m) => (
@@ -709,7 +710,7 @@ function QueueCard({ data }) {
             </>
           }
         >
-          <p className="dev-p" style={{ margin: 0 }}>They won't be sent. Your software sees them as <code>failed</code> with the code <code>cancelled</code>.</p>
+          <p className="dev-p" style={{ margin: 0 }}>They won't be sent. Your software will see them as failed (<code>cancelled</code>).</p>
         </Modal>
       )}
     </div>
@@ -722,8 +723,8 @@ function NumberTab({ data, reload }) {
       {!data.enabled && (
         <div className="auth-error">
           {data.off_by === 'workspace'
-            ? 'The platform admin switched the Developer API off for this workspace. API requests are refused and the queue waits.'
-            : 'The Developer API is switched off by the platform admin. API requests are refused.'}
+            ? 'The admin has turned off the API for this workspace. New messages from your software are refused, and waiting messages are on hold.'
+            : 'The admin has turned off the API. Messages from your software are refused.'}
         </div>
       )}
       <ApiNumberCard data={data} reload={reload} />
@@ -762,29 +763,29 @@ function KeysTab({ data, reload, setTab }) {
   const steps = [
     {
       done: !!data.api_number?.connected || (!data.api_number && live),
-      title: 'Link the API number',
+      title: 'Link a WhatsApp number',
       text: data.api_number?.connected
-        ? `+${data.api_number.phone} is connected and sends your API messages.`
+        ? `+${data.api_number.phone} is connected. Your messages go out from this number.`
         : data.api_number
-          ? 'Linked, but not connected right now.'
+          ? 'Linked, but not connected right now. Open Number & sending to reconnect it.'
           : live
-            ? 'Sending from your default Gateway number for now. Link a separate number just for the API.'
-            : 'Scan a QR code with the WhatsApp you want receipts to come from.',
+            ? 'For now, messages go out from your default WhatsApp Gateway number. You can link a separate number just for the API.'
+            : 'Scan a QR code with the WhatsApp number you want to send from.',
       action: !data.api_number?.connected ? <button className="btn sm" onClick={() => setTab('number')}>Open Number &amp; sending</button> : null,
     },
-    { done: data.keys.length > 0, title: 'Create an API key', text: 'One for each POS or app, so you can delete one without touching the others.', action: data.enabled ? <button className="btn sm primary" onClick={() => setModal('new')}><Icon.plus /> Create key</button> : null },
-    { done: false, title: 'Add it to your POS button', text: 'When the cashier taps "Send on WhatsApp", the receipt goes to the customer.', action: <button className="btn sm" onClick={() => setTab('pos')}>Read the guide</button> },
+    { done: data.keys.length > 0, title: 'Create an API key', text: 'A key is like a password for your software. Make one for each website, POS or app.', action: data.enabled ? <button className="btn sm primary" onClick={() => setModal('new')}><Icon.plus /> Create key</button> : null },
+    { done: false, title: 'Add the key to your software', text: 'Give your developer the key and the API address below. The guide shows how.', action: <button className="btn sm" onClick={() => setTab('pos')}>Read the guide</button> },
   ];
   return (
     <>
       {!data.enabled && (
-        <div className="auth-error">The Developer API is switched off by the super admin. Keys can't be created and API requests are refused.</div>
+        <div className="auth-error">The admin has turned off the API. You can't create keys, and messages from your software are refused.</div>
       )}
 
       <div className="card dev-hero">
         <div className="card-pad">
           <h3 className="dev-h3">Send WhatsApp messages from your own software</h3>
-          <p className="dev-p">Connect your POS, website or app to this workspace. A receipt, an order update or a reminder goes out from your WhatsApp number{data.numbers.length ? '' : ' once one is linked'}, scanned by QR or connected through the official API.</p>
+          <p className="dev-p">Your website, POS or app can send WhatsApp messages, like an OTP code, a receipt or an order update. Follow these 3 steps.</p>
           <ol className="dev-steps">
             {steps.map((s, i) => (
               <li key={s.title} className={s.done ? 'done' : ''}>
@@ -797,18 +798,18 @@ function KeysTab({ data, reload, setTab }) {
               </li>
             ))}
           </ol>
-          <CopyLine label="API address (base URL)" value={apiBase()} />
+          <CopyLine label="API address (base URL) for your developer" value={apiBase()} />
         </div>
       </div>
 
       <div className="card">
         <div className="card-head">
           <Icon.key style={{ width: 18, color: 'var(--brand-700)' }} />
-          <div style={{ flex: 1 }}><h3>API keys</h3><div className="sub">{data.keys.length} of {data.limits.maxKeys} · {fmtNum(data.today)} sent through the API today</div></div>
+          <div style={{ flex: 1 }}><h3>API keys</h3><div className="sub">{data.keys.length} of {data.limits.maxKeys} keys · {fmtNum(data.today)} message{data.today === 1 ? '' : 's'} sent today</div></div>
           {data.enabled && <button className="btn primary sm" onClick={() => setModal('new')}><Icon.plus /> Create key</button>}
         </div>
         {data.keys.length === 0 ? (
-          <Empty icon="key" title="No API keys yet">Create one for your POS. You'll copy it once and paste it into the POS settings.</Empty>
+          <Empty icon="key" title="No API keys yet">Create a key for your website, POS or app. You'll see it only once, so copy it and keep it safe.</Empty>
         ) : (
           <div className="table-wrap">
             <table className="dev-table">
@@ -838,10 +839,10 @@ function KeysTab({ data, reload, setTab }) {
       </div>
 
       <div className="dev-facts">
-        <div><span>Requests</span><strong>{data.limits.perMinute} a minute per key</strong></div>
-        <div><span>Files</span><strong>PDF & documents up to 16 MB, images up to 5 MB</strong></div>
-        <div><span>QR-linked numbers</span><strong>{data.limits.qrPerDay ? `Up to ${fmtNum(data.limits.qrPerDay)} API messages a day each` : 'No daily API cap'}</strong></div>
-        <div><span>Official API numbers</span><strong>Meta's own limits; templates after 24 hours</strong></div>
+        <div><span>Speed limit</span><strong>{data.limits.perMinute} requests a minute for each key</strong></div>
+        <div><span>Files</span><strong>Documents up to 16 MB, images up to 5 MB</strong></div>
+        <div><span>Daily limit</span><strong>{data.limits.qrPerDay ? `${fmtNum(data.limits.qrPerDay)} messages a day for each QR number` : 'No daily limit'}</strong></div>
+        <div><span>Official Meta numbers</span><strong>Meta's own limits. After 24 hours, only approved templates</strong></div>
       </div>
 
       <TestCard data={data} />
@@ -871,7 +872,7 @@ function KeysTab({ data, reload, setTab }) {
             </>
           }
         >
-          <p className="dev-p">Software using this key (<code className="dev-keyid">{deleting.prefix}…{deleting.last4}</code>) stops sending straight away. This can't be undone, but you can create a new key at any time.</p>
+          <p className="dev-p">Any software using this key (<code className="dev-keyid">{deleting.prefix}…{deleting.last4}</code>) stops sending right away. You can't undo this, but you can create a new key any time.</p>
         </Modal>
       )}
     </>
@@ -1203,7 +1204,7 @@ export default function Developer() {
       {tab === 'number' && <NumberTab data={data} reload={load} />}
       {tab === 'keys' && <KeysTab data={data} reload={load} setTab={setTab} />}
       <div className="dev-docs-link">
-        <Icon.book /> The POS receipt guide, the API reference and the request log are on{' '}
+        <Icon.book /> Need help connecting? The setup guide, the API reference and the request log are in{' '}
         <button className="link-btn" onClick={() => openOn('devdocs', 'pos')}>Developer Docs</button>.
       </div>
     </div>

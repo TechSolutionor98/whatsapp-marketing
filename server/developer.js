@@ -598,15 +598,15 @@ export async function saveSendingSettings(body = {}, by = '') {
   // Say what the super admin's rules changed (plain range clamps need no note).
   const L = getLimits();
   const notes = [];
-  if (L.apiMaxPerBatch && want.per_batch > next.per_batch && next.per_batch === B.per_batch[1]) notes.push(`at most ${B.per_batch[1]} at a time`);
-  if (L.apiMinGapSec && want.gap_seconds < next.gap_seconds && next.gap_seconds === B.gap_seconds[0]) notes.push(`at least ${B.gap_seconds[0]} seconds between batches`);
-  if (L.apiMaxQueue && want.max_queue > next.max_queue && next.max_queue === B.max_queue[1]) notes.push(`a queue of at most ${B.max_queue[1]}`);
+  if (L.apiMaxPerBatch && want.per_batch > next.per_batch && next.per_batch === B.per_batch[1]) notes.push(`at most ${B.per_batch[1]} together`);
+  if (L.apiMinGapSec && want.gap_seconds < next.gap_seconds && next.gap_seconds === B.gap_seconds[0]) notes.push(`at least ${B.gap_seconds[0]} seconds wait`);
+  if (L.apiMaxQueue && want.max_queue > next.max_queue && next.max_queue === B.max_queue[1]) notes.push(`at most ${B.max_queue[1]} waiting`);
   await setSetting('apiSending', next);
   audit('system', `API sending set to ${next.per_batch} message${next.per_batch === 1 ? '' : 's'} every ${next.gap_seconds}s (queue up to ${next.max_queue})${by ? ` by ${by}` : ''}`);
   // A shorter gap applies to what's waiting now.
   rekickLanes(currentWs() || DEFAULT_WS);
   const out = sendingSettings();
-  return notes.length ? { ...out, notes: [`Set by the super admin: ${notes.join(', ')}.`] } : out;
+  return notes.length ? { ...out, notes: [`Limits set by the super admin: ${notes.join(', ')}.`] } : out;
 }
 // Settings (or the switch) changed: a shorter gap applies to what's waiting now.
 export function rekickLanes(wsId) {

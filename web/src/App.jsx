@@ -62,7 +62,7 @@ const TITLES = {
   warmup: ['Number Warmup', 'Build organic activity before cold outreach'],
   conversations: ['Conversations', 'Replies and human handoffs'],
   gateway: ['WhatsApp Gateway', 'Link, unlink and choose your default number'],
-  developer: ['Developer', 'Your API number, how fast it sends, and the API keys for your software'],
+  developer: ['Developer', 'Let your website, POS or app send WhatsApp messages'],
   devdocs: ['Developer Docs', 'The POS receipt guide, the API reference and every API request'],
   audit: ['Audit Logs', 'Every action, send and reply'],
   settings: ['Settings', 'Pacing, limits and safety controls'],

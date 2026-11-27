@@ -42,7 +42,7 @@ developer.get('/', async (_req, res) => {
 
 developer.post('/keys', async (req, res) => {
   try {
-    if (!apiAllowed()) throw new ApiError(403, 'api_disabled', 'The Developer API is switched off by the super admin.');
+    if (!apiAllowed()) throw new ApiError(403, 'api_disabled', 'The admin has turned off the API.');
     res.json(await createKey(req.body || {}, by(req)));
   } catch (e) {
     sendError(res, e);
@@ -77,7 +77,7 @@ developer.get('/logs', async (req, res) => {
 // "Send a test message": the same path an API request takes, without needing the key.
 developer.post('/test', async (req, res) => {
   try {
-    if (!apiAllowed()) throw new ApiError(403, 'api_disabled', 'The Developer API is switched off by the super admin.');
+    if (!apiAllowed()) throw new ApiError(403, 'api_disabled', 'The admin has turned off the API.');
     const b = req.body || {};
     const key = { _id: 'test', name: 'Developer page test', sender_phone: b.sender && b.sender !== 'default' ? String(b.sender) : null };
     res.json(await sendViaApi(key, { to: b.to, text: b.text, name: b.name }));
