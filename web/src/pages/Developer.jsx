@@ -839,10 +839,10 @@ function KeysTab({ data, reload, setTab }) {
       </div>
 
       <div className="dev-facts">
-        <div><span>Speed limit</span><strong>{data.limits.perMinute} requests a minute for each key</strong></div>
-        <div><span>Files</span><strong>Documents up to 16 MB, images up to 5 MB</strong></div>
-        <div><span>Daily limit</span><strong>{data.limits.qrPerDay ? `${fmtNum(data.limits.qrPerDay)} messages a day for each QR number` : 'No daily limit'}</strong></div>
-        <div><span>Official Meta numbers</span><strong>Meta's own limits. After 24 hours, only approved templates</strong></div>
+        <div><span>Per minute</span><strong>{data.limits.perMinute} messages per key</strong></div>
+        <div><span>File size</span><strong>PDF 16 MB · Photo 5 MB</strong></div>
+        <div><span>Per day</span><strong>{data.limits.qrPerDay ? `${fmtNum(data.limits.qrPerDay)} messages per number` : 'No limit'}</strong></div>
+        <div><span>Meta numbers</span><strong>Meta's rules apply</strong></div>
       </div>
 
       <TestCard data={data} />
