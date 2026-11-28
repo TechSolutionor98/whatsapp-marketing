@@ -75,7 +75,7 @@ function log(req, http, extra = {}) {
 publicApi.get('/me', async (req, res) => {
   try {
     const w = workspaceOf(req.apiKey.ws);
-    const n = await resolveSender(req.apiKey.sender_phone || null, { soft: true });
+    const n = await resolveSender(null, { soft: true }); // the API number (null: none linked yet)
     const L = getLimits();
     res.json({
       workspace: w?.name || '',

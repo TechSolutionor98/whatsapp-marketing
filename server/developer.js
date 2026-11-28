@@ -18,9 +18,8 @@ import { db, col, audit, oid, nowIso, dayKey, getSetting, setSetting } from './d
 import { emit } from './events.js';
 import { currentWs, runInWs, DEFAULT_WS } from './tenant.js';
 import { getLimits, apiSendingBounds } from './limits.js';
-import { listNumbers, accountGroup, hasMain } from './numbers.js';
-import { isConnected as mainConnected, checkOnWhatsApp, sendContent } from './whatsapp/client.js';
-import { isAccountConnected, checkOnWhatsAppVia, sendContentFromTo, accountKind, cloudAccountOf, poolState } from './whatsapp/pool.js';
+import { checkOnWhatsApp, sendContent } from './whatsapp/client.js';
+import { checkOnWhatsAppVia, sendContentFromTo, cloudAccountOf, poolState } from './whatsapp/pool.js';
 import { sendCloudText, sendCloudMedia, uploadCloudMedia, sendCloudTemplate, listCloudTemplates } from './whatsapp/cloud-api.js';
 import { replyWindowOpen, templateShape } from './whatsapp/cloud.js';
 import { normalizePhone, randInt, sleep } from './utils.js';
@@ -53,7 +52,6 @@ export function keyPublic(d) {
     name: d.name,
     prefix: d.prefix,
     last4: d.last4,
-    sender: d.sender_phone || null, // null = the workspace's default number
     created_at: d.created_at,
     created_by: d.created_by || '',
     last_used_at: d.last_used_at || null,
@@ -61,15 +59,8 @@ export function keyPublic(d) {
   };
 }
 
-// 'default' / empty → null (the default number); otherwise a number linked in this workspace.
-async function cleanSender(v) {
-  if (v === null || v === undefined || v === '' || v === 'default') return null;
-  const phone = normalizePhone(v);
-  const nums = await listNumbers();
-  const api = await apiNumber();
-  if (!phone || !(nums.some((n) => n.phone === phone) || api?.phone === phone)) fail(400, 'invalid_sender', "That number isn't linked in this workspace");
-  return phone;
-}
+// Every API message goes out from the API number: no key is created before one is linked.
+const NO_API_NUMBER = 'Link the API number first: open Developer → Number & sending and scan the QR code with the phone you want to send from.';
 
 export async function listKeys() {
   const list = await db.apiKeys().find({ revoked_at: null }).sort({ created_at: -1 }).toArray();
@@ -82,14 +73,13 @@ export async function createKey(body = {}, by = '') {
   if ((await db.apiKeys().countDocuments({ revoked_at: null })) >= MAX_KEYS) {
     fail(400, 'too_many_keys', `A workspace can have up to ${MAX_KEYS} keys. Delete one you no longer use first.`);
   }
-  const senderPhone = await cleanSender(body.sender);
+  if (!(await apiNumber())?.phone) fail(400, 'no_api_number', NO_API_NUMBER);
   const key = KEY_PREFIX + crypto.randomBytes(24).toString('base64url');
   const doc = {
     name,
     prefix: key.slice(0, KEY_PREFIX.length + 4),
     last4: key.slice(-4),
     hash: hashKey(key),
-    sender_phone: senderPhone,
     created_at: nowIso(),
     created_by: by,
     last_used_at: null,
@@ -110,7 +100,6 @@ export async function updateKey(id, body = {}) {
     set.name = String(body.name || '').trim().slice(0, 60);
     if (!set.name) fail(400, 'invalid_name', 'Give the key a name');
   }
-  if ('sender' in body) set.sender_phone = await cleanSender(body.sender);
   await db.apiKeys().updateOne({ _id }, { $set: set });
   return keyPublic({ ...cur, ...set });
 }
@@ -183,8 +172,6 @@ export async function listLogs(limit = 50) {
 
 // ---- Who sends: the number ----
 
-// The number a message goes out from: `from` (a number of this workspace), else the key's own
-// number, else the workspace's default number. Then the session of it that's connected now.
 // ---- The API number: a WhatsApp number linked on the Developer page, only for the API ----
 // (role 'api': no Conversations tab, never a campaign or warm-up sender). One per workspace.
 export async function apiNumber() {
@@ -202,50 +189,20 @@ export async function apiNumber() {
   };
 }
 
-export async function resolveSender(fromPhone, { keyNumber = false, soft = false } = {}) {
-  // The API number: when a key (or `from`) names it, or — nothing named — whenever one is linked.
+// The number every API message goes out from: the API number (Developer → Number & sending).
+// With `phone` (a queue lane's number): null when that isn't the API number any more.
+export async function resolveSender(phone = null, { soft = false } = {}) {
   const api = await apiNumber();
-  if (api?.phone && (!fromPhone || fromPhone === api.phone)) {
-    const id = api.connected ? api.id : null;
-    if (soft) return { id, phone: api.phone, kind: 'qr', label: api.label, connected: !!id, default: !fromPhone, api: true };
-    if (!id) {
-      fail(503, 'number_not_connected', `The API number +${api.phone} isn't connected right now. Open the Developer page and reconnect it (the phone has to stay online).`);
-    }
-    return { id, phone: api.phone, kind: 'qr', label: api.label, api: true };
-  }
-  const nums = await listNumbers();
-  let n;
-  if (fromPhone) {
-    n = nums.find((x) => x.phone === fromPhone);
-    if (!n) {
-      if (soft) return null;
-      fail(
-        400,
-        'invalid_sender',
-        keyNumber
-          ? `This key sends from +${fromPhone}, which is no longer linked. Edit the key on the Developer page, or link the number again.`
-          : `+${fromPhone} isn't one of this workspace's WhatsApp numbers.`
-      );
-    }
-  } else n = nums.find((x) => x.default) || nums[0];
-  if (!n) {
+  if (!api?.phone || (phone && phone !== api.phone)) {
     if (soft) return null;
-    fail(503, 'no_number', 'No WhatsApp number is linked yet. Open WhatsApp Gateway and link one (scan a QR code or connect the official API).');
+    fail(503, 'no_api_number', NO_API_NUMBER);
   }
-  const { ids } = accountGroup(n.id);
-  let id = null;
-  if (hasMain() && ids.includes('main') && mainConnected()) id = 'main';
-  else id = ids.find((x) => x !== 'main' && isAccountConnected(x)) || null;
-  const kind = n.kind === 'cloud' || (id && id !== 'main' && accountKind(id) === 'cloud') ? 'cloud' : 'qr';
-  if (soft) return { id, phone: n.phone, kind, label: n.label || '', connected: !!id, default: !!n.default };
+  const id = api.connected ? api.id : null;
+  if (soft) return { id, phone: api.phone, kind: 'qr', label: api.label, connected: !!id, default: true, api: true };
   if (!id) {
-    fail(
-      503,
-      'number_not_connected',
-      `The WhatsApp number +${n.phone} isn't connected right now. Open WhatsApp Gateway and reconnect it${kind === 'qr' ? ' (the phone has to stay online)' : ''}.`
-    );
+    fail(503, 'number_not_connected', `The API number +${api.phone} isn't connected right now. Open the Developer page and reconnect it (the phone has to stay online).`);
   }
-  return { id, phone: n.phone, kind, label: n.label || '' };
+  return { id, phone: api.phone, kind: 'qr', label: api.label, api: true };
 }
 
 // ---- Who receives ----
@@ -853,8 +810,7 @@ async function send(key, body, to, reference) {
   const caption = String(body.caption ?? (hasDoc || hasImg ? text : '')).trim();
   if ((hasDoc || hasImg) && caption.length > 1024) fail(400, 'caption_too_long', "A file's caption can be up to 1,024 characters. Send longer text as its own message.");
 
-  const askedFrom = body.from != null && body.from !== '' ? normalizePhone(body.from) : null;
-  const sender = await resolveSender(askedFrom || key.sender_phone || null, { keyNumber: !askedFrom && !!key.sender_phone });
+  const sender = await resolveSender(); // always the API number ("from" and old per-key numbers are ignored)
   if (tplSpec && sender.kind !== 'cloud') {
     fail(400, 'template_not_supported', `Templates are for official WhatsApp API numbers. +${sender.phone} is linked by QR code, so send "text", "document" or "image" instead.`);
   }

@@ -79,7 +79,7 @@ developer.post('/test', async (req, res) => {
   try {
     if (!apiAllowed()) throw new ApiError(403, 'api_disabled', 'The admin has turned off the API.');
     const b = req.body || {};
-    const key = { _id: 'test', name: 'Developer page test', sender_phone: b.sender && b.sender !== 'default' ? String(b.sender) : null };
+    const key = { _id: 'test', name: 'Developer page test' }; // from the API number, like every API message
     res.json(await sendViaApi(key, { to: b.to, text: b.text, name: b.name }));
   } catch (e) {
     sendError(res, e);
