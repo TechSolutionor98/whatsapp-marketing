@@ -7,7 +7,7 @@
 // The public side (no sign-in) is server/routes/agent-public.js; the AI Agents page talks to
 // server/routes/agents.js.
 import crypto from 'node:crypto';
-import { db, nowIso, dayKey, getSetting, workspaceOf } from './db/mongo.js';
+import { db, nowIso, dayKey, getSetting } from './db/mongo.js';
 import { aiAvailable, websiteReply } from './ai.js';
 import { productContext } from './catalog.js';
 import { listNumbers } from './numbers.js';
@@ -56,13 +56,19 @@ export function cleanDomain(v) {
   return /^[a-z0-9.-]+$/.test(s) && (s.includes('.') || s === 'localhost') ? s : '';
 }
 
+// The line under the agent's name in the chat. The first default said "AI assistant"; the chat
+// doesn't call itself that (see websiteReply), so agents still on that default show the new one.
+export const DEFAULT_SUBTITLE = 'Replies instantly';
+const OLD_SUBTITLE = 'AI assistant · replies instantly';
+export const subtitleOf = (a) => (!a?.subtitle || a.subtitle === OLD_SUBTITLE ? DEFAULT_SUBTITLE : a.subtitle);
+
 // What the AI Agents page sent → a clean agent (only known fields, within limits).
 export function cleanAgent(b = {}, cur = {}) {
   const has = (k) => Object.prototype.hasOwnProperty.call(b, k);
   const out = {};
   if (has('name') || !cur.name) out.name = str(b.name, 60) || 'Shop assistant';
   if (has('greeting') || cur.greeting == null) out.greeting = str(b.greeting, 400) || 'Hi! 👋 How can I help you today?';
-  if (has('subtitle') || cur.subtitle == null) out.subtitle = str(b.subtitle, 60) || 'AI assistant · replies instantly';
+  if (has('subtitle') || cur.subtitle == null) out.subtitle = subtitleOf({ subtitle: str(b.subtitle, 60) });
   if (has('color') || !cur.color) out.color = /^#[0-9a-f]{6}$/i.test(String(b.color || '')) ? String(b.color).toLowerCase() : COLORS[0];
   if (has('position') || !cur.position) out.position = b.position === 'left' ? 'left' : 'right';
   if (has('enabled') || cur.enabled == null) out.enabled = b.enabled === undefined ? true : !!b.enabled;
@@ -193,8 +199,8 @@ export async function answer(agent, history) {
     catalogOverview(scope).catch(() => ''),
     handoffPhone(agent),
   ]);
-  const business = workspaceOf(currentWs())?.name || '';
-  const r = await websiteReply(history, { name: agent.name, business, info: agent.info, tone: agent.tone, products, overview, whatsapp: phone });
+  // no business name: the workspace's name isn't always the website's brand (see websiteReply)
+  const r = await websiteReply(history, { name: agent.name, info: agent.info, tone: agent.tone, products, overview, whatsapp: phone });
   return { ...r, whatsapp: r.handoff ? waLink(phone) : null };
 }
 
@@ -304,7 +310,7 @@ export async function publicConfig(agent) {
   return {
     id: agent.pub_id,
     name: agent.name,
-    subtitle: agent.subtitle,
+    subtitle: subtitleOf(agent),
     greeting: agent.greeting,
     color: agent.color,
     position: agent.position,
@@ -320,7 +326,7 @@ export function agentPublic(a, stats = {}) {
     id: String(a._id),
     pub_id: a.pub_id,
     name: a.name,
-    subtitle: a.subtitle,
+    subtitle: subtitleOf(a),
     greeting: a.greeting,
     color: a.color,
     position: a.position,

@@ -115,7 +115,7 @@ function useLocalTab() {
 function blankForm(data) {
   return {
     name: 'Shop assistant',
-    subtitle: 'AI assistant · replies instantly',
+    subtitle: 'Replies instantly',
     greeting: 'Hi! 👋 How can I help you today?',
     color: COLORS[0],
     position: 'right',
@@ -186,7 +186,7 @@ function DemoChat() {
     <div className="agp ag-demo" style={{ '--agc': COLORS[0], '--agi': '#fff' }} aria-hidden="true">
       <div className="agp-head">
         <span className="agp-av">SA</span>
-        <div className="agp-who"><strong>Shop assistant</strong><span><i /> AI assistant · replies instantly</span></div>
+        <div className="agp-who"><strong>Shop assistant</strong><span><i /> Replies instantly</span></div>
       </div>
       <div className="agp-body">
         <div className="agp-msg a">Hi! 👋 How can I help you today?</div>
@@ -333,7 +333,7 @@ function ChatPreview({ f, saved }) {
           <span className="agp-av" aria-hidden="true">{initials(f.name)}</span>
           <div className="agp-who">
             <strong>{f.name || 'Assistant'}</strong>
-            <span><i /> {f.subtitle || 'AI assistant'}</span>
+            <span><i /> {f.subtitle || 'Replies instantly'}</span>
           </div>
           <button type="button" className="agp-hb" title="Start a new chat" aria-label="Start a new test chat" onClick={() => !busy && setMsgs([])}><Icon.refresh /></button>
         </div>
@@ -364,7 +364,7 @@ function ChatPreview({ f, saved }) {
           <input className="agp-input" placeholder="Ask like a visitor would…" value={text} maxLength={1000} onChange={(e) => setText(e.target.value)} aria-label="Test message" />
           <button className="agp-send" disabled={busy || !text.trim()} aria-label="Send"><Icon.send /></button>
         </form>
-        <div className="agp-note">AI assistant · it can make mistakes</div>
+        <div className="agp-note">Virtual assistant · it can make mistakes</div>
       </div>
       <div className={`ag-launch-row ${f.position === 'left' ? 'left' : ''}`}>
         <span className="ag-launch" style={{ background: f.color, color: ink }} aria-hidden="true"><Icon.chat /></span>
@@ -461,7 +461,7 @@ function AgentEditor({ data, id, onClose, onSaved, onDeleted, onInstall, dirtyRe
                 </div>
                 <div className="field">
                   <label htmlFor="ag-sub">Line under the name</label>
-                  <input id="ag-sub" className="input" maxLength={60} value={f.subtitle} onChange={(e) => set('subtitle', e.target.value)} placeholder="AI assistant · replies instantly" />
+                  <input id="ag-sub" className="input" maxLength={60} value={f.subtitle} onChange={(e) => set('subtitle', e.target.value)} placeholder="Replies instantly" />
                 </div>
               </div>
               <div className="field">

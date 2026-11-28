@@ -153,13 +153,13 @@
       '<div class="teaser" hidden role="button" tabindex="0"><span class="tt"></span><button type="button" aria-label="Dismiss">' + ICON.x + '</button></div>' +
       '<div class="panel" hidden role="dialog" aria-label="' + esc(cfg.name) + ' chat">' +
       '<div class="head"><div class="av" aria-hidden="true">' + esc(initials(cfg.name)) + '</div>' +
-      '<div class="who"><div class="name">' + esc(cfg.name) + '</div><div class="sub"><i></i><span>' + esc(cfg.subtitle || 'AI assistant') + '</span></div></div>' +
+      '<div class="who"><div class="name">' + esc(cfg.name) + '</div><div class="sub"><i></i><span>' + esc(cfg.subtitle || 'Replies instantly') + '</span></div></div>' +
       '<button type="button" class="hb reset" aria-label="Start a new chat" title="Start a new chat">' + ICON.reset + '</button>' +
       '<button type="button" class="hb close" aria-label="Close chat" title="Close">' + ICON.x + '</button></div>' +
       '<div class="body" aria-live="polite"></div>' +
       '<form class="foot"><div class="row"><textarea rows="1" maxlength="' + maxLen + '" placeholder="Type your message…" aria-label="Your message"></textarea>' +
       '<button type="submit" class="send" aria-label="Send">' + ICON.send + '</button></div>' +
-      '<div class="note">AI assistant · it can make mistakes</div></form>' +
+      '<div class="note">Virtual assistant · it can make mistakes</div></form>' +
       '</div>' +
       '<button type="button" class="launch" aria-label="Open chat" aria-expanded="false"' + (showLauncher ? '' : ' hidden') + '>' + ICON.chat + '</button>';
     document.body.appendChild(host);
