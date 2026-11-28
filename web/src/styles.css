@@ -4223,3 +4223,12 @@ tbody tr:hover {
 
 .dev-docs-link { display: flex; align-items: center; gap: 8px; margin: 4px 2px 18px; font-size: 13px; color: var(--text-soft); }
 .dev-docs-link svg { width: 15px; height: 15px; color: var(--brand-700); }
+
+/* ---- Developer → Conversations (super admin only): the API number's chats ---- */
+.dev-chats { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
+.dev-chats-note { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-soft); }
+.dev-chats-note svg { width: 15px; height: 15px; color: var(--brand-700); flex: none; }
+.dev-chats .chat-layout { height: calc(100vh - 250px); min-height: 460px; grid-template-rows: minmax(0, 1fr); }
+@media (max-width: 760px) {
+  .dev-chats .chat-layout { height: calc(100vh - 210px); min-height: 420px; }
+}

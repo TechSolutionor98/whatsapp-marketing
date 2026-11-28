@@ -409,8 +409,15 @@ function dayDivider(iso) {
   });
 }
 
-export default function Conversations({ go }) {
+// apiNumber: the Developer page's super-admin-only view of the API number's chats — no number
+// tabs, no AI, no groups, no history from the phone (the API number doesn't sync any).
+export default function Conversations({ go, apiNumber = null }) {
   const { toast, onBus, wa, can } = useApp();
+  const apiMode = !!apiNumber;
+  const fixedRef = useRef(null);
+  fixedRef.current = apiNumber
+    ? { id: apiNumber.id, label: 'API number', phone: apiNumber.phone, name: apiNumber.name || '', connected: !!apiNumber.connected, kind: 'qr', role: 'api', default: true }
+    : null;
   const [threads, setThreads] = useState([]);
   const [threadsLoaded, setThreadsLoaded] = useState(false);
   const [counts, setCounts] = useState(null); // chip numbers: { all, unread, groups, handoff }
@@ -442,6 +449,13 @@ export default function Conversations({ go }) {
   // Numbers are linked/unlinked on the WhatsApp Gateway page; here they're only tabs. Opens on
   // the default number; if the open tab's number was unlinked, goes back to the default.
   const loadAccounts = async () => {
+    if (fixedRef.current) {
+      const one = fixedRef.current;
+      accountsRef.current = [one];
+      setAccounts([one]);
+      setAccount(one.id);
+      return;
+    }
     let list = [];
     try {
       list = await api.get('/conversations/accounts');
@@ -491,6 +505,10 @@ export default function Conversations({ go }) {
     const t = setInterval(loadAccounts, 8000);
     return () => clearInterval(t);
   }, []);
+  // API number view: its connected state comes from the Developer page.
+  useEffect(() => {
+    if (apiMode) loadAccounts();
+  }, [apiNumber?.id, apiNumber?.connected, apiNumber?.phone]);
 
   async function toggleAutoReply() {
     if (!account) return;
@@ -659,7 +677,7 @@ export default function Conversations({ go }) {
   useEffect(() => {
     const acct = accounts.find((a) => a.id === account);
     const connected = account === 'main' ? wa.status === 'connected' : !!acct?.connected;
-    if (!connected || threads.length > 0) {
+    if (apiMode || !connected || threads.length > 0) {
       setSyncingChats(false);
       return;
     }
@@ -814,7 +832,7 @@ export default function Conversations({ go }) {
         />
       )}
 
-      <div className="wa-tabs">
+      {!apiMode && <div className="wa-tabs">
         {[...accounts].sort((a, b) => (b.default ? 1 : 0) - (a.default ? 1 : 0)).map((a) => (
           <button
             key={a.id}
@@ -853,14 +871,14 @@ export default function Conversations({ go }) {
         >
           <Icon.gateway /> Manage numbers
         </button>}
-      </div>
+      </div>}
 
-      <div className={`chat-layout wa-web${thread ? ' has-thread' : ''}`}>
+      <div className={`chat-layout wa-web${thread ? ' has-thread' : ''}${apiMode ? ' wa-api' : ''}`}>
         <div className="thread-list">
           <div className="wa-list-head">
             <h2 className="wa-list-title">Chats</h2>
             <div className="wa-list-actions">
-              {aiAvail && (
+              {aiAvail && !apiMode && (
                 <button
                   className={`wa-ai-toggle ${autoReply ? 'on' : ''}`}
                   onClick={toggleAutoReply}
@@ -871,7 +889,7 @@ export default function Conversations({ go }) {
                   <Icon.sparkles /> AI {autoReply ? 'on' : 'off'}
                 </button>
               )}
-              {aiAvail && (
+              {aiAvail && !apiMode && (
                 <button className="wa-icon-btn" onClick={() => setShowAiSettings(true)} disabled={!account} title="AI auto-reply settings" aria-label="AI auto-reply settings">
                   <Icon.settings />
                 </button>
@@ -889,7 +907,7 @@ export default function Conversations({ go }) {
             )}
           </div>
           <div className="wa-chips" role="tablist" aria-label="Filter chats">
-            {[['', 'All'], ['unread', 'Unread'], ['groups', 'Groups'], ['handoff', 'Needs human']].map(([v, label]) => {
+            {(apiMode ? [['', 'All'], ['unread', 'Unread']] : [['', 'All'], ['unread', 'Unread'], ['groups', 'Groups'], ['handoff', 'Needs human']]).map(([v, label]) => {
               const n = v && counts ? counts[v] : 0;
               return (
                 <button key={v || 'all'} role="tab" aria-selected={filter === v} className={`wa-chip ${filter === v ? 'active' : ''}`} onClick={() => setFilter(v)}>
@@ -924,8 +942,12 @@ export default function Conversations({ go }) {
               <Loading label="Syncing your chats…" minHeight={200} />
             ) : (
               <div style={{ padding: 30 }}>
-                <Empty icon="chat" title={filter ? 'No chats here' : 'No conversations'}>
-                  {filter ? 'No chat matches this filter.' : 'Replies and your WhatsApp chats appear here.'}
+                <Empty icon="chat" title={filter ? 'No chats here' : apiMode ? 'No chats yet' : 'No conversations'}>
+                  {filter
+                    ? 'No chat matches this filter.'
+                    : apiMode
+                      ? 'When your software sends a message, or a customer writes to the API number, the chat shows here.'
+                      : 'Replies and your WhatsApp chats appear here.'}
                 </Empty>
               </div>
             )
@@ -993,16 +1015,22 @@ export default function Conversations({ go }) {
             <div className="wa-empty">
               <div className="wa-empty-card">
                 <ChatsArt />
-                <h3>Pick a chat to start replying</h3>
-                <p>
-                  Messages to {activeAcct?.label || 'this number'}
-                  {activeAcct?.phone ? ` (${fmtPhone(activeAcct.phone)})` : ''} arrive here as they come in. Your replies go out from this number.
-                </p>
-                {can('gateway') && (
+                <h3>{apiMode ? 'Chats of the API number' : 'Pick a chat to start replying'}</h3>
+                {apiMode ? (
+                  <p>
+                    Messages your software sent from the API number{activeAcct?.phone ? ` (${fmtPhone(activeAcct.phone)})` : ''}, and what customers wrote back. Only the super admin can see these chats.
+                  </p>
+                ) : (
+                  <p>
+                    Messages to {activeAcct?.label || 'this number'}
+                    {activeAcct?.phone ? ` (${fmtPhone(activeAcct.phone)})` : ''} arrive here as they come in. Your replies go out from this number.
+                  </p>
+                )}
+                {can('gateway') && !apiMode && (
                   <button className="wa-soft-btn" onClick={() => go?.('gateway')}>Manage numbers</button>
                 )}
               </div>
-              <div className="wa-quick">
+              {!apiMode && <div className="wa-quick">
                 {[['contacts', 'Contacts', Icon.users], ['templates', 'Templates', Icon.template], ['campaigns', 'Campaigns', Icon.megaphone]]
                   .filter(([page]) => can(page))
                   .map(([page, label, Ico]) => (
@@ -1017,7 +1045,7 @@ export default function Conversations({ go }) {
                     AI replies
                   </button>
                 )}
-              </div>
+              </div>}
             </div>
           ) : (
             <>
@@ -1066,7 +1094,7 @@ export default function Conversations({ go }) {
               ) : null}
               <div className="chat-msgs" ref={msgsRef} onScroll={onMsgsScroll}>
                 {thread.has_more ? <div className="chat-older"><span className="wa-spin" /> Loading older messages…</div> : null}
-                {!thread.has_more && thread.messages.length > 0 ? (
+                {!thread.has_more && thread.messages.length > 0 && !apiMode ? (
                   <div className="chat-older">
                     {phoneOlder === 'loading' ? (
                       <><span className="wa-spin" /> Getting older messages from your phone…</>

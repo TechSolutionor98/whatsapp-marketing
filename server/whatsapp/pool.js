@@ -1688,7 +1688,11 @@ async function ingestPool(accountId, { messages, type }) {
   // 'append' lost every message that arrived during a restart/reconnect.
   if (type !== 'notify' && type !== 'append') return;
   // Warm-up numbers are isolated — they only message each other and never show in Conversations.
-  if ((ctxOf(accountId)?.role || 'warmup') !== 'conversation') return;
+  // The Developer page's API number keeps its 1:1 chats (customers' replies to API messages)
+  // for the super admin's Conversations tab there — stored only, no AI reply or handoff.
+  const role = ctxOf(accountId)?.role || 'warmup';
+  if (role !== 'conversation' && role !== 'api') return;
+  const isApiNumber = role === 'api';
   const myPhone = ctxOf(accountId)?.me?.phone || null; // tag chats by the linked number
   for (const msg of messages) {
     try {
@@ -1747,8 +1751,8 @@ async function ingestPool(accountId, { messages, type }) {
       }
       const phone = isPn(pnJid) ? jidToPhone(pnJid) : null;
       if (!phone && !lidJid) continue;
-      // Warm-up numbers: skip chatter between our own numbers. Conversation numbers: keep everything.
-      const isConvAcct = (ctxOf(accountId)?.role || 'warmup') === 'conversation';
+      // Warm-up numbers: skip chatter between our own numbers. Conversation and API numbers: keep everything.
+      const isConvAcct = role === 'conversation' || isApiNumber;
       if (!isConvAcct && phone && ourPhones().has(phone)) continue;
 
       const contact = await upsertPoolChat({ phone, lid: lidJid, pushName: msg.key.fromMe ? '' : msg.pushName || '', ownerPhone: myPhone });
@@ -1776,8 +1780,9 @@ async function ingestPool(accountId, { messages, type }) {
       );
       if (!r.upsertedCount) continue; // already stored
       await db.contacts().updateOne({ _id: contact._id }, { $set: { last_inbound_at: nowIso() }, $inc: unreadInc(myPhone) });
-      if (type !== 'notify') {
-        // Caught-up offline message: show it, but don't fire auto-replies/handoffs for backlog.
+      if (type !== 'notify' || isApiNumber) {
+        // API number: just show it (no opt-out keywords, AI reply or handoff — only the super
+        // admin sees these chats). Caught-up offline message: no automation for backlog either.
         emit('message:in', { contactId: String(contact._id) });
         continue;
       }

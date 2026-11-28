@@ -3,6 +3,7 @@ import { api } from '../api.js';
 import { useApp } from '../store.jsx';
 import { Icon } from '../icons.jsx';
 import { Modal, Loading, Empty, timeAgo } from '../ui.jsx';
+import Conversations from './Conversations.jsx';
 
 // Two pages. Developer: the API number, its sending settings and the API keys. Developer Docs:
 // the POS receipt guide, the API reference and the request log. Software (a POS "Send on
@@ -13,6 +14,8 @@ const TABS = [
   ['number', 'Number & sending', 'phone'],
   ['keys', 'API keys', 'key'],
 ];
+// Only the super admin sees this tab: the API number's chats (the server refuses everyone else).
+const SUPER_TABS = [...TABS, ['chats', 'Conversations', 'chat']];
 const DOC_TABS = [
   ['pos', 'POS receipt button', 'receipt'],
   ['reference', 'API reference', 'book'],
@@ -1164,11 +1167,35 @@ function LogsTab() {
 
 // ---- Page ----
 
+// The API number's chats, for the super admin only.
+function ChatsTab({ data, setTab }) {
+  const n = data.api_number;
+  if (!n?.phone) {
+    return (
+      <div className="card">
+        <Empty icon="chat" title="No API number yet" action={<button className="btn primary" onClick={() => setTab('number')}><Icon.phone /> Open Number &amp; sending</button>}>
+          Link the API number first. Its chats will show here.
+        </Empty>
+      </div>
+    );
+  }
+  return (
+    <div className="dev-chats">
+      <div className="dev-chats-note">
+        <Icon.shield /> Only you (the super admin) can see this tab. It shows the chats of the API number +{n.phone}
+        {n.connected ? '' : ' — not connected right now, so new messages will show when it is back'}.
+      </div>
+      <Conversations apiNumber={n} />
+    </div>
+  );
+}
+
 export default function Developer() {
-  const { onBus } = useApp();
+  const { onBus, user } = useApp();
+  const isSuper = user?.role === 'owner';
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
-  const [tab, setTab] = useTab('developer', TABS);
+  const [tab, setTab] = useTab('developer', isSuper ? SUPER_TABS : TABS);
   const load = useCallback(async () => {
     try {
       setData(await api.get('/developer'));
@@ -1200,13 +1227,14 @@ export default function Developer() {
   if (!data) return <Loading />;
   return (
     <div className="dev-page">
-      <TabBar tabs={TABS} tab={tab} setTab={setTab} />
+      <TabBar tabs={isSuper ? SUPER_TABS : TABS} tab={tab} setTab={setTab} />
       {tab === 'number' && <NumberTab data={data} reload={load} />}
       {tab === 'keys' && <KeysTab data={data} reload={load} setTab={setTab} />}
-      <div className="dev-docs-link">
+      {tab === 'chats' && isSuper && <ChatsTab data={data} setTab={setTab} />}
+      {tab !== 'chats' && <div className="dev-docs-link">
         <Icon.book /> Need help connecting? The setup guide, the API reference and the request log are in{' '}
         <button className="link-btn" onClick={() => openOn('devdocs', 'pos')}>Developer Docs</button>.
-      </div>
+      </div>}
     </div>
   );
 }

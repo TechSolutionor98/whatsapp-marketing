@@ -9,13 +9,33 @@ import { poolState, sendJidFrom, chatJidOf, isAccountConnected, startPoolAccount
 import { markDeleted } from '../receipts.js';
 import { accountGroup, tabPhone, listNumbers, hasMain } from '../numbers.js';
 import { canLinkNumber } from '../limits.js';
-import { accountKind } from '../whatsapp/pool.js';
+import { accountKind, accountRole } from '../whatsapp/pool.js';
 import { connectCloudNumber, updateCloudNumber, cloudDetails, templatesFor, downloadCloudStored, replyWindowOpen } from '../whatsapp/cloud.js';
 
 const MEDIA_DIR = path.join(DATA_DIR, 'media_cache');
 const mediaInflight = new Map(); // one download per file even if the page asks twice
 
 export const conversations = Router();
+
+// The Developer page's API number: its chats show only in the super admin's Conversations tab
+// there. Anyone else asking for that number (?account= / body.account / /accounts/:id) is refused.
+async function isApiNumber(account) {
+  if (!account || account === 'main') return false;
+  if (accountRole(account) === 'api') return true;
+  const _id = oid(account);
+  return !!_id && (await db.warmupAccounts().countDocuments({ _id, role: 'api' }, { limit: 1 })) > 0;
+}
+conversations.use(async (req, res, next) => {
+  const account = String(req.query?.account || req.body?.account || req.path.match(/^\/accounts\/([^/]+)/)?.[1] || '');
+  try {
+    if (req.user?.role !== 'owner' && (await isApiNumber(account))) {
+      return res.status(403).json({ error: "Only the super admin can see the API number's chats" });
+    }
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+  next();
+});
 
 // What to call a chat in a given number's tab, like WhatsApp: a group's subject; else the name
 // saved in THIS number's address book; else a name given in this app (imports/edits). People
