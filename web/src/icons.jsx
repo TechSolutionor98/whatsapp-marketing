@@ -299,6 +299,21 @@ export const Icon = {
       <path d="M4 19.5A2.5 2.5 0 006.5 22H20v-5" />
     </S>
   ),
+  bot: (p) => (
+    <S {...p}>
+      <rect x="4" y="8" width="16" height="12" rx="3" />
+      <path d="M12 8V4M9 4h6" />
+      <circle cx="9" cy="14" r="1.2" />
+      <circle cx="15" cy="14" r="1.2" />
+      <path d="M2 13v2M22 13v2" />
+    </S>
+  ),
+  globe: (p) => (
+    <S {...p}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18" />
+    </S>
+  ),
   receipt: (p) => (
     <S {...p}>
       <path d="M5 3h14v18l-2.5-1.5L14 21l-2-1.5L10 21l-2.5-1.5L5 21V3z" />

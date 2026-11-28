@@ -118,6 +118,14 @@ async function ensureIndexes() {
   await col('messages').createIndex({ ws: 1, api_ref: 1, created_at: -1 }, { partialFilterExpression: { api_ref: { $type: 'string' } } });
   await col('warmup_log').createIndex({ day_key: 1 });
   await col('warmup_log').createIndex({ created_at: -1 });
+  // AI Agents: the website widget finds its agent by the public id; a visitor's chat by the
+  // hash of its session token; chats go 90 days after their last message.
+  await col('agents').createIndex({ pub_id: 1 }, { unique: true });
+  await col('agents').createIndex({ ws: 1, created_at: 1 });
+  await col('agent_chats').createIndex({ session_hash: 1 }, { unique: true });
+  await col('agent_chats').createIndex({ ws: 1, last_at: -1 });
+  await col('agent_chats').createIndex({ ws: 1, agent_id: 1, last_at: -1 });
+  await col('agent_chats').createIndex({ expire_at: 1 }, { expireAfterSeconds: 0 });
 }
 
 // Seed/ensure the superadmin (owner) account from SUPERADMIN_* env vars.
@@ -150,6 +158,7 @@ export function isMongoUp() {
 export const TENANT_COLLECTIONS = [
   'contacts', 'lists', 'templates', 'campaigns', 'campaign_targets', 'messages',
   'audit_logs', 'warmup_accounts', 'warmup_log', 'catalogs', 'products', 'api_keys', 'api_logs',
+  'agents', 'agent_chats',
 ];
 
 // One-time move to workspaces: everything that existed before belongs to the default
@@ -306,6 +315,8 @@ export const db = {
   catalogs: () => scoped('catalogs'), // product catalogs: API-synced or manual
   apiKeys: () => scoped('api_keys'), // Developer page: keys software uses to send (developer.js)
   apiLogs: () => scoped('api_logs'), // Developer page: recent API requests
+  agents: () => scoped('agents'), // AI Agents page: website chat assistants (agents.js)
+  agentChats: () => scoped('agent_chats'), // website visitors' chats with an agent
 };
 
 // Kept for routes/auth.js which imports `users`.

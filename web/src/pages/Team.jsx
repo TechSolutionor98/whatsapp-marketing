@@ -14,6 +14,7 @@ export const PAGE_LIST = [
   ['campaigns', 'Campaigns', 'Create, start and pause campaigns'],
   ['warmup', 'Warmup', 'Number warm-up'],
   ['conversations', 'Conversations', 'Read and answer chats'],
+  ['agents', 'AI Agents', 'AI chat for the website, and its chats'],
   ['gateway', 'WhatsApp Gateway', 'Link and unlink numbers'],
   ['developer', 'Developer', 'API number, keys and Developer Docs'],
   ['audit', 'Audit Logs', 'See what happened'],

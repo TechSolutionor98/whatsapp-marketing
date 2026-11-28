@@ -62,6 +62,7 @@ export function subscribe(onEvent) {
     'warmup:update',
     'message:status',
     'admin:update',
+    'agent:chat',
   ];
   for (const ev of events) {
     es.addEventListener(ev, (e) => {

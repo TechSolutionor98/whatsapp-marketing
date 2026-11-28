@@ -17,6 +17,7 @@ import Authentication from './pages/Authentication.jsx';
 import SuperAdmin from './pages/SuperAdmin.jsx';
 import Team from './pages/Team.jsx';
 import Developer, { DeveloperDocs } from './pages/Developer.jsx';
+import Agents from './pages/Agents.jsx';
 
 const NAV = [
   { id: 'overview', label: 'Overview', icon: 'grid', group: 'Operations' },
@@ -25,6 +26,8 @@ const NAV = [
   { id: 'campaigns', label: 'Campaigns', icon: 'megaphone', group: 'Operations' },
   { id: 'warmup', label: 'Warmup', icon: 'flame', group: 'Operations' },
   { id: 'conversations', label: 'Conversations', icon: 'chat', group: 'Operations' },
+  // AI chat assistants for the business's own website (and the guide to add one).
+  { id: 'agents', label: 'AI Agents', icon: 'bot', group: 'AI' },
   { id: 'gateway', label: 'WhatsApp Gateway', icon: 'gateway', group: 'System' },
   { id: 'audit', label: 'Audit Logs', icon: 'logs', group: 'System' },
   { id: 'settings', label: 'Settings', icon: 'settings', group: 'System' },
@@ -44,6 +47,7 @@ const PAGES = {
   campaigns: Campaigns,
   warmup: Warmup,
   conversations: Conversations,
+  agents: Agents,
   gateway: Gateway,
   developer: Developer,
   devdocs: DeveloperDocs,
@@ -61,6 +65,7 @@ const TITLES = {
   campaigns: ['Campaigns', 'Paced, window-aware outreach runs'],
   warmup: ['Number Warmup', 'Build organic activity before cold outreach'],
   conversations: ['Conversations', 'Replies and human handoffs'],
+  agents: ['AI Agents', 'An AI assistant on your website that knows your products'],
   gateway: ['WhatsApp Gateway', 'Link, unlink and choose your default number'],
   developer: ['Developer', 'Let your website, POS or app send WhatsApp messages'],
   devdocs: ['Developer Docs', 'The POS receipt guide, the API reference and every API request'],

@@ -25,6 +25,7 @@ const PAGE_LIST = [
   ['campaigns', 'Campaigns'],
   ['warmup', 'Warmup'],
   ['conversations', 'Conversations'],
+  ['agents', 'AI Agents'],
   ['gateway', 'WhatsApp Gateway'],
   ['developer', 'Developer + Docs'],
   ['audit', 'Audit Logs'],

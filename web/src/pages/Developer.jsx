@@ -61,7 +61,7 @@ function useTab(page, tabs) {
   };
   return [tab, setTab];
 }
-function TabBar({ tabs, tab, setTab }) {
+export function TabBar({ tabs, tab, setTab }) {
   return (
     <div className="sa-tabs" role="tablist">
       {tabs.map(([id, label, icon]) => {
@@ -88,7 +88,7 @@ const fromNow = (iso) => {
 };
 const secs = (n) => (n < 60 ? `${n} second${n === 1 ? '' : 's'}` : n % 60 === 0 ? `${n / 60} minute${n === 60 ? '' : 's'}` : `${Math.floor(n / 60)} min ${n % 60} s`);
 
-function useCopy() {
+export function useCopy() {
   const { toast } = useApp();
   return async (text, what = 'Text') => {
     try {
@@ -100,7 +100,7 @@ function useCopy() {
   };
 }
 
-function CopyLine({ label, value, mono = true }) {
+export function CopyLine({ label, value, mono = true }) {
   const copy = useCopy();
   return (
     <div className="field">
@@ -113,7 +113,7 @@ function CopyLine({ label, value, mono = true }) {
   );
 }
 
-function CodeBlock({ code, label }) {
+export function CodeBlock({ code, label }) {
   const copy = useCopy();
   return (
     <div className="dev-code">
